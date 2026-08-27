@@ -1,0 +1,1546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plex-Ops Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242736;
+    --border: #2e3144;
+    --text: #e1e3ea;
+    --text-dim: #8b8fa3;
+    --accent: #6c63ff;
+    --accent-dim: #4a43c4;
+    --green: #34d399;
+    --yellow: #fbbf24;
+    --orange: #f97316;
+    --red: #ef4444;
+    --radius: 10px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  header h1 span { color: var(--accent); }
+
+  header .status {
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  header .status .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  nav {
+    display: flex;
+    gap: 0;
+    padding: 0 32px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+
+  nav button {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    padding: 14px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+
+  nav button:hover { color: var(--text); }
+  nav button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+
+  .tab { display: none; }
+  .tab.active { display: block; }
+
+  /* Cards */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+
+  .card .label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .card .value {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -1px;
+  }
+
+  .card .sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  /* Library table */
+  .lib-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 28px;
+  }
+
+  .lib-table th, .lib-table td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .lib-table th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .lib-table tr:hover td { background: var(--surface2); }
+
+  /* Chart */
+  .chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 28px;
+  }
+
+  .chart-container h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 20px;
+  }
+
+  .bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    height: 200px;
+  }
+
+  .bar-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+  }
+
+  .bar {
+    width: 100%;
+    max-width: 80px;
+    border-radius: 4px 4px 0 0;
+    transition: height 0.5s ease;
+    min-height: 2px;
+  }
+
+  .bar-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 8px;
+  }
+
+  .bar-value {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  /* Filters */
+  .filters {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .filters select, .filters input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .filters select:focus, .filters input:focus {
+    border-color: var(--accent);
+  }
+
+  .filters label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-right: -6px;
+  }
+
+  /* Upgrade groups */
+  .group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+
+  .group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+  }
+
+  .group-header:hover { background: var(--surface2); }
+
+  .group-title {
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  .group-meta {
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .group-files {
+    display: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .group.open .group-files { display: block; }
+
+  .file-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 120px 100px 160px;
+    gap: 8px;
+    padding: 10px 18px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+
+  .file-row:last-child { border-bottom: none; }
+
+  .file-row .score-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .file-row .filename {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+
+  .file-row .reason {
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
+  /* Score colors */
+  .score-critical { background: rgba(239,68,68,0.15); color: var(--red); }
+  .score-bad { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .score-warn { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .score-ok { background: rgba(52,211,153,0.15); color: var(--green); }
+
+  /* Gap sections */
+  .gap-section {
+    margin-bottom: 28px;
+  }
+
+  .gap-section h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .gap-section h3 .count {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    background: var(--surface2);
+    padding: 2px 10px;
+    border-radius: 20px;
+  }
+
+  .gap-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+
+  .gap-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .gap-group-header:hover { background: var(--surface2); }
+
+  .gap-group-title {
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  .gap-group-title .tmdb {
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 8px;
+  }
+
+  .gap-detail {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 12px 18px;
+    font-size: 13px;
+  }
+
+  .gap-group.open .gap-detail { display: block; }
+
+  .gap-detail .season-block { margin-bottom: 10px; }
+
+  .gap-detail .season-label {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+
+  .gap-detail .episode-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .gap-detail .ep-chip {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .gap-detail .missing-season-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .gap-detail .season-tag {
+    background: rgba(239,68,68,0.12);
+    color: var(--red);
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .gap-detail .franchise-entry {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .gap-detail .franchise-entry:last-child { border-bottom: none; }
+
+  .gap-detail .alt-version {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .gap-detail .alt-version:last-child { border-bottom: none; }
+
+  .tmdb-link {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 11px;
+  }
+
+  .tmdb-link:hover { text-decoration: underline; }
+
+  /* Wanted list */
+  .wanted-banner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 18px;
+    font-size: 13px;
+  }
+
+  .wanted-banner strong { display: block; margin-bottom: 3px; font-size: 14px; }
+  .wanted-banner span { color: var(--text-dim); }
+  .wanted-banner.found { border-left-color: var(--green); }
+  .wanted-banner.added { border-left-color: var(--accent); }
+  .wanted-banner.known { border-left-color: var(--yellow); }
+  .wanted-banner.error { border-left-color: var(--red); }
+
+  .wanted-match {
+    display: flex;
+    gap: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .wanted-match img {
+    width: 74px;
+    height: 111px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: var(--surface2);
+    flex: none;
+  }
+
+  .wanted-match h4 { margin: 0 0 4px; font-size: 14px; }
+  .wanted-match .meta { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .wanted-match .libs { font-size: 12px; color: var(--accent); margin-bottom: 6px; }
+  .wanted-match .summary {
+    font-size: 12px;
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .wanted-status {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    text-transform: capitalize;
+  }
+
+  .wanted-status.acquired { color: var(--green); border-color: var(--green); }
+  .wanted-status.dismissed { color: var(--text-dim); }
+  .wanted-status.wanted { color: var(--accent); border-color: var(--accent); }
+  .queue-table tr.now-in-plex td { background: rgba(80, 200, 120, 0.10); }
+
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  .loading {
+    text-align: center;
+    padding: 60px;
+    color: var(--text-dim);
+  }
+
+  .loading::after {
+    content: '';
+    display: inline-block;
+    width: 18px; height: 18px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-left: 10px;
+    vertical-align: middle;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Poster coverage bars */
+  .coverage-row {
+    display: grid;
+    grid-template-columns: 160px 1fr 80px;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .coverage-row:last-child { border-bottom: none; }
+
+  .coverage-row .lib-name { font-weight: 600; }
+
+  .coverage-bar-track {
+    height: 22px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    position: relative;
+  }
+
+  .coverage-bar-seg {
+    height: 100%;
+    transition: width 0.4s ease;
+    position: relative;
+  }
+
+  .coverage-bar-seg.curated { background: var(--green); }
+  .coverage-bar-seg.tmdb { background: var(--accent); }
+  .coverage-bar-seg.uncurated { background: var(--surface2); }
+
+  .coverage-pct {
+    font-weight: 700;
+    font-size: 13px;
+    text-align: right;
+  }
+
+  .coverage-legend {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .coverage-legend .swatch {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+
+  .queue-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .queue-table th, .queue-table td {
+    text-align: left;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .queue-table th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .queue-table tr:hover td { background: var(--surface2); }
+
+  .orphan-item {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-dim);
+    word-break: break-all;
+  }
+
+  .orphan-item:last-child { border-bottom: none; }
+
+  .poster-section {
+    margin-bottom: 28px;
+  }
+
+  .poster-section h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .poster-section h3 .count {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    background: var(--surface2);
+    padding: 2px 10px;
+    border-radius: 20px;
+  }
+
+  .poster-stat-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  /* Export tab */
+  .export-section { margin-bottom: 28px; }
+
+  .export-section h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 14px;
+  }
+
+  .export-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+
+  .export-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+  }
+
+  .export-group-header:hover { background: var(--surface2); }
+
+  .export-group-header .left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .export-group-header .left input[type="checkbox"] {
+    width: 16px; height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .export-group-header .cat-label {
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  .export-group-header .cat-count {
+    font-size: 12px;
+    color: var(--text-dim);
+    background: var(--surface2);
+    padding: 2px 10px;
+    border-radius: 20px;
+  }
+
+  .export-group-header .right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .copy-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .copy-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .copy-btn.copied { background: var(--green); color: #fff; border-color: var(--green); }
+
+  .export-terms {
+    display: none;
+    border-top: 1px solid var(--border);
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .export-group.open .export-terms { display: block; }
+
+  .export-term-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 18px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .export-term-row:last-child { border-bottom: none; }
+
+  .export-term-row .term-text {
+    font-weight: 500;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+  }
+
+  .export-term-row .term-detail {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 12px;
+  }
+
+  .download-btn {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .download-btn:hover { background: var(--accent-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>Plex</span>-Ops</h1>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Connecting...</span></div>
+</header>
+
+<nav>
+  <button class="active" data-tab="overview">Overview</button>
+  <button data-tab="upgrades">Upgrade Priority</button>
+  <button data-tab="gaps">Gaps</button>
+  <button data-tab="posters">Poster Status</button>
+  <button data-tab="wanted">Wanted</button>
+  <button data-tab="export">Export</button>
+  <a href="/request" target="_blank" rel="noopener"
+     style="margin-left:auto;align-self:center;padding:6px 14px;font-size:13px;color:var(--accent);text-decoration:none">Requests ↗</a>
+</nav>
+
+<main>
+  <!-- Overview Tab -->
+  <div class="tab active" id="tab-overview">
+    <div class="cards" id="summaryCards"><div class="loading">Loading summary</div></div>
+    <div class="chart-container">
+      <h3>Quality Score Distribution</h3>
+      <div class="bar-chart" id="distChart"><div class="loading">Loading</div></div>
+    </div>
+    <div class="card" style="margin-bottom:28px">
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:14px">Library Breakdown</h3>
+      <table class="lib-table" id="libTable">
+        <thead><tr><th>Library</th><th>Files</th><th>With Issues</th><th>Avg Score</th><th>Worst</th></tr></thead>
+        <tbody><tr><td colspan="5" class="loading">Loading</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Upgrades Tab -->
+  <div class="tab" id="tab-upgrades">
+    <div class="filters" id="upgradeFilters">
+      <label>Library</label>
+      <select id="upLib"><option value="">All</option></select>
+      <label>Max Score</label>
+      <select id="upMaxScore">
+        <option value="100">All</option>
+        <option value="70" selected>70 and below</option>
+        <option value="50">50 and below</option>
+        <option value="30">30 and below</option>
+      </select>
+      <label>Issue</label>
+      <select id="upIssue">
+        <option value="">All</option>
+        <option value="old_video_codec">Old Codec</option>
+        <option value="bad_container">Bad Container</option>
+        <option value="low_bitrate_1080p">Low Bitrate 1080p</option>
+        <option value="low_bitrate_720p">Low Bitrate 720p</option>
+        <option value="stereo_only">Stereo Only</option>
+        <option value="low_resolution">Low Resolution</option>
+        <option value="legacy_codec_tag">Legacy Encoder</option>
+      </select>
+    </div>
+    <div id="upgradeList"><div class="loading">Loading upgrades</div></div>
+  </div>
+
+  <!-- Gaps Tab -->
+  <div class="tab" id="tab-gaps">
+    <div class="filters">
+      <label>Library</label>
+      <select id="gapLib"><option value="">All</option></select>
+      <label>Search</label>
+      <input type="text" id="gapSearch" placeholder="Filter by title..." style="width:220px">
+    </div>
+    <div id="gapContent"><div class="loading">Loading gaps</div></div>
+  </div>
+
+  <!-- Poster Status Tab -->
+  <div class="tab" id="tab-posters">
+    <div class="filters">
+      <label>Library</label>
+      <select id="posterLib"><option value="">All</option></select>
+    </div>
+    <div id="posterContent"><div class="loading">Loading poster status</div></div>
+  </div>
+
+  <!-- Wanted Tab -->
+  <div class="tab" id="tab-wanted">
+    <div class="filters">
+      <label>Title</label>
+      <input type="text" id="wantedQuery" placeholder="e.g. Anchorman, or Chef (2014)" style="width:280px">
+      <button class="copy-btn" onclick="runWantedSearch()">Search Plex</button>
+      <label>Show</label>
+      <select id="wantedStatus">
+        <option value="wanted">Wanted</option>
+        <option value="acquired">Acquired</option>
+        <option value="dismissed">Dismissed</option>
+        <option value="all">All</option>
+      </select>
+      <button class="copy-btn" onclick="recheckWanted()">Recheck against Plex</button>
+      <button class="download-btn" onclick="window.open(API + '/wanted/export','_blank')">Export as text</button>
+    </div>
+    <div id="wantedSearchResult"></div>
+    <div id="wantedContent"><div class="loading">Loading wanted list</div></div>
+  </div>
+
+  <!-- Export Tab -->
+  <div class="tab" id="tab-export">
+    <div class="filters">
+      <label>Library</label>
+      <select id="exportLib"><option value="">All</option></select>
+      <button class="download-btn" id="exportDownloadBtn" onclick="downloadSelected()">Download Selected</button>
+      <span id="exportTotal" style="font-size:13px;color:var(--text-dim);margin-left:auto"></span>
+    </div>
+    <div id="exportContent"><div class="loading">Loading export data</div></div>
+  </div>
+</main>
+
+<script>
+const API = window.location.origin;
+
+// Tab switching
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+function scoreClass(s) {
+  if (s <= 30) return 'score-critical';
+  if (s <= 50) return 'score-bad';
+  if (s <= 70) return 'score-warn';
+  return 'score-ok';
+}
+
+function barColor(range) {
+  const map = {'0-20':'var(--red)','21-40':'var(--orange)','41-60':'var(--orange)',
+    '61-70':'var(--yellow)','71-80':'var(--yellow)','81-90':'var(--green)','91-100':'var(--green)'};
+  return map[range] || 'var(--accent)';
+}
+
+function tmdbUrl(id, type) {
+  type = type || 'movie';
+  return `https://www.themoviedb.org/${type}/${id}`;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ---- Overview ----
+async function loadOverview() {
+  try {
+    const res = await fetch(API + '/summary');
+    const d = await res.json();
+
+    document.getElementById('statusDot').style.background = 'var(--green)';
+    document.getElementById('statusText').textContent = `Connected \u2014 ${d.total_files.toLocaleString()} files tracked`;
+
+    // Summary cards
+    document.getElementById('summaryCards').innerHTML = `
+      <div class="card"><div class="label">Total Files</div><div class="value">${d.total_files.toLocaleString()}</div></div>
+      <div class="card"><div class="label">Avg Quality Score</div><div class="value">${d.avg_score}</div><div class="sub">out of 100</div></div>
+      <div class="card"><div class="label">Files With Issues</div><div class="value">${d.files_with_issues.toLocaleString()}</div><div class="sub">${Math.round(d.files_with_issues/d.total_files*100)}% of library</div></div>
+      <div class="card"><div class="label">TV Episode Gaps</div><div class="value">${d.tv_gaps}</div></div>
+      <div class="card"><div class="label">Franchise Gaps</div><div class="value">${d.franchise_gaps}</div></div>
+      <div class="card"><div class="label">Alternate Versions</div><div class="value">${d.alt_versions}</div></div>
+    `;
+
+    // Distribution chart
+    const maxCount = Math.max(...d.distribution.map(b => b.count));
+    document.getElementById('distChart').innerHTML = d.distribution.map(b => `
+      <div class="bar-col">
+        <div class="bar-value">${b.count.toLocaleString()}</div>
+        <div class="bar" style="height:${Math.max(2, b.count/maxCount*170)}px;background:${barColor(b.range)}"></div>
+        <div class="bar-label">${b.range}</div>
+      </div>
+    `).join('');
+
+    // Library table
+    const libs = d.by_library;
+    const tbody = document.querySelector('#libTable tbody');
+    tbody.innerHTML = libs.map(l => `
+      <tr>
+        <td style="font-weight:600">${esc(l.library)}</td>
+        <td>${l.total.toLocaleString()}</td>
+        <td>${l.with_issues.toLocaleString()}</td>
+        <td>${l.avg_score}</td>
+        <td><span class="score-badge ${scoreClass(l.worst_score)}">${l.worst_score}</span></td>
+      </tr>
+    `).join('');
+
+    // Populate library filters
+    const libOptions = libs.map(l => `<option value="${esc(l.library)}">${esc(l.library)}</option>`).join('');
+    document.getElementById('upLib').innerHTML = '<option value="">All</option>' + libOptions;
+    document.getElementById('gapLib').innerHTML = '<option value="">All</option>' + libOptions;
+    document.getElementById('posterLib').innerHTML = '<option value="">All</option>' + libOptions;
+    document.getElementById('exportLib').innerHTML = '<option value="">All</option>' + libOptions;
+
+  } catch(e) {
+    document.getElementById('statusDot').style.background = 'var(--red)';
+    document.getElementById('statusText').textContent = 'API unreachable';
+    console.error(e);
+  }
+}
+
+// ---- Upgrades ----
+let upgradeData = [];
+
+async function loadUpgrades() {
+  const lib = document.getElementById('upLib').value;
+  const maxScore = document.getElementById('upMaxScore').value;
+  const issue = document.getElementById('upIssue').value;
+
+  const params = new URLSearchParams();
+  params.set('max_score', maxScore);
+  params.set('limit', '2000');
+  if (lib) params.set('library', lib);
+  if (issue) params.set('issue', issue);
+
+  document.getElementById('upgradeList').innerHTML = '<div class="loading">Loading upgrades</div>';
+
+  const res = await fetch(API + '/reports/upgrades?' + params);
+  upgradeData = await res.json();
+
+  renderUpgrades('');
+}
+
+function renderUpgrades(issueFilter) {
+  let data = upgradeData;
+  if (issueFilter) {
+    data = data.map(g => {
+      const filtered = g.files.filter(f => f.issues_raw && f.issues_raw.includes(issueFilter));
+      if (!filtered.length) return null;
+      return {...g, files: filtered, file_count: filtered.length};
+    }).filter(Boolean);
+  }
+
+  if (!data.length) {
+    document.getElementById('upgradeList').innerHTML = '<div class="empty-state">No files match these filters</div>';
+    return;
+  }
+
+  document.getElementById('upgradeList').innerHTML = data.map((g, i) => `
+    <div class="group" id="ug-${i}">
+      <div class="group-header" onclick="this.parentElement.classList.toggle('open')">
+        <div>
+          <span class="group-title">${esc(g.title)}</span>
+          <span style="font-size:12px;color:var(--text-dim);margin-left:10px">${esc(g.library)}</span>
+        </div>
+        <div class="group-meta">
+          <span>${g.file_count} file${g.file_count > 1 ? 's' : ''}</span>
+          <span class="score-badge ${scoreClass(g.worst_score)}">${g.worst_score}</span>
+        </div>
+      </div>
+      <div class="group-files">
+        ${g.files.map(f => `
+          <div class="file-row">
+            <span class="score-badge ${scoreClass(f.score)}">${f.score}</span>
+            <span class="filename" title="${esc(f.path)}">${esc(f.file)}</span>
+            <span>${esc(f.resolution || '?')}</span>
+            <span>${esc(f.video_codec || '?')} / ${esc(f.audio_codec || '?')} ${f.audio_channels || '?'}ch</span>
+            <span class="reason">${esc(f.reason || '')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+document.getElementById('upLib').addEventListener('change', loadUpgrades);
+document.getElementById('upMaxScore').addEventListener('change', loadUpgrades);
+document.getElementById('upIssue').addEventListener('change', () => {
+  const issue = document.getElementById('upIssue').value;
+  if (issue && document.getElementById('upMaxScore').value !== '100') {
+    document.getElementById('upMaxScore').value = '100';
+  }
+  loadUpgrades();
+});
+
+// ---- Gaps ----
+let gapData = {};
+
+async function loadGaps() {
+  const lib = document.getElementById('gapLib').value;
+  const params = new URLSearchParams();
+  if (lib) params.set('library', lib);
+  params.set('limit', '500');
+
+  document.getElementById('gapContent').innerHTML = '<div class="loading">Loading gaps</div>';
+  const res = await fetch(API + '/reports/gaps?' + params);
+  gapData = await res.json();
+  renderGaps('');
+}
+
+function renderGaps(search) {
+  const s = search.toLowerCase();
+  let html = '';
+
+  // TV Gaps
+  if (gapData.tv_gaps) {
+    const tv = s ? gapData.tv_gaps.filter(g => g.title.toLowerCase().includes(s)) : gapData.tv_gaps;
+    html += `<div class="gap-section"><h3>Missing Episodes & Seasons <span class="count">${tv.length} shows</span></h3>`;
+    if (!tv.length) {
+      html += '<div class="empty-state">No TV gaps found</div>';
+    } else {
+      html += tv.map((show, i) => {
+        const tmdb = show.tmdb_id ? `<a class="tmdb-link" href="${tmdbUrl(show.tmdb_id, 'tv')}" target="_blank">tmdb:${show.tmdb_id}</a>` : '';
+        let detail = '';
+
+        if (show.missing_seasons.length) {
+          detail += '<div style="margin-bottom:8px"><span class="season-label">Missing Seasons</span></div><div class="missing-season-tags">';
+          detail += show.missing_seasons.map(ms => `<span class="season-tag">S${String(ms.season).padStart(2,'0')}</span>`).join('');
+          detail += '</div>';
+        }
+
+        const epBySeason = {};
+        show.missing_episodes.forEach(e => {
+          if (!epBySeason[e.season]) epBySeason[e.season] = [];
+          epBySeason[e.season].push(e);
+        });
+
+        Object.keys(epBySeason).sort((a,b)=>a-b).forEach(sn => {
+          detail += `<div class="season-block"><div class="season-label">Season ${sn} \u2014 Missing Episodes</div><div class="episode-list">`;
+          detail += epBySeason[sn].map(e =>
+            `<span class="ep-chip" title="${esc(e.episode_title || '')}">E${String(e.episode).padStart(2,'0')} ${esc(e.episode_title || '')}</span>`
+          ).join('');
+          detail += '</div></div>';
+        });
+
+        return `<div class="gap-group" id="tg-${i}">
+          <div class="gap-group-header" onclick="this.parentElement.classList.toggle('open')">
+            <div><span class="gap-group-title">${esc(show.title)}<span class="tmdb">${tmdb}</span></span></div>
+            <div class="group-meta">
+              <span>${esc(show.library)}</span>
+              <span style="color:var(--red);font-weight:600">${show.total_missing} missing</span>
+            </div>
+          </div>
+          <div class="gap-detail">${detail}</div>
+        </div>`;
+      }).join('');
+    }
+    html += '</div>';
+  }
+
+  // Franchise Gaps
+  if (gapData.franchise_gaps) {
+    const fr = s ? gapData.franchise_gaps.filter(g => g.collection.toLowerCase().includes(s) || g.missing_entries.some(e => e.title.toLowerCase().includes(s))) : gapData.franchise_gaps;
+    html += `<div class="gap-section"><h3>Franchise Gaps <span class="count">${fr.length} collections</span></h3>`;
+    if (!fr.length) {
+      html += '<div class="empty-state">No franchise gaps found</div>';
+    } else {
+      html += fr.map((coll, i) => {
+        const detail = coll.missing_entries.map(e => {
+          const link = e.tmdb_id ? `<a class="tmdb-link" href="${tmdbUrl(e.tmdb_id, 'movie')}" target="_blank">tmdb:${e.tmdb_id}</a>` : '';
+          return `<div class="franchise-entry"><span>${esc(e.title)} ${link}</span><span style="color:var(--text-dim)">${esc(e.release_date || 'TBA')}</span></div>`;
+        }).join('');
+
+        return `<div class="gap-group" id="fg-${i}">
+          <div class="gap-group-header" onclick="this.parentElement.classList.toggle('open')">
+            <div><span class="gap-group-title">${esc(coll.collection)}</span></div>
+            <div class="group-meta">
+              <span>${esc(coll.library || '')}</span>
+              <span style="color:var(--orange);font-weight:600">${coll.missing_count} missing</span>
+            </div>
+          </div>
+          <div class="gap-detail">${detail}</div>
+        </div>`;
+      }).join('');
+    }
+    html += '</div>';
+  }
+
+  // Alternate Versions
+  if (gapData.alternate_versions) {
+    const alt = s ? gapData.alternate_versions.filter(g => g.title.toLowerCase().includes(s)) : gapData.alternate_versions;
+    html += `<div class="gap-section"><h3>Alternate Versions Available <span class="count">${alt.length} movies</span></h3>`;
+    if (!alt.length) {
+      html += '<div class="empty-state">No alternate versions found</div>';
+    } else {
+      html += alt.map((m, i) => {
+        const tmdb = m.tmdb_id ? `<a class="tmdb-link" href="${tmdbUrl(m.tmdb_id, 'movie')}" target="_blank">tmdb:${m.tmdb_id}</a>` : '';
+        const detail = m.versions.map(v => `<div class="alt-version">${esc(v.detail)}</div>`).join('');
+
+        return `<div class="gap-group" id="ag-${i}">
+          <div class="gap-group-header" onclick="this.parentElement.classList.toggle('open')">
+            <div><span class="gap-group-title">${esc(m.title)}<span class="tmdb">${tmdb}</span></span></div>
+            <div class="group-meta"><span>${m.versions.length} version${m.versions.length > 1 ? 's' : ''}</span></div>
+          </div>
+          <div class="gap-detail">${detail}</div>
+        </div>`;
+      }).join('');
+    }
+    html += '</div>';
+  }
+
+  document.getElementById('gapContent').innerHTML = html || '<div class="empty-state">No gaps data available</div>';
+}
+
+document.getElementById('gapLib').addEventListener('change', loadGaps);
+document.getElementById('gapSearch').addEventListener('input', e => renderGaps(e.target.value));
+
+// ---- Poster Status ----
+let posterData = {};
+
+async function loadPosters() {
+  const lib = document.getElementById('posterLib').value;
+  const params = new URLSearchParams();
+  if (lib) params.set('library', lib);
+
+  document.getElementById('posterContent').innerHTML = '<div class="loading">Loading poster status</div>';
+
+  try {
+    const res = await fetch(API + '/reports/posters?' + params);
+    posterData = await res.json();
+    renderPosters();
+  } catch(e) {
+    document.getElementById('posterContent').innerHTML = '<div class="empty-state">Failed to load poster data. Run POST /posters/scan first.</div>';
+  }
+}
+
+function renderPosters() {
+  const d = posterData;
+  if (!d.coverage || !d.coverage.length) {
+    document.getElementById('posterContent').innerHTML = '<div class="empty-state">No poster data available. Run a poster scan first (POST /posters/scan).</div>';
+    return;
+  }
+
+  let html = '';
+
+  // Summary cards
+  html += '<div class="poster-stat-cards">';
+  html += `<div class="card"><div class="label">Total Items</div><div class="value">${(d.overall.total || 0).toLocaleString()}</div></div>`;
+  html += `<div class="card"><div class="label">Overall Coverage</div><div class="value">${d.overall.coverage_pct}%</div><div class="sub">${(d.overall.covered || 0).toLocaleString()} of ${(d.overall.total || 0).toLocaleString()} covered</div></div>`;
+  html += `<div class="card"><div class="label">Uncurated Queue</div><div class="value">${(d.total_uncurated || 0).toLocaleString()}</div><div class="sub">items needing posters</div></div>`;
+  html += `<div class="card"><div class="label">Orphaned Files</div><div class="value">${d.orphan_count || 0}</div></div>`;
+  html += `<div class="card"><div class="label">Needs Re-lock</div><div class="value">${d.needs_relock || 0}</div><div class="sub">locks lost since last check</div></div>`;
+  html += '</div>';
+
+  // Coverage bars
+  html += '<div class="poster-section"><h3>Coverage by Library</h3>';
+  html += '<div class="coverage-legend">';
+  html += '<span><span class="swatch" style="background:var(--green)"></span>Curated</span>';
+  html += '<span><span class="swatch" style="background:var(--accent)"></span>TMDb Default</span>';
+  html += '<span><span class="swatch" style="background:var(--surface2);border:1px solid var(--border)"></span>Uncurated</span>';
+  html += '</div>';
+  html += '<div class="card" style="padding:18px 24px">';
+  d.coverage.forEach(lib => {
+    const curPct = lib.total ? (lib.curated / lib.total * 100) : 0;
+    const tmdbPct = lib.total ? (lib.tmdb_default / lib.total * 100) : 0;
+    const tooltip = `Curated: ${lib.curated} | TMDb: ${lib.tmdb_default} | Uncurated: ${lib.uncurated}`;
+    html += `<div class="coverage-row">
+      <span class="lib-name">${esc(lib.library)}</span>
+      <div class="coverage-bar-track" title="${tooltip}">
+        <div class="coverage-bar-seg curated" style="width:${curPct}%"></div>
+        <div class="coverage-bar-seg tmdb" style="width:${tmdbPct}%"></div>
+      </div>
+      <span class="coverage-pct" style="color:${lib.coverage_pct >= 80 ? 'var(--green)' : lib.coverage_pct >= 50 ? 'var(--yellow)' : 'var(--red)'}">${lib.coverage_pct}%</span>
+    </div>`;
+  });
+  html += '</div></div>';
+
+  // Uncurated queue
+  html += `<div class="poster-section"><h3>Uncurated Queue <span class="count">${d.total_uncurated} items</span></h3>`;
+  if (d.queue && d.queue.length) {
+    html += '<div class="card" style="padding:0;overflow:hidden"><table class="queue-table"><thead><tr><th>Title</th><th>Library</th><th>Added</th></tr></thead><tbody>';
+    d.queue.forEach(item => {
+      const date = item.last_updated ? item.last_updated.split(' ')[0] : '—';
+      html += `<tr><td style="font-weight:500">${esc(item.title)}</td><td>${esc(item.library || '')}</td><td style="color:var(--text-dim)">${date}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    if (d.queue_truncated) {
+      html += `<div style="padding:10px 14px;font-size:12px;color:var(--text-dim);text-align:center">Showing ${d.queue.length} of ${d.total_uncurated} — use the API for full list</div>`;
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="empty-state">All items have curated or TMDb posters</div>';
+  }
+  html += '</div>';
+
+  // Orphans
+  html += `<div class="poster-section"><h3>Orphaned Poster Files <span class="count">${d.orphan_count || 0}</span></h3>`;
+  if (d.orphans && d.orphans.length) {
+    html += '<div class="card" style="padding:0;overflow:hidden">';
+    d.orphans.forEach(o => {
+      const name = o.file.split('/').pop();
+      html += `<div class="orphan-item" title="${esc(o.file)}"><strong>${esc(name)}</strong><br>${esc(o.reason)}</div>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<div class="empty-state">No orphaned poster files detected</div>';
+  }
+  html += '</div>';
+
+  document.getElementById('posterContent').innerHTML = html;
+}
+
+document.getElementById('posterLib').addEventListener('change', loadPosters);
+
+// ---- Export ----
+let exportData = {};
+
+async function loadExport() {
+  const lib = document.getElementById('exportLib').value;
+  const params = new URLSearchParams();
+  if (lib) params.set('library', lib);
+
+  document.getElementById('exportContent').innerHTML = '<div class="loading">Loading export data</div>';
+
+  try {
+    const res = await fetch(API + '/export?' + params);
+    exportData = await res.json();
+    renderExport();
+  } catch(e) {
+    document.getElementById('exportContent').innerHTML = '<div class="empty-state">Failed to load export data. Run quality audit and gap analysis first.</div>';
+  }
+}
+
+function renderExport() {
+  const d = exportData;
+  if (!d.categories || !d.categories.length) {
+    document.getElementById('exportContent').innerHTML = '<div class="empty-state">No export data available. Run audits first.</div>';
+    document.getElementById('exportTotal').textContent = '';
+    return;
+  }
+
+  document.getElementById('exportTotal').textContent = `${d.total_terms.toLocaleString()} total terms`;
+
+  // Group categories by section
+  const sections = {};
+  d.categories.forEach(cat => {
+    const sec = cat.section || 'Other';
+    if (!sections[sec]) sections[sec] = [];
+    sections[sec].push(cat);
+  });
+
+  let html = '';
+  for (const [sectionName, cats] of Object.entries(sections)) {
+    html += `<div class="export-section"><h3>${esc(sectionName)}</h3>`;
+
+    cats.forEach((cat, ci) => {
+      if (!cat.count) return;
+      const catId = cat.key;
+      html += `<div class="export-group" id="eg-${catId}">
+        <div class="export-group-header" onclick="toggleExportGroup(event, '${catId}')">
+          <div class="left">
+            <input type="checkbox" class="export-cat-check" data-key="${catId}" checked onclick="event.stopPropagation()">
+            <span class="cat-label">${esc(cat.label)}</span>
+            <span class="cat-count">${cat.count}</span>
+          </div>
+          <div class="right">
+            <button class="copy-btn" onclick="event.stopPropagation(); copyCategory('${catId}')">Copy All</button>
+          </div>
+        </div>
+        <div class="export-terms">
+          ${cat.terms.map((t, ti) => `
+            <div class="export-term-row">
+              <div>
+                <span class="term-text">${esc(t.term)}</span>
+                ${t.detail ? `<span class="term-detail">${esc(t.detail)}</span>` : ''}
+              </div>
+              <button class="copy-btn" data-term="${esc(t.term)}" onclick="copyTerm(this)">Copy</button>
+            </div>
+          `).join('')}
+        </div>
+      </div>`;
+    });
+
+    html += '</div>';
+  }
+
+  document.getElementById('exportContent').innerHTML = html || '<div class="empty-state">No export terms generated</div>';
+}
+
+function toggleExportGroup(event, catId) {
+  if (event.target.tagName === 'INPUT') return;
+  document.getElementById('eg-' + catId).classList.toggle('open');
+}
+
+function copyTerm(btn) {
+  const term = btn.dataset.term;
+  navigator.clipboard.writeText(term).then(() => {
+    btn.classList.add('copied');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.classList.remove('copied'); btn.textContent = 'Copy'; }, 1500);
+  });
+}
+
+function copyCategory(catId) {
+  const cat = exportData.categories.find(c => c.key === catId);
+  if (!cat) return;
+  const text = cat.terms.map(t => t.term).join('\n');
+  const btn = document.querySelector(`#eg-${catId} .copy-btn`);
+  navigator.clipboard.writeText(text).then(() => {
+    btn.classList.add('copied');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.classList.remove('copied'); btn.textContent = 'Copy All'; }, 1500);
+  });
+}
+
+function downloadSelected() {
+  const checks = document.querySelectorAll('.export-cat-check:checked');
+  const keys = Array.from(checks).map(c => c.dataset.key);
+  if (!keys.length) {
+    alert('Select at least one category to download');
+    return;
+  }
+  const params = new URLSearchParams();
+  params.set('categories', keys.join(','));
+  const lib = document.getElementById('exportLib').value;
+  if (lib) params.set('library', lib);
+  window.open(API + '/export/download?' + params, '_blank');
+}
+
+document.getElementById('exportLib').addEventListener('change', loadExport);
+
+// ---- Wanted ----
+function wantedBanner(cls, title, detail) {
+  return `<div class="wanted-banner ${cls}"><strong>${title}</strong><span>${detail}</span></div>`;
+}
+
+function wantedLocalDate(stamp) {
+  if (!stamp) return '';
+  // Stored by SQLite as UTC; show the user their own date.
+  const parsed = new Date(String(stamp).replace(' ', 'T') + 'Z');
+  return isNaN(parsed) ? String(stamp).slice(0, 10) : parsed.toLocaleDateString();
+}
+
+function wantedMatch(m) {
+  const poster = m.thumb
+    ? `<img src="${API}/wanted/thumb?path=${encodeURIComponent(m.thumb)}" alt="" loading="lazy">`
+    : '';
+  const meta = [m.year, m.duration_ms ? Math.round(m.duration_ms / 60000) + ' min' : '', m.content_rating]
+    .filter(Boolean).map(esc).join(' \u00b7 ');
+  return `<div class="wanted-match">${poster}<div>
+      <h4>${esc(m.title)}</h4>
+      <div class="meta">${meta}</div>
+      <div class="libs">In ${m.libraries.map(esc).join(', ')}</div>
+      ${m.summary ? `<div class="summary">${esc(m.summary)}</div>` : ''}
+    </div></div>`;
+}
+
+async function runWantedSearch() {
+  const box = document.getElementById('wantedSearchResult');
+  const query = document.getElementById('wantedQuery').value.trim();
+  if (!query) { box.innerHTML = ''; return; }
+  box.innerHTML = wantedBanner('', 'Searching Plex\u2026', esc(query));
+  try {
+    const res = await fetch(API + '/wanted/search?q=' + encodeURIComponent(query));
+    const d = await res.json();
+    if (!res.ok) {
+      box.innerHTML = wantedBanner('error', 'Search failed.', esc(d.error || res.statusText));
+      return;
+    }
+    if (d.found) {
+      const heading = d.matches.length === 1
+        ? 'Already in your library'
+        : `${d.matches.length} possible matches in your library`;
+      box.innerHTML = wantedBanner('found', heading, 'Nothing was added to your wanted list.')
+        + d.matches.map(wantedMatch).join('');
+      return;
+    }
+    const label = esc(d.title + (d.year ? ` (${d.year})` : ''));
+    if (d.added_to_wanted) {
+      box.innerHTML = wantedBanner('added', 'Not in your library \u2014 added to your wanted list.',
+        `${label} is now tracked.`);
+    } else {
+      const status = d.wanted ? d.wanted.status : 'wanted';
+      const since = d.wanted ? wantedLocalDate(d.wanted.added_at) : '';
+      const note = status === 'wanted'
+        ? `Already on your wanted list since ${since}.`
+        : `Already tracked, currently marked ${status} (since ${since}).`;
+      box.innerHTML = wantedBanner('known', 'Not in your library.', `${label} \u2014 ${note}`);
+    }
+    loadWanted();
+  } catch (e) {
+    box.innerHTML = wantedBanner('error', 'Search failed.', esc(e.message));
+  }
+}
+
+async function loadWanted() {
+  const el = document.getElementById('wantedContent');
+  const status = document.getElementById('wantedStatus').value;
+  try {
+    const res = await fetch(API + '/wanted?status=' + encodeURIComponent(status));
+    const d = await res.json();
+    const items = d.items || [];
+    if (!items.length) {
+      el.innerHTML = `<div class="empty-state">Nothing here yet. Search for a film above \u2014
+        anything Plex does not have lands on this list.</div>`;
+      return;
+    }
+    const showStatus = status !== 'wanted';
+    el.innerHTML = `<table class="queue-table">
+      <thead><tr>
+        <th>Title</th><th>Year</th><th>Added</th>${showStatus ? '<th>Status</th>' : ''}
+        <th style="text-align:right">Actions</th>
+      </tr></thead>
+      <tbody>${items.map(it => `
+        <tr data-id="${it.id}">
+          <td>${esc(it.title)}</td>
+          <td>${it.year || '\u2014'}</td>
+          <td style="color:var(--text-dim)">${wantedLocalDate(it.added_at)}</td>
+          ${showStatus ? `<td><span class="wanted-status ${it.status}">${it.status}</span></td>` : ''}
+          <td style="text-align:right;white-space:nowrap">
+            ${it.status !== 'acquired' ? `<button class="copy-btn" onclick="setWantedStatus(${it.id},'acquired')">Acquired</button>` : ''}
+            ${it.status !== 'dismissed' ? `<button class="copy-btn" onclick="setWantedStatus(${it.id},'dismissed')">Dismiss</button>` : ''}
+            ${it.status !== 'wanted' ? `<button class="copy-btn" onclick="setWantedStatus(${it.id},'wanted')">Back to wanted</button>` : ''}
+          </td>
+        </tr>`).join('')}</tbody></table>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state">Could not load the wanted list: ${esc(e.message)}</div>`;
+  }
+}
+
+async function setWantedStatus(id, status) {
+  try {
+    const res = await fetch(`${API}/wanted/${id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert('Could not update: ' + (d.error || res.statusText));
+      return;
+    }
+    loadWanted();
+  } catch (e) {
+    alert('Could not update: ' + e.message);
+  }
+}
+
+async function recheckWanted() {
+  const box = document.getElementById('wantedSearchResult');
+  box.innerHTML = wantedBanner('', 'Re-searching Plex\u2026', 'Checking every wanted title.');
+  try {
+    const res = await fetch(API + '/wanted/recheck', { method: 'POST' });
+    const d = await res.json();
+    if (!res.ok) {
+      box.innerHTML = wantedBanner('error', 'Recheck failed.', esc(d.error || res.statusText));
+      return;
+    }
+    if (!d.now_in_plex.length) {
+      box.innerHTML = wantedBanner('known', `Checked ${d.checked} item(s).`, 'None of them are in Plex yet.');
+      return;
+    }
+    const names = d.now_in_plex.map(i => esc(i.title + (i.year ? ` (${i.year})` : ''))).join(', ');
+    box.innerHTML = wantedBanner('found',
+      `${d.now_in_plex.length} of ${d.checked} are now in Plex:`, `${names} \u2014 mark them acquired below.`);
+    d.now_in_plex.forEach(i => {
+      const row = document.querySelector(`#wantedContent tr[data-id="${i.id}"]`);
+      if (row) row.classList.add('now-in-plex');
+    });
+  } catch (e) {
+    box.innerHTML = wantedBanner('error', 'Recheck failed.', esc(e.message));
+  }
+}
+
+document.getElementById('wantedStatus').addEventListener('change', loadWanted);
+document.getElementById('wantedQuery').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); runWantedSearch(); }
+});
+
+// Boot
+loadOverview();
+loadUpgrades();
+loadGaps();
+loadPosters();
+loadExport();
+loadWanted();
+</script>
+</body>
+</html>

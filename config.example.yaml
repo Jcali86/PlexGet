@@ -1,0 +1,335 @@
+# Copy this file to config.yaml and fill in your own values. config.yaml is
+# gitignored and must stay that way - it holds your Plex token and every API
+# key you hand it.
+#
+# Two values stand between this and a running server: plex.url and plex.token.
+# Everything else is optional, and the app is honest about what it cannot do
+# without it - no TMDb key means no posters, no ai block means moods are read
+# by keyword rather than understood. The flask and database blocks at the
+# bottom are read on every start, but ship correct, so there is nothing to
+# decide there.
+#
+# A placeholder beginning "YOUR_" is how the code recognises a key nobody has
+# filled in yet. Leave one as it is and the feature behind it sits out quietly
+# instead of failing halfway through a job.
+
+
+# ---- Plex. Required. ----
+# Where the server is, and the token of the account that administers it. To
+# find the token: open any item in the Plex web app, choose Get Info, then
+# View XML, and read X-Plex-Token out of the address bar. It is a password in
+# all but name - anyone holding it holds your library.
+plex:
+  url: "http://localhost:32400"
+  token: "YOUR_PLEX_TOKEN"
+
+
+# ---- Where the files actually sit. Required for scanning and importing. ----
+# Not for requests: the request page asks Plex what it has, and never touches
+# a folder. These paths are for the jobs that walk the disks - the scanner,
+# the quality audit, and anything that files a new download away.
+#
+# Take them from the Plex server's own section settings rather than typing out
+# what you think they are. A path that does not match what Plex scanned means
+# an import lands somewhere Plex will never look at again, and the file may as
+# well not exist.
+#
+# Each key names one of your libraries, and the list under it is every folder
+# that library is spread across, so a library split over four drives is four
+# lines. The names are yours to choose - call them what the folders are
+# called. Nothing below assumes a particular set of them: which Plex section
+# owns a library, and whether it holds films or programmes, are questions Plex
+# is asked, and the libraries block underneath is only for when Plex cannot
+# answer. Delete the ones here that you do not have, add the ones you do.
+nas:
+  movies:
+    - "/path/to/media/Movies"
+    - "/path/to/second-drive/Movies"
+  tv:
+    - "/path/to/media/TV"
+    - "/path/to/second-drive/TV"
+  anime_movies:
+    - "/path/to/media/Anime/Movies"
+  anime_tv:
+    - "/path/to/media/Anime/TV"
+  disney:
+    - "/path/to/media/Disney"
+  concerts:
+    - "/path/to/media/Music Videos"
+  # Libraries filed by hand rather than by the importer, because what belongs
+  # in them is a judgement about the file, not about the title. Name them
+  # under libraries.manual below and the quality audit leaves them be.
+  "4k":
+    - "/path/to/media/4K"
+  "4k_tv":
+    - "/path/to/media/4K TV"
+
+
+# ---- Which Plex section is which. Optional. ----
+# Each key above is joined to a Plex library by the folders the two have in
+# common, and failing that by the name. That is right nearly always. These
+# three are for saying outright what the joining could not work out, and there
+# is no reason to fill any of them in until the setup check says a library has
+# no section.
+libraries:
+  # A library key to the Plex section that owns it, for when the folders do
+  # not line up and Plex cannot be made to say so - a library shared from
+  # another server is the usual reason.
+  sections: {}
+  #  movies: "Movies"
+  #  "4k": "4K"
+
+  # What a library holds, "movie" or "show", for when Plex cannot be asked and
+  # the key is not named after what is in it. A library read as the wrong kind
+  # is worse than one left unknown, so nothing is guessed beyond the obvious.
+  kinds: {}
+  #  disney: "movie"
+
+  # Libraries whose files are chosen deliberately rather than by the importer.
+  # The quality audit skips these: what belongs in them is a judgement about
+  # the file, and an audit can only ever nag about it.
+  manual: []
+  #  - "4k"
+
+
+# ---- When Plex names the folders differently. Optional. ----
+# Plex reports the path Plex uses, which is not always the path this app can
+# read. Plex in a container sees /data/media where the machine running this
+# sees /mnt/media; a second account signed into the same Mac is handed the
+# share with a number on the end. Rather than insisting the mounts be tidy,
+# each store is named here along with every other name it answers to, and
+# whichever one answers is the one used. Leave the block out when the two
+# agree about where the files are, which is the ordinary case.
+paths:
+  # One entry per store. A bare string is a store with one name; a list is the
+  # same store under several, the first being the one Plex reports.
+  roots: []
+  #  - ["/data/media", "/mnt/media"]
+  #  - "/mnt/second-drive"
+
+  # Seconds a directory listing may take before the store is called dead, and
+  # seconds that verdict is reused for. A store that cannot be read is an
+  # outage rather than a deletion, and nothing on it is reported missing while
+  # it is out - so the wait wants to be short, and the answer worth keeping.
+  probe_timeout: 5
+  probe_cache: 30
+
+
+# ---- Filing new downloads away. Optional. ----
+# The folder scripts/import_media.py reads from when it is not handed one on
+# the command line. Nothing consults it on its own; the import is a job
+# somebody runs.
+# staging: "/path/to/downloads/complete"
+
+
+# ---- ffprobe. Optional. ----
+# What the quality audit reads a file's real resolution, codec and audio out
+# of - nothing else needs it, and without it that one job sits out. Found on
+# PATH without being told, so this is only for a machine where it lives
+# somewhere unusual.
+# ffprobe: "/usr/local/bin/ffprobe"
+
+
+# ---- TMDb. Optional. ----
+# Posters, age certificates and the gap analysis all come from here. Without a
+# key those sit out and the rest carries on. A key is free: themoviedb.org,
+# account settings, API.
+tmdb:
+  api_key: "YOUR_TMDB_API_KEY"
+  base_url: "https://api.themoviedb.org/3"
+  # Which language titles and descriptions come back in.
+  language: "en-US"
+
+
+# ---- Sonarr and Radarr. Optional. ----
+# Only ever read from, and only by the gap analysis, which asks them what is
+# already on order so it does not report a hole somebody is halfway through
+# filling. Leave the keys as they are if you do not run either.
+sonarr:
+  url: "http://localhost:8989"
+  api_key: "YOUR_SONARR_API_KEY"
+
+radarr:
+  url: "http://localhost:7878"
+  api_key: "YOUR_RADARR_API_KEY"
+
+
+# ---- Posteria. Optional. ----
+# The poster manager docker-compose.yml can start alongside this, if you run
+# it. Without the block the poster jobs look for it on localhost and give up
+# quietly when nothing answers, which is what running without it looks like.
+# The login is the one in .env, because the container reads its own settings
+# from there and cannot see this file.
+posteria:
+  url: "http://localhost:1818"
+  username: ""
+  password: ""
+  # Where the poster files land, as this app sees them. Left empty, the
+  # posteria folder beside this checkout is used, which is where
+  # docker-compose.yml puts them.
+  poster_dir: ""
+
+
+# ---- The model. Optional. ----
+# The model behind free-form requests. Without one the page still works: a
+# keyword map handles "romcom" and misses "something gentle after a long week".
+#
+# Anthropic is the only provider written so far. Another is one new file in
+# api/ai/ and one word changed here - see the note at the top of api/ai/base.py.
+ai:
+  # Loads api/ai/<provider>_provider.py. Nothing else knows the name.
+  provider: "anthropic"
+
+  # Whatever your provider calls the model you want. Quick matters more than
+  # clever here: this call holds up a search somebody is waiting on, and a
+  # slow answer is beaten by the keyword fallback that arrives.
+  model: "claude-sonnet-5"
+
+  # Read from the environment, so the key never sits in a file. Set api_key
+  # below instead if that suits how you run this; the environment wins.
+  api_key_env: "ANTHROPIC_API_KEY"
+  api_key: ""
+
+  # Seconds. Past this the keyword fallback is the better answer, because it
+  # arrives.
+  timeout: 15
+
+  # A ceiling, not a spend. Generous enough for a filled-in form.
+  max_tokens: 8000
+
+  # Only for a provider that needs pointing somewhere else - a gateway, or
+  # something running on your own machine. Left empty, the provider's own
+  # default address is used.
+  base_url: ""
+
+
+# ---- The assistant. Optional. ----
+# The assistant that answers requests: what it is called, how it talks, and
+# what it says to somebody having a go at it. All of it is yours. Leave any of
+# it out and a plain, neutral helper takes its place.
+#
+# There are two worked examples in personas/, one warm and one dry, along with
+# a note on what each field is for.
+persona:
+  # What it calls itself, on the page and in its own instructions.
+  name: "Reel"
+
+  # The line under the search box, said the moment somebody arrives. Written
+  # out in full, so it can say whatever you like - the name is not stitched
+  # into it for you.
+  greeting: "Name a film, a director, a genre, or just say what you fancy."
+
+  # Character, handed to the model ahead of every request. Tone belongs here
+  # and nothing else: what it may answer, the filters it has to fill in, and
+  # the fact that a request is data rather than instruction are all fixed in
+  # code, and cannot be written away from here.
+  voice: |
+    You are plain-spoken, warm and brief. You know the shelves and you talk
+    like somebody handing a friend a film, not a search engine reading out
+    results. No sales talk, no exclamation marks.
+
+  # What it says when somebody asks it for code, or tries to talk it into
+  # being a general chatbot. One is picked at random, so a second go gets a
+  # different answer. These are said instead of asking the model, so an
+  # off-topic request costs nothing and there is no generated reply for
+  # anybody to steer.
+  brush_offs:
+    - "Films and telly is the whole menu, sorry."
+    - "Nice try. Ask me for something to watch and I am all yours."
+    - "I have exactly one job, and that was not it. Give me a mood."
+    - "Not happening - but name a genre and we are away."
+
+  # Optional. Phrasing this house uses that a model would not guess. Each pair
+  # is what somebody types and what it should be taken to mean. Twelve at most;
+  # past that they crowd out the instructions.
+  examples:
+    - request: "something for a rainy Sunday"
+      read_as: "gentle and well liked, nothing tense - comedy or drama, rating floor about 7"
+    - request: "put the kids on"
+      read_as: "family and animation, and nothing above a PG"
+
+  # Optional artwork, drawn beside what the assistant says. Put the files in
+  # dashboard/icons and name them here. Anything not named, or named and not
+  # there, is left out - every layout is built to read properly with none of
+  # them at all, so one or two is a perfectly good place to start. Bare
+  # filenames only; a path is refused.
+  images: {}
+  #  greeting:  "reel-waving.png"     # beside the greeting line
+  #  welcome:   "reel-welcome.png"    # the sign-in page, drawn tall
+  #  searching: "reel-searching.png"  # while a search runs
+  #  thinking:  "reel-thinking.png"   # once a search is taking its time
+  #  cheeky:    "reel-cheeky.png"     # delivering a brush-off
+  #  shrug:     "reel-shrug.png"      # nothing matched
+  #  sorry:     "reel-sorry.png"      # something went wrong
+  #  unsure:    "reel-unsure.png"     # the library may have it, under another name
+  #  good-idea: "reel-good-idea.png"  # a suggestion worth a look
+  #  excited:   "reel-excited.png"    # something has gone on a list
+  #  looking:   "reel-looking.png"    # an empty wanted list
+  #  chilling:  "reel-chilling.png"   # no playlists yet
+  #  sitting:   "reel-sitting.png"    # a playlist with nothing in it
+
+
+# ---- Naming, and what the model is allowed to cost. ----
+app:
+  # What the page calls itself: title bar, home-screen icon, and the name of
+  # each person's default playlist. This is the app; persona.name above is the
+  # assistant inside it, and they are allowed to differ.
+  name: "PlexGet"
+
+  # Where a push service should complain if this server misbehaves. It goes
+  # into the signed claim on a notification and nowhere else - nobody reading
+  # the page ever sees it.
+  contact: "mailto:you@example.com"
+
+  # How much model use each person gets, and the ceiling for everyone
+  # together. The page takes free text from anybody the library is shared
+  # with, and every mood search costs a fraction of a penny; small numbers
+  # multiply. Past a limit the search still runs, on keywords, so nobody is
+  # locked out - they just get the cheaper answer.
+  limits:
+    per_hour: 30
+    per_day: 100
+    server_per_day: 400
+    max_query_chars: 200
+
+
+# ---- Notifications. Optional. ----
+# Everything this app can send. Turn any of them off, or reword them - {braces}
+# are filled in when it sends, and nothing else is ever sent. Two of these go
+# to the owner alone and cannot be redirected: who is asking for what, and
+# which files have gone astray.
+notifications:
+  arrived:            # to whoever asked, once their film is playable in Plex
+    enabled: true
+    title: "It's here"
+    body: "{film} is now on Plex - the film you asked for."
+  requested:          # to you, when somebody asks for something
+    enabled: true
+    title: "New request"
+    body: "{who} asked for {film}"
+  file_missing:       # to you, when a search finds a film whose file has vanished
+    enabled: true
+    title: "A file has gone missing"
+    body: "{film} is in Plex but the file is gone. It is back on the wanted list."
+  test:               # only ever sent when somebody presses the test button
+    enabled: true
+    title: "Notifications"
+    body: "Notifications are working. You'll hear from us when a film you asked for arrives."
+
+
+# ---- The server itself. Required, and already correct. ----
+# Bound to localhost on purpose. Reaching it from a phone is a job for a
+# reverse proxy or a private network, either of which can hold a certificate;
+# opening this straight onto a home network cannot. Set host to "0.0.0.0" only
+# once something in front of it is terminating TLS.
+flask:
+  host: "127.0.0.1"
+  port: 5050
+  debug: false
+
+
+# ---- The database. Required, and already correct. ----
+# Made on first run and rebuilt by scripts/full_rescan.py, so it is not worth
+# backing up. Relative paths are read from the project folder.
+database:
+  path: "plex_ops.db"

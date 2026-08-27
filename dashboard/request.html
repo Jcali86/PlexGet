@@ -1,0 +1,2565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1c1f">
+<title>PlexGet</title>
+<script>
+  // Which of the two faces of this page to paint, decided before the first
+  // pixel. A device that has signed in before gets the search; one that has
+  // not gets the welcome. Without this everyone is shown the search bar and
+  // then has it taken away a moment later, which reads as the app breaking.
+  try {
+    document.documentElement.className =
+      localStorage.getItem('plexget-known') ? 'known' : 'guest';
+  } catch (e) { document.documentElement.className = 'guest'; }
+</script>
+<!-- use-credentials, or the manifest is fetched without the session cookie
+     and the home-screen handoff can never know who is installing. -->
+<link rel="manifest" href="/manifest.webmanifest?v=4" crossorigin="use-credentials">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=3">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png?v=3">
+<meta property="og:title" content="PlexGet">
+<meta property="og:description" content="Ask for a film or a series. It turns up on the telly.">
+<meta property="og:image" content="__ORIGIN__/icons/share-card.png?v=1">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:type" content="website">
+<meta property="og:url" content="__ORIGIN__/">
+<meta name="description" content="Ask for a film or a series. It turns up on the telly.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PlexGet">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+  :root {
+    --bg: #1a1c1f; --surface: #26292e; --surface2: #2f3339; --border: #3a3f46;
+    --text: #eeeff1; --dim: #9aa0a6; --accent: #e5a00d; --accent-dark: #cc8f0b;
+    --green: #4ade80; --red: #f2545b; --radius: 8px;
+    --on-accent: #241c02;          /* text that sits on the accent */
+    --bar: rgba(20,22,25,.97);     /* the sticky action bar */
+    --veil: 20,22,25;              /* hero gradient, as an rgb triple */
+    --top: #141619;                /* header */
+    --poster-radius: 6px;
+  }
+
+  /* Blockbuster: the blue and yellow of a Friday night video shop. */
+  body[data-skin="blockbuster"] {
+    --bg: #071133; --surface: #0e1e50; --surface2: #16296a; --border: #22398a;
+    --text: #f4f6ff; --dim: #9fb0e6; --accent: #ffd200; --accent-dark: #e6bd00;
+    --on-accent: #0b1745; --bar: rgba(7,17,51,.97); --veil: 7,17,51;
+    --top: #050d26; --green: #58d68d; --red: #ff6b6b; --poster-radius: 3px;
+  }
+
+  /* Netflix: near-black, one red, nothing else competing. */
+  body[data-skin="netflix"] {
+    --bg: #141414; --surface: #1f1f1f; --surface2: #2a2a2a; --border: #303030;
+    --text: #f5f5f5; --dim: #a0a0a0; --accent: #e50914; --accent-dark: #b8070f;
+    --on-accent: #ffffff; --bar: rgba(20,20,20,.97); --veil: 20,20,20;
+    --top: #0b0b0b; --green: #46d369; --red: #e50914; --poster-radius: 4px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* `clip`, not `hidden`: hidden makes these scroll containers, which
+     quietly stops the sticky header sticking. */
+  html { overflow-x: clip; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow-x: clip;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    padding-bottom: 110px;
+  }
+  a { color: var(--accent); }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px;
+    background: var(--top); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 {
+    margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .3px;
+    cursor: pointer; user-select: none;
+  }
+  header h1:active { opacity: .7; }
+  header h1:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  header h1 span { color: var(--accent); }
+  .who { margin-left: auto; font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  /* Every control up here is one square: emoji have wildly different widths,
+     and "Sign out" as words was a two-line box among a row of neat little
+     buttons. A fixed square makes them a set. */
+  .icon-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 8px; padding: 0; font-size: 15px; line-height: 1;
+    width: 34px; height: 34px; flex: none;
+    display: inline-grid; place-items: center; cursor: pointer;
+  }
+  .icon-btn:hover { color: var(--text); border-color: var(--dim); }
+  /* A dot on the bell, rather than a card in the way: something is waiting,
+     and it waits quietly until it is asked for. */
+  .icon-btn.has-news { position: relative; border-color: var(--accent); }
+  .icon-btn.has-news::after {
+    content: ''; position: absolute; top: -3px; right: -3px;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--bar);
+  }
+  .note {
+    padding: 12px 14px; margin-bottom: 10px; text-align: left;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .note b { display: block; font-size: 13px; color: var(--accent); margin-bottom: 3px; }
+  .note .when { display: block; margin-top: 6px; font-size: 11.5px; color: var(--dim); }
+
+  main { max-width: 780px; margin: 0 auto; padding: 16px; }
+
+  .searchbar { display: flex; gap: 8px; position: relative; }
+  .searchbar .lens {
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    width: 17px; height: 17px; stroke: var(--dim); fill: none;
+    stroke-width: 2; stroke-linecap: round; pointer-events: none;
+  }
+  input[type=text] {
+    flex: 1; padding: 13px 14px; font-size: 16px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .searchbar input[type=text] { padding-left: 40px; }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  #findbtn { box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
+  #findbtn .spark { margin-right: 5px; font-weight: 400; }
+  button.primary {
+    padding: 13px 18px; font-size: 15px; font-weight: 600; color: var(--on-accent);
+    background: var(--accent); border: none; border-radius: var(--radius); cursor: pointer;
+  }
+  button.primary:active { background: var(--accent-dark); }
+  button.ghost {
+    padding: 12px 16px; font-size: 14px; font-weight: 600; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: pointer;
+  }
+  button:disabled { opacity: .5; }
+
+  .personaline {
+    margin: 12px 2px 0; font-size: 14.5px; line-height: 1.5; color: var(--dim);
+  }
+  .personaline b { color: var(--accent); font-weight: 700; }
+
+  .minor {
+    /* minmax(0,1fr), not 1fr: a plain 1fr lets the longer label push its own
+       column wider, so the pair came out 122px and 130px. */
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center;
+    gap: 10px 12px; margin: 16px 0 0; font-size: 13px;
+    padding: 12px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  /* Both doors the same size, whatever their labels: they are a matched pair
+     and one growing taller than the other is the sort of thing you feel
+     before you can name it. */
+  .doorbtn {
+    display: flex; align-items: center; gap: 9px; text-align: left;
+    padding: 13px 14px; min-height: 50px; box-sizing: border-box;
+    font-size: 14px; font-weight: 600; color: var(--text);
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; cursor: pointer;
+  }
+  .doorbtn > span:nth-child(2) { flex: 1; min-width: 0; }
+  .doorbtn .ic { font-size: 16px; line-height: 1; flex: none; }
+  .doorbtn .chev { margin-left: auto; color: var(--accent); font-size: 18px; font-weight: 700; }
+  .doorbtn:active { border-color: var(--accent); }
+  .minor .opt { margin: 2px 0 0 2px; }
+  .minor .linkbtn { justify-self: end; margin-right: 2px; }
+  .linkbtn {
+    background: none; border: none; padding: 0; cursor: pointer;
+    color: var(--accent); font-size: 13px; font-weight: 600;
+  }
+  .linkbtn:active { opacity: .6; }
+  .opt {
+    display: inline-flex; align-items: center; gap: 6px; color: var(--dim); cursor: pointer;
+  }
+  .opt input { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; }
+  .hint b { color: var(--text); font-weight: 600; }
+
+  /* The suggestion chips are gone on purpose: the box invites free typing,
+     and the screen belongs to the shelves. The personaline carries the
+     coaching. */
+
+  /* ---- the assistant's own face ----
+     Every face is optional, and most houses will run with none at all: a mood
+     with no artwork draws nothing, so the layouts below have to read properly
+     either way. It is a companion, never the headline - the shelves keep the
+     screen. */
+  .personagreet { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
+  /* The greeting is held back until the fetched name and line are in it, and
+     display:flex above would otherwise beat the browser's own [hidden] rule. */
+  .personagreet[hidden] { display: none; }
+  .personagreet .personaline { margin: 0; }
+  .persona-fig {
+    flex: none; height: 132px; width: auto; align-self: flex-end;
+    filter: drop-shadow(0 6px 14px rgba(0,0,0,.45));
+  }
+  .persona-fig.tall { height: 168px; }
+  .persona-fig.small { height: 96px; }
+  .persona-fig.tiny { height: 78px; }
+  /* A card the assistant speaks from stands beside what it is saying. The art
+     is drawn full-body, so it is used full-body - cropping a head out of it
+     for an avatar throws away the pose, which is the whole point of moods. */
+  .personacard { display: flex; align-items: flex-end; gap: 12px; }
+  .personacard > .said { flex: 1; min-width: 0; }
+  .thinking .persona-fig { margin-right: 4px; }
+  .thinkrow { display: flex; align-items: flex-end; gap: 10px; }
+  @media (max-width: 380px) {
+    .persona-fig { height: 108px; }
+    .persona-fig.tall { height: 132px; }
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; margin: 16px 0;
+  }
+  .card b { display: block; font-size: 15px; margin-bottom: 3px; }
+  .card .sub { color: var(--dim); font-size: 13.5px; }
+  .card.good { border-left-color: var(--green); }
+  .card.warn { border-left-color: var(--accent); }
+  .card.bad  { border-left-color: var(--red); }
+  /* The assistant having a laugh - the accent, not the red of an error,
+     because nothing has gone wrong. */
+  .card.persona { border-left-color: var(--accent); }
+  .nudge { margin-top: 10px; }
+  .nudge .linkbtn { font-size: 15px; font-weight: 600; padding: 0; }
+  .nudge .sub { margin-top: 2px; }
+  /* Said in place of the add button when a film cannot be had yet. */
+  .notyet { margin-top: 10px; font-size: 13.5px; color: var(--accent);
+            border-left: 2px solid var(--accent); padding-left: 10px; }
+  .card.persona .sub { color: var(--text); font-size: 15px; line-height: 1.5; }
+  .card button { margin-top: 10px; }
+
+  /* Advisory cards can be put away. Those given a key stay away for good,
+     so a nudge that has been read once does not come back every visit. */
+  /* Held back until we know who this is - see the script in the head. */
+  html.guest .searchbar, html.guest .personaline,
+  html.guest .minor, html.guest .personagreet { display: none; }
+  html.known #firstpaint { display: none; }
+
+  .card[data-shut] { position: relative; padding-right: 42px; }
+  .card .shut { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px;
+                display: grid; place-items: center; margin: 0; padding: 0;
+                background: none; border: 0; border-radius: 50%; cursor: pointer;
+                color: var(--dim); font-size: 20px; line-height: 1; }
+  .card .shut:hover, .card .shut:focus-visible {
+                color: var(--text); background: var(--border); }
+
+  .rowhead { font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+             color: var(--dim); margin: 20px 2px 8px; }
+
+  .film {
+    display: flex; gap: 12px; align-items: flex-start; padding: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 8px; cursor: pointer;
+  }
+  .film.picked { border-color: var(--accent); background: var(--surface2); }
+  .film img { width: 58px; height: 87px; object-fit: cover; border-radius: var(--poster-radius);
+              background: var(--surface2); flex: none; }
+  .film h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+  .film .meta { color: var(--dim); font-size: 12.5px; margin-bottom: 3px; }
+  .film .blurb { color: var(--dim); font-size: 12.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tick { margin-left: auto; width: 24px; height: 24px; border-radius: 50%;
+    border: 2px solid var(--border); flex: none; display: grid; place-items: center;
+    color: transparent; font-size: 14px; font-weight: 700; }
+  .film.picked .tick { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .film .unlist { margin-left: auto; flex: none; padding: 8px 12px; font-size: 12.5px;
+    color: var(--dim); background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 999px; }
+  .listrow {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 14px 12px; margin-bottom: 8px; font-size: 15px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .listrow b { flex: 1; font-weight: 600; }
+  .listrow span { color: var(--dim); font-size: 12.5px; }
+
+  .bar {
+    position: fixed; left: 0; right: 0; bottom: 0; display: none; gap: 8px; align-items: center;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: var(--bar); border-top: 1px solid var(--border);
+  }
+  .bar.show { display: flex; }
+  .bar .none {
+    padding: 12px 14px; font-size: 14px; color: var(--dim);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  .sortbar { display: flex; gap: 8px; margin: 12px 0 6px; flex-wrap: wrap; }
+  .sortbar button {
+    padding: 7px 12px; font-size: 12.5px; color: var(--dim);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+  }
+  .sortbar button.on { color: var(--text); border-color: var(--accent); }
+  select {
+    flex: 1; padding: 12px 10px; font-size: 14px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  }
+  /* hero: a slow cross-fade through backdrops from the library */
+  .hero-reel {
+    position: relative; height: 210px; border-radius: 10px; overflow: hidden;
+    margin: 4px 0 8px; background: var(--surface);
+  }
+  .hero-reel .frame {
+    position: absolute; inset: 0; opacity: 0; transition: opacity 1.1s ease;
+    background-size: cover; background-position: center 22%;
+    transform: scale(1.04);
+  }
+  .hero-reel .frame.on { opacity: 1; animation: driftin 9s ease-out forwards; }
+  @keyframes driftin { from { transform: scale(1.04) } to { transform: scale(1.13) } }
+  .hero-reel .veil {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(var(--veil),.15) 0%, rgba(var(--veil),.55) 55%, rgba(var(--veil),.96) 100%);
+  }
+  .hero-reel .say {
+    position: absolute; left: 14px; right: 14px; bottom: 12px;
+  }
+  .hero-reel .say b {
+    display: block; font-size: 26px; font-weight: 700; line-height: 1.08;
+    font-family: 'New York', Georgia, 'Times New Roman', serif;
+    text-shadow: 0 1px 8px rgba(0,0,0,.6);
+  }
+  .hero-reel .say span { display: block; font-size: 13px; color: rgba(255,255,255,.78);
+    margin-top: 3px; text-shadow: 0 1px 6px rgba(0,0,0,.6); }
+  .qadd {
+    width: 34px; height: 34px; border-radius: 50%; flex: none; padding: 0;
+    display: grid; place-items: center; color: #fff;
+    background: color-mix(in srgb, var(--accent) 28%, rgba(15,17,20,.55));
+    border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 40%, transparent);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); cursor: pointer;
+    transition: transform .15s ease, background .2s ease;
+  }
+  /* Drawn, not typed: a text plus sits wherever the font's metrics put it,
+     which in a circle is always slightly wrong somewhere. */
+  .qadd svg { width: 15px; height: 15px; stroke: currentColor; stroke-width: 2.8;
+    fill: none; stroke-linecap: round; display: block; }
+  .qadd:active { transform: scale(1.18); }
+  .qadd.done {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+    box-shadow: 0 2px 16px color-mix(in srgb, var(--accent) 65%, transparent);
+    animation: qadd-pop .35s ease;
+  }
+  @keyframes qadd-pop { 0% { transform: scale(1); } 45% { transform: scale(1.35); } 100% { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) {
+    .qadd, .qadd.done { transition: none; animation: none; }
+  }
+  .hero-reel .say .qadd { margin-top: 10px; }
+  .poster { position: relative; }
+  /* iOS puts its own copy/share callout on a long-pressed image, which would
+     land on top of ours. The gesture belongs to the app here. */
+  .poster, .film { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  .poster.pressing, .film.pressing { opacity: .65; transform: scale(.97); }
+
+  /* the long-press peek */
+  #peek { max-width: 460px; padding: 0; overflow: hidden; }
+  #peek .peekart {
+    position: relative; height: 150px; background: var(--surface2);
+    background-size: cover; background-position: center 20%;
+  }
+  #peek .peekart::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(to bottom, transparent 30%, var(--surface) 100%);
+  }
+  #peek .peekbody { padding: 0 18px 18px; margin-top: -34px; position: relative; z-index: 1; }
+  #peek h3 { margin: 0 0 2px; font-size: 20px;
+    font-family: 'New York', Georgia, serif; text-shadow: 0 1px 8px rgba(0,0,0,.6); }
+  #peek .facts { color: var(--dim); font-size: 12.5px; margin-bottom: 10px; }
+  #peek .blurb { font-size: 13.5px; line-height: 1.55; margin-bottom: 12px; }
+  #peek .crew { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
+  #peek .crew b { color: var(--text); font-weight: 600; }
+  #peek .peekbar { display: flex; gap: 8px; margin-top: 16px; }
+  /* Bottom left: top right is where posters put the title and the interesting
+     half of the artwork, and a button sat on somebody's face is a button in
+     the way. Bottom left is nearly always the quiet corner.
+     Anchored to the artwork rather than the poster, or "bottom" would mean
+     the bottom of the caption underneath it. A div and not a span, because
+     the caption rule below clamps every span in here to two lines - which
+     quietly squashed the artwork's own wrapper to 30px. */
+  .poster .shot { position: relative; display: block; }
+  .poster .qadd { position: absolute; left: 6px; bottom: 6px; width: 28px; height: 28px; }
+  .hero-reel .dots { position: absolute; top: 10px; right: 12px; display: flex; gap: 4px; }
+  .hero-reel .dots i {
+    width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.3);
+    transition: background .3s;
+  }
+  .hero-reel .dots i.on { background: var(--accent); }
+
+  /* poster rows */
+  .row { margin: 22px 0 4px; }
+  .row h4 {
+    margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .reel {
+    display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px;
+    scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch;
+  }
+  /* The first row drifts on its own so the page has a pulse; touching it stops
+     the drift and hands control back. */
+  .reel.drifting { scroll-snap-type: none; }
+  .poster { transition: transform .18s ease; }
+  .poster:active { transform: scale(.95); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-reel .frame.on { animation: none; }
+    .poster { transition: none; }
+  }
+  .reel::-webkit-scrollbar { height: 0; }
+  .poster {
+    flex: 0 0 auto; width: 96px; scroll-snap-align: start; cursor: pointer;
+    border: 1px solid transparent; border-radius: 6px; padding: 0;
+    background: transparent; text-align: left;
+  }
+  .poster img {
+    width: 96px; height: 144px; object-fit: cover; border-radius: var(--poster-radius);
+    background: var(--surface2); display: block;
+  }
+  .poster span {
+    display: block; font-size: 11.5px; color: var(--dim); margin-top: 5px;
+    line-height: 1.3; max-height: 2.6em; overflow: hidden;
+  }
+  .poster:active img { outline: 2px solid var(--accent); }
+
+  .show {
+    display: flex; gap: 12px; align-items: flex-start; padding: 11px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius); margin-bottom: 8px;
+  }
+  .show img { width: 58px; height: 87px; object-fit: cover; border-radius: var(--poster-radius);
+              background: var(--surface2); flex: none; }
+  .show h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+  .show .meta { color: var(--dim); font-size: 12.5px; margin-bottom: 5px; }
+  .show .seasons { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 2px; }
+  .show .seasons span, .show .seasons button {
+    font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim); background: transparent;
+  }
+  .show .seasons span.have { color: var(--text); border-color: var(--dim); }
+  .show .seasons button { color: var(--accent); border-color: var(--accent); cursor: pointer; }
+  .show .blurb { color: var(--dim); font-size: 12.5px; margin-top: 6px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .guess {
+    display: flex; gap: 12px; align-items: flex-start; padding: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 8px;
+  }
+  .guess img { width: 52px; height: 78px; object-fit: cover; border-radius: 4px;
+               background: var(--surface2); flex: none; }
+  .guess h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+  .guess .meta { color: var(--dim); font-size: 12.5px; margin-bottom: 6px; }
+  .guess .blurb { color: var(--dim); font-size: 12.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .guess button { margin-top: 8px; padding: 7px 14px; font-size: 13px; }
+
+  .aihint {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: var(--radius);
+    padding: 12px 14px; margin: 14px 0 0; font-size: 13.5px;
+  }
+  .aihint svg { flex: none; width: 18px; height: 18px; stroke: var(--accent);
+                fill: none; stroke-width: 1.8; margin-top: 2px; }
+  .aihint b { display: block; margin-bottom: 2px; }
+  .aihint p { margin: 0; color: var(--dim); font-size: 13px; }
+
+  .backbar {
+    display: flex; align-items: center; gap: 12px; margin: 6px 0 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius); padding: 4px 6px 4px 12px;
+  }
+  .backbar button {
+    padding: 11px 18px; font-size: 15px; font-weight: 700; color: var(--on-accent);
+    background: var(--accent); border: none; border-radius: var(--radius);
+    cursor: pointer; order: 2; margin-left: auto;
+  }
+  .backbar span { color: var(--dim); font-size: 13px; order: 1; }
+
+  /* iOS turns off its own pull-to-refresh once the app is on the home screen,
+     so the gesture is provided here instead. */
+  .pull {
+    position: fixed; top: 0; left: 0; right: 0; display: flex;
+    align-items: center; justify-content: center; gap: 8px;
+    color: var(--dim); font-size: 13px; pointer-events: none;
+    height: 54px; transform: translateY(-54px); opacity: 0; z-index: 20;
+  }
+  .pull.armed { color: var(--accent); }
+  .pull i {
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 2px solid currentColor; border-top-color: transparent;
+    display: inline-block;
+  }
+  .pull.spinning i { animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .pull.spinning i { animation: none } }
+
+  .thinking {
+    text-align: center; padding: 40px 16px; font-size: 15px;
+    color: var(--dim); min-height: 92px;
+  }
+  .thinking .line {
+    display: inline-block; animation: hue 3.4s ease-in-out infinite;
+  }
+  .thinking .line.swap { animation: swapin .45s ease both, hue 3.4s ease-in-out infinite; }
+  @keyframes swapin { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+  @keyframes hue {
+    0%, 100% { color: var(--dim) }
+    50% { color: var(--accent) }
+  }
+  .thinking .dots i {
+    display: inline-block; width: 4px; height: 4px; border-radius: 50%;
+    background: currentColor; margin-left: 3px; opacity: .3;
+    animation: blink 1.4s ease-in-out infinite;
+  }
+  .thinking .dots i:nth-child(2) { animation-delay: .18s }
+  .thinking .dots i:nth-child(3) { animation-delay: .36s }
+  @keyframes blink { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
+  .thinking .aside { display: block; margin-top: 10px; font-size: 12.5px; opacity: .65; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .thinking .line, .thinking .line.swap { animation: none; color: var(--dim) }
+    .thinking .dots i { animation: none; opacity: .5 }
+  }
+
+  /* one-time guide */
+  #tour { position: fixed; inset: 0; z-index: 60; display: none; }
+  #tour.on { display: block; }
+  #tour .spot {
+    position: absolute; border-radius: 12px; pointer-events: none;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.72), 0 0 0 3px var(--accent);
+    transition: all .32s cubic-bezier(.4,0,.2,1);
+  }
+  #tour .say {
+    position: absolute; left: 16px; right: 16px; max-width: 460px;
+    margin: 0 auto; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; transition: top .32s ease;
+  }
+  #tour .say b { display: block; font-size: 16px; margin-bottom: 4px; }
+  #tour .say p { color: var(--dim); font-size: 14px; margin: 0 0 14px; }
+  #tour .row { display: flex; align-items: center; gap: 10px; }
+  #tour .row button { padding: 10px 16px; font-size: 14px; font-weight: 600;
+    border-radius: var(--radius); cursor: pointer; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text); }
+  #tour .row button.go { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  #tour .row .count { margin-left: auto; color: var(--dim); font-size: 12.5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #tour .spot, #tour .say { transition: none }
+  }
+
+  .loading, .empty { text-align: center; color: var(--dim); padding: 34px 10px; }
+
+  /* ---- welcome ---- */
+  .welcome { max-width: 460px; margin: 8px auto 0; }
+
+  .hero { text-align: center; padding: 18px 0 22px; }
+  .hero .mark {
+    font-size: 40px; font-weight: 800; letter-spacing: -.5px; line-height: 1;
+    margin-bottom: 10px;
+  }
+  .hero .mark span { color: var(--accent); }
+  .hero .tag { color: var(--dim); font-size: 15px; margin: 0 auto; max-width: 30ch; }
+
+  .strip { display: flex; gap: 4px; justify-content: center; margin: 18px 0 24px; }
+  .strip i {
+    display: block; width: 26px; height: 8px; border-radius: 2px;
+    background: var(--surface2); border: 1px solid var(--border);
+  }
+  .strip i:nth-child(3) { background: var(--accent); border-color: var(--accent); }
+
+  .does { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
+  .does > div { display: flex; gap: 13px; align-items: flex-start; }
+  .does svg { flex: none; width: 22px; height: 22px; stroke: var(--accent); fill: none;
+              stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; margin-top: 1px; }
+  .does b { display: block; font-size: 15px; font-weight: 600; }
+  .does p { color: var(--dim); font-size: 13.5px; margin: 1px 0 0; }
+
+  .signin {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; text-align: center;
+  }
+  .signin .lead { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .signin .why { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
+  .signin .code {
+    font-size: 38px; font-weight: 700; letter-spacing: 8px; margin: 4px 0 2px;
+    font-family: ui-monospace, Menlo, monospace; color: var(--accent);
+  }
+  .signin .codelabel { color: var(--dim); font-size: 12px; letter-spacing: .06em;
+                       text-transform: uppercase; }
+  /* The address is meant to be typed, and Plex's path is case-sensitive -
+     plex.tv/LINK is a 404. Keep it lowercase whatever the label around it does. */
+  .signin .codelabel .url { text-transform: lowercase; letter-spacing: 0;
+                            font-weight: 600; }
+  .signin .or { color: var(--dim); font-size: 12px; margin: 14px 0 12px;
+                display: flex; align-items: center; gap: 10px; }
+  .signin .or::before, .signin .or::after {
+    content: ""; flex: 1; height: 1px; background: var(--border);
+  }
+  .signin a.bigbtn {
+    display: block; padding: 13px; border-radius: var(--radius); text-decoration: none;
+    background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 15px;
+  }
+  .signin .comeback { color: var(--text); font-size: 13px; line-height: 1.5;
+    margin: 14px auto 0; max-width: 300px; padding: 10px 12px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 10px; }
+  .signin .fallback { color: var(--dim); font-size: 12.5px; line-height: 1.5;
+                      margin-top: 14px; padding-top: 12px;
+                      border-top: 1px solid var(--border); text-align: left; }
+  .signin .fallback .url { color: var(--text); font-weight: 600;
+                           text-transform: lowercase; }
+  .signin .status { color: var(--dim); font-size: 12.5px; margin-top: 14px; }
+  .signin .status .dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent); margin-right: 6px; animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
+  @media (prefers-reduced-motion: reduce) { .signin .status .dot { animation: none; opacity: .8 } }
+
+  .safety { color: var(--dim); font-size: 12.5px; text-align: center; margin: 16px auto 0;
+            max-width: 34ch; line-height: 1.5; }
+
+  dialog {
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    border-radius: 12px; padding: 20px; max-width: 400px; width: 90%;
+  }
+  /* Anchored to the screen rather than the page. Safari places an open dialog
+     against the top of the document, so opening one from the bottom of a long
+     shelf dimmed everything and put the panel hundreds of pixels out of sight -
+     which reads as the app having died rather than a menu having opened. */
+  /* Specificity matters here, not just the declaration. A skin that paints a
+     backdrop has to lift every direct child of body above it, and
+     `body[data-skin] > *` outscores a bare `dialog[open]` - which forced the
+     panel back into the flow and opened it at the top of the document,
+     hundreds of pixels above whoever pressed the button. Any such rule must
+     exclude dialogs, and this one is written to win even if it does not. */
+  body dialog[open], dialog[open] {
+    position: fixed; inset: 0; margin: auto;
+    max-height: 80vh; overflow-y: auto;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 12px; font-size: 17px; }
+
+  .skins { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 16px; }
+  .skin {
+    display: flex; align-items: center; gap: 12px; padding: 11px 13px; cursor: pointer;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); font: inherit; text-align: left; width: 100%;
+  }
+  .skin.on { border-color: var(--accent); }
+  .skin .chips2 { display: flex; gap: 4px; flex: none; }
+  .skin .chips2 i { width: 15px; height: 22px; border-radius: 3px; display: block; }
+  .skin b { display: block; font-size: 14.5px; }
+  .skin span { color: var(--dim); font-size: 12.5px; }
+  dialog p { color: var(--dim); font-size: 14px; margin: 10px 0; }
+  dialog b { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="appname" role="button" tabindex="0" title="Home">Plex<span>Get</span></h1>
+  <div class="who" id="whoami"></div>
+</header>
+
+<div id="tour" aria-hidden="true">
+  <div class="spot" id="tourspot"></div>
+  <div class="say" id="toursay"></div>
+</div>
+
+<div class="pull" id="pull"><i></i><span id="pullsay">Pull to refresh</span></div>
+<main id="main">
+  <div class="searchbar">
+    <svg class="lens" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4.5-4.5"/></svg>
+    <input id="q" type="text" placeholder="A film, a series, or the mood you're in" autocomplete="off" enterkeyhint="search">
+    <button class="primary" id="findbtn" type="button"><span class="spark">✦</span>Search</button>
+  </div>
+  <!-- Empty and held back on purpose: the name, the line and the face all
+       arrive from /persona, and a placeholder greeting that is replaced a
+       moment later reads as the page correcting itself. -->
+  <div class="personagreet" hidden>
+    <p class="personaline"></p>
+  </div>
+
+  <div class="minor">
+    <button class="doorbtn" id="makelist" type="button">
+      <span class="ic">🪄</span><span>Build a playlist</span><span class="chev">›</span>
+    </button>
+    <button class="doorbtn" id="mylists" type="button">
+      <span class="ic">🎞️</span><span>My playlists</span><span class="chev">›</span>
+    </button>
+    <label class="opt"><input type="checkbox" id="alsomissing"> include ones we haven't got</label>
+    <button class="linkbtn" id="helpbtn" type="button">Help</button>
+  </div>
+
+  <!-- What a new visitor sees at once. The sign-in replaces it in place, so
+       the wordmark does not move when it arrives. -->
+  <div id="firstpaint" class="welcome">
+    <div class="hero">
+      <div class="mark">Plex<span>Get</span></div>
+      <p class="tag">Ask for a film or a series. It turns up on the telly.</p>
+    </div>
+  </div>
+  <div id="out"></div>
+  <div id="hero"></div>
+  <div id="shelf"></div>
+</main>
+
+<div class="bar" id="bar">
+  <button class="none" id="clearpick" type="button" aria-label="Clear selection">None</button>
+  <select id="target" aria-label="Which playlist"></select>
+  <button class="primary" id="add">Add <span id="count">0</span></button>
+</div>
+
+<dialog id="skinpicker">
+  <h3>Pick a look</h3>
+  <div class="skins">
+    <button class="skin" data-act="skin" data-value="plex" data-skin-choice="plex">
+      <span class="chips2"><i style="background:#1a1c1f"></i><i style="background:#e5a00d"></i></span>
+      <span><b>Plex</b><span>Charcoal and amber, like Plex</span></span>
+    </button>
+    <button class="skin" data-act="skin" data-value="blockbuster" data-skin-choice="blockbuster">
+      <span class="chips2"><i style="background:#071133"></i><i style="background:#ffd200"></i></span>
+      <span><b>Blockbuster</b><span>Friday night at the video shop</span></span>
+    </button>
+    <button class="skin" data-act="skin" data-value="netflix" data-skin-choice="netflix">
+      <span class="chips2"><i style="background:#141414"></i><i style="background:#e50914"></i></span>
+      <span><b>Streaming</b><span>Near-black with one red</span></span>
+    </button>
+  </div>
+  <form method="dialog"><button class="primary">Done</button></form>
+</dialog>
+
+<dialog id="peek">
+  <div class="peekart" id="peekart"></div>
+  <div class="peekbody" id="peekbody"></div>
+</dialog>
+
+<dialog id="bellbox">
+  <h3>Notifications</h3>
+  <div id="bellnotes"></div>
+  <div id="bellpush" class="sub"></div>
+  <div class="row" style="display:flex;gap:8px;margin-top:14px">
+    <button class="ghost" id="belltest" type="button">Send a test</button>
+    <form method="dialog" style="margin-left:auto"><button class="primary">Done</button></form>
+  </div>
+</dialog>
+
+<dialog id="help">
+  <h3>How this works</h3>
+  <p><b>Search</b> — name a film or a series to see if we have it, or describe a mood
+     ("something gentle after a long week"). You pick what you like and add it to a playlist.</p>
+  <p><b>Make a playlist from this</b> — skips the picking. Describe the list you want
+     ("anything great for the big screen") and it builds it in your Plex straight away.</p>
+  <p><b>If we don't have it</b> — you'll be offered a button to ask for it. It goes on
+     the wanted list, and you'll get a notification when it turns up.</p>
+  <p><b>Your playlists are yours</b> — they appear in your own Plex app, on any device.</p>
+  <p><b>About the AI</b> — describing a mood uses a bit of AI to work out what to look for.
+     There's a daily allowance so it can't run up a bill. Searching by name is free and
+     always works, allowance or not.</p>
+  <div class="row" style="display:flex;gap:8px">
+    <button class="ghost" data-act="tour">Show me around</button>
+    <form method="dialog" style="margin-left:auto"><button class="primary">Got it</button></form>
+  </div>
+</dialog>
+
+<script>
+// A session that lapses mid-use should land on the sign-in, not on a raw error
+// string. Every /request call can answer 401, so rather than checking at each
+// of a dozen call sites the reply is inspected once, here.
+const plainFetch = window.fetch.bind(window);
+let handingOver = false;
+window.fetch = async (...args) => {
+  const res = await plainFetch(...args);
+  if (res.status === 401 && !handingOver) {
+    res.clone().json().then(d => {
+      if (d && d.auth_required) {
+        handingOver = true;
+        try { localStorage.removeItem('plexget-known'); } catch (e) {}
+        beginSignIn();
+      }
+    }).catch(() => {});
+  }
+  return res;
+};
+
+// The shell is worth holding on every device, signed in or not. Registering
+// the worker used to be a side effect of turning notifications on, which only
+// ever happened to people already signed in - so the visitors who most needed
+// a fast second visit were the ones who never got one.
+if ('serviceWorker' in navigator) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', {scope: '/'}).catch(() => {});
+  });
+}
+
+const out = document.getElementById('out');
+const bar = document.getElementById('bar');
+const countEl = document.getElementById('count');
+const input = document.getElementById('q');
+const target = document.getElementById('target');
+const whoami = document.getElementById('whoami');
+const main = document.getElementById('main');
+let picked = new Map();
+let playlistName = '';
+let myDefaultList = '';
+let myListCount = 0;
+let me = null;
+
+// Escapes for BOTH text and attribute contexts. textContent handles < > &,
+// but not quotes - and this value is dropped into double-quoted attributes
+// (data-value, href, titles), where an unescaped " breaks out and lets a
+// crafted title or playlist name inject attributes. So the quotes go too.
+const esc = s => {
+  const d = document.createElement('div');
+  d.textContent = s ?? '';
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+};
+
+// Whoever this house has answering the door. The defaults stand until
+// /persona lands, so nothing below throws in the meantime - and a server with
+// no persona configured at all leaves them standing for good.
+let persona = {name: 'Assistant', greeting: '', brush_offs: [], images: {}};
+
+// The assistant may have a face per mood, and may just as well have none:
+// artwork is optional, and only the moods actually named in config and found
+// on disk come back. A mood with nothing behind it draws nothing at all,
+// which is why every layout using one has to read properly without it.
+const personaFace = (mood, cls) => {
+  const src = persona.images[mood];
+  // onerror stays for the day a file is deleted under a running server.
+  return src
+    ? `<img class="persona-fig ${cls || ''}" src="${esc(src)}" alt="" onerror="this.remove()">`
+    : '';
+};
+// A card the assistant speaks from: it on the left, what it said on the right.
+// With no face to draw, the words are returned on their own rather than in a
+// card with a hollow column beside them - that is the difference between an
+// unconfigured persona looking deliberate and looking broken.
+const personaSays = (mood, inner) => {
+  const face = personaFace(mood, 'tiny');
+  return face ? `<div class="personacard">${face}<div class="said">${inner}</div></div>` : inner;
+};
+// The brush-offs are picked at random, so the face that delivers one is too -
+// the same pose every time would make a random reply feel scripted. Whittled
+// down to the poses this persona actually has, and empty when it has none.
+const brushOffMood = () => {
+  const poses = ['cheeky', 'shrug', 'unsure'].filter(m => persona.images[m]);
+  return poses.length ? poses[Math.floor(Math.random() * poses.length)] : '';
+};
+// The server sends the real brush-off with the answer; this is only for a card
+// the page has to draw with nothing from the server to put in it.
+const brushOff = () => persona.brush_offs.length
+  ? persona.brush_offs[Math.floor(Math.random() * persona.brush_offs.length)]
+  : 'Films and telly is the whole menu, sorry.';
+
+// Status cards answer the last thing you pressed, so a new one replaces the
+// old rather than stacking five identical answers down the page.
+function status(tone, title, detail, mood) {
+  document.querySelectorAll('.card.status').forEach(el => el.remove());
+  // data-shut with no key: closable, not remembered - an answer to a press
+  // should be dismissable the moment it has been read.
+  const said = `<b>${title}</b><div class="sub">${detail}</div>`;
+  out.insertAdjacentHTML('afterbegin',
+    `<div class="card status ${tone}" data-shut="">${shutter}${
+      mood ? personaSays(mood, said) : said}</div>`);
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+// Which look this person prefers, remembered on their own device.
+const SKINS = ['plex', 'blockbuster', 'netflix'];
+function applySkin(skin) {
+  const chosen = SKINS.includes(skin) ? skin : 'plex';
+  document.body.dataset.skin = chosen;
+  // A browser set to refuse site data throws here rather than shrugging, and
+  // this runs before the rest of the page has been built - a look that cannot
+  // be remembered until next time is no reason for nothing at all to load.
+  try { localStorage.setItem('plexget-skin', chosen); } catch (e) {}
+  const theme = getComputedStyle(document.body).getPropertyValue('--top').trim();
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta && theme) meta.setAttribute('content', theme);
+  document.querySelectorAll('[data-skin-choice]').forEach(b =>
+    b.classList.toggle('on', b.dataset.skinChoice === chosen));
+}
+let savedSkin = null;
+try { savedSkin = localStorage.getItem('plexget-skin'); } catch (e) {}
+applySkin(savedSkin);
+
+// "PlexGet" -> Plex + Get, "Front Row" -> Front + Row. Second half takes the accent.
+function wordmark(name) {
+  const spaced = name.split(' ');
+  if (spaced.length > 1) return `${esc(spaced[0])}<span>${esc(spaced.slice(1).join(' '))}</span>`;
+  const camel = name.match(/^([A-Z][a-z0-9]*)([A-Z].*)$/);
+  return camel ? `${esc(camel[1])}<span>${esc(camel[2])}</span>` : esc(name);
+}
+// Already escaped - do NOT wrap this in esc() again, or the entities
+// themselves get escaped and readers see &#39; in place of an apostrophe.
+const label = (t, y) => esc(t + (y ? ` (${y})` : ''));
+
+function refreshBar() {
+  countEl.textContent = picked.size;
+  bar.classList.toggle('show', picked.size > 0);
+}
+
+// ---- the guide, once ----
+// Anyone needing a video to work the app means the app failed to explain
+// itself. This walks through it in place, the first time and never again
+// unless asked for.
+const TOUR = [
+  { at: '#q', title: 'Say what you want',
+    text: 'Type a film or a series by name — or just how you feel, like "something gentle after a long week". Both work.' },
+  { at: '#findbtn', title: 'Search finds it',
+    text: 'It tells you straight away whether we have it. If we do not, it offers to put it on the list for you.' },
+  { at: '#makelist', title: 'Or build a whole list',
+    text: 'Describe an evening — "great for the big screen" — and it fills a playlist in your own Plex, ready on the telly.' },
+  { at: '#appname', title: 'This is the way back',
+    text: 'Tap the name any time to come back here. You can also pull the page down from the top to refresh it.' },
+  { at: '.who', title: 'Alerts and the look',
+    text: 'The bell tells you when something you asked for turns up. The palette changes how the app looks — there are three.' },
+];
+
+let tourAt = 0;
+
+function showTourStep() {
+  const step = TOUR[tourAt];
+  const target = document.querySelector(step.at);
+  const tour = document.getElementById('tour');
+  const spot = document.getElementById('tourspot');
+  const say = document.getElementById('toursay');
+  if (!target) { return endTour(); }
+
+  const box = target.getBoundingClientRect();
+  const pad = 8;
+  spot.style.top = `${box.top - pad}px`;
+  spot.style.left = `${box.left - pad}px`;
+  spot.style.width = `${box.width + pad * 2}px`;
+  spot.style.height = `${box.height + pad * 2}px`;
+
+  const below = box.bottom + 16;
+  const room = window.innerHeight - below;
+  say.style.top = room > 190 ? `${below}px` : `${Math.max(16, box.top - 200)}px`;
+  say.innerHTML = `<b>${esc(step.title)}</b><p>${esc(step.text)}</p>
+    <div class="row">
+      <button data-act="tourskip">Skip</button>
+      <button class="go" data-act="tournext">${tourAt === TOUR.length - 1 ? 'Done' : 'Next'}</button>
+      <span class="count">${tourAt + 1} of ${TOUR.length}</span>
+    </div>`;
+  tour.classList.add('on');
+  tour.setAttribute('aria-hidden', 'false');
+}
+
+function startTour() {
+  tourAt = 0;
+  window.scrollTo({top: 0, behavior: 'auto'});
+  setTimeout(showTourStep, 120);
+}
+
+function nextTourStep() {
+  tourAt += 1;
+  if (tourAt >= TOUR.length) return endTour();
+  showTourStep();
+}
+
+function endTour() {
+  const tour = document.getElementById('tour');
+  tour.classList.remove('on');
+  tour.setAttribute('aria-hidden', 'true');
+  try { localStorage.setItem('plexget-tour', 'seen'); } catch (e) {}
+}
+
+// ---- the wait ----
+// A search takes a few seconds and a blank page reads as broken, so it says
+// what it is plausibly doing. The lines about the thing you actually asked for
+// do the most work: it is obviously listening.
+const SHELF_TALK = {
+  title: [
+    "Right. Looking for {q}",
+    "Checking the shelves for {q}. Nobody else was going to",
+    "Rummaging behind the box sets for {q}. Marvellous",
+    "Searching for {q}. This is my whole existence, by the way",
+    "Seeing whether {q} ever made it home. Don't get your hopes up",
+    "Looking up {q}. No no, I don't mind, honestly",
+  ],
+  mood: [
+    "Working out what {q} is supposed to mean",
+    "Interpreting {q}. Bold of you to assume I can",
+    "Reading the room. As ever",
+    "Weighing up {q}. Riveting",
+    "Sorting the good from the merely available. Thankless work, this",
+    "Turning your feelings into search filters. Living the dream",
+  ],
+  list: [
+    "Building you a playlist. You're welcome, in advance",
+    "Putting a running order together. No pressure on me then",
+    "Arguing with myself about the order. I'll win",
+    "Lining up a whole night of it. Someone has to",
+  ],
+  any: [
+    "Processing. Beep. Boop. Etcetera",
+    "Blowing the dust off. There is a great deal of dust",
+    "Doing the one thing I was built for. Again",
+    "Consulting the archives. It's a hard drive, but let me have this",
+    "Whirring, meaningfully",
+    "Checking the back of the cupboard",
+    "Pretending this is difficult",
+  ],
+};
+
+// The longer it takes, the more put-upon it gets.
+const PATIENCE = [
+  "Still going. It's a big library and I am one robot",
+  "Nearly there. Not that anyone's asked how I am",
+  "Checking one more shelf, then I'm having a sit down",
+  "This is the bit where you wait and I work",
+];
+
+let thinkingTimer = null;
+
+function startThinking(query, mode) {
+  clearInterval(thinkingTimer);
+  const q = (query || '').trim();
+  const shown = q.length > 28 ? q.slice(0, 27) + '…' : q;
+  const pool = (SHELF_TALK[mode] || SHELF_TALK.mood)
+    .concat(SHELF_TALK.any)
+    .map(line => line.replace('{q}', shown ? `“${esc(shown)}”` : 'that'));
+
+  // Start somewhere different each time, so it does not feel scripted.
+  let at = Math.floor(Math.random() * pool.length);
+  const began = Date.now();
+
+  const paint = () => {
+    const waited = Date.now() - began;
+    const line = waited > 9000
+      ? PATIENCE[Math.floor((waited - 9000) / 3000) % PATIENCE.length]
+      : pool[at % pool.length];
+    // Searching first; once it has dragged on, it switches to thinking about it.
+    out.innerHTML = `<div class="thinking"><div class="thinkrow">
+        ${personaFace(waited > 9000 ? 'thinking' : 'searching', 'small')}
+        <span class="line swap">${line}<span class="dots"><i></i><i></i><i></i></span></span>
+        </div>
+        ${waited > 14000 ? '<span class="aside">Yes, this one is taking a while. No, I don\'t know why either.</span>' : ''}
+      </div>`;
+    at += 1;
+  };
+
+  paint();
+  thinkingTimer = setInterval(paint, 2100);
+  return () => clearInterval(thinkingTimer);
+}
+
+// ---- rendering ----
+function filmCard(m, selectable) {
+  const poster = m.thumb
+    ? `<img src="/wanted/thumb?path=${encodeURIComponent(m.thumb)}" alt="" loading="lazy">`
+    : `<img alt="">`;
+  const meta = [m.year, m.rating ? '★ ' + m.rating : '',
+                m.runtime_minutes ? m.runtime_minutes + ' min' : '',
+                (m.libraries || []).join(', ')].filter(Boolean).map(esc).join(' · ');
+  return `<div class="film" data-key="${esc(m.rating_key)}">
+      ${poster}
+      <div><h3>${esc(m.title)}</h3>
+        <div class="meta">${meta}</div>
+        <div class="blurb">${esc(m.summary || '')}</div></div>
+      ${selectable ? '<div class="tick">✓</div>' : ''}
+    </div>`;
+}
+
+// Everything in the results area is rendered as a string, so its buttons are
+// wired here rather than inline - an inline handler carrying a film title
+// breaks the moment the title contains a quote.
+// Cards that are advice rather than an answer carry a close control. A card
+// given a key is remembered as read, so it does not return on the next visit.
+const SHUT = 'plexget-shut:';
+const shutAlready = (key) => { try { return !!localStorage.getItem(SHUT + key); }
+                               catch (e) { return false; } };
+const shutter = '<button class="shut" data-act="shut" aria-label="Dismiss">\u00d7</button>';
+
+function shutCard(btn) {
+  const card = btn.closest('.card');
+  if (!card) return;
+  const key = card.dataset.shut;
+  if (key) { try { localStorage.setItem(SHUT + key, '1'); } catch (e) {} }
+  card.remove();
+}
+
+const ACTIONS = {
+  shut:  (btn) => shutCard(btn),
+  announce: () => askAnnouncement(),
+  wanted: () => showWanted(),
+  ask:   (btn) => ask(btn.dataset.value, btn),
+  look:  (btn) => lookUp(btn.dataset.value),
+  test:  (btn) => testPush(btn),
+  home:  () => goHome(),
+  skins: () => document.getElementById('skinpicker').showModal(),
+  bell:  () => openBell(),
+  tournext: () => nextTourStep(),
+  tourskip: () => endTour(),
+  tour:  () => { document.getElementById('help').close(); startTour(); },
+  skin:  (btn) => applySkin(btn.dataset.value),
+  askshow: (btn) => askShow(btn.dataset.value, btn.dataset.season,
+                            (btn.dataset.seasons || '').split(',').filter(Boolean)),
+  sortby: (btn) => resort(btn.dataset.value),
+  quickadd: (btn) => quickAdd(btn),
+  mylists: () => showLists(),
+  openlist: (btn) => showListItems(btn.dataset.value),
+  unlist: (btn) => unlist(btn),
+  start: (btn) => {
+    let keys = [];
+    try { keys = JSON.parse(btn.dataset.value); } catch (err) { return; }
+    startList(keys, btn.dataset.list || '');
+  },
+};
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const run = ACTIONS[btn.dataset.act];
+  if (run) run(btn);
+});
+
+function showCard(x) {
+  const poster = x.thumb
+    ? `<img src="/wanted/thumb?path=${encodeURIComponent(x.thumb)}" alt="" loading="lazy">`
+    : '<img alt="">';
+  const held = x.held_seasons || [];
+  const gapNote = (x.missing_seasons || []).length
+    ? `${x.missing_seasons.length} season${x.missing_seasons.length === 1 ? '' : 's'} missing`
+    : (x.all_seasons || []).length ? 'complete' : '';
+  const meta = [x.year, `${x.seasons || held.length} season${(x.seasons || held.length) === 1 ? '' : 's'}`,
+                `${x.episodes || 0} episodes`, gapNote, (x.libraries || []).join(', ')]
+    .filter(Boolean).map(esc).join(' · ');
+  // Which seasons are here, and a way to ask for the ones that are not.
+  // Every season that exists, not merely up to the highest one held - the
+  // point is to show the ones nobody noticed were absent.
+  const all = (x.all_seasons && x.all_seasons.length)
+    ? x.all_seasons
+    : Array.from({length: held.length ? Math.max(...held) : 0}, (_, i) => i + 1);
+  const chips = all.map(n => held.includes(n)
+    ? `<span class="have">S${n}</span>`
+    : `<button data-act="askshow" data-value="${esc(x.title)}" data-season="${n}">S${n} — ask</button>`);
+  const gaps = (x.missing_seasons || []).length;
+  if (gaps) {
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
+  } else {
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-season="next">Ask for more</button>`);
+  }
+  return `<div class="show">${poster}
+      <div><h3>${esc(x.title)}</h3>
+        <div class="meta">${meta}</div>
+        <div class="seasons">${chips.join('')}</div>
+        ${x.summary ? `<div class="blurb">${esc(x.summary)}</div>` : ''}
+      </div></div>`;
+}
+
+async function askShow(title, season, seasons, quiet) {
+  if (season === 'all' && seasons && seasons.length) {
+    // One press should not become forty requests: ask for a sensible run and
+    // say so if there were more.
+    const batch = seasons.slice(0, 12);
+    for (const n of batch) await askShow(title, n, null, true);
+    status('good', `Asked for ${batch.length} season${batch.length === 1 ? '' : 's'} of ${esc(title)}.`,
+      seasons.length > batch.length
+        ? `The first ${batch.length} are on the list; ask for the rest once these arrive.`
+        : "They're on the list — you'll hear as they arrive.");
+    return;
+  }
+  const body = {title, kind: 'show'};
+  if (season && season !== 'next' && season !== 'all') body.season = Number(season);
+  try {
+    const res = await fetch('/request/wanted', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not send that'); return; }
+    if (quiet) return;
+    const what = body.season ? `${esc(title)}, series ${body.season}` : esc(title);
+    status('good', `Asked for ${what}.`,
+      d.added_to_wanted ? "It's on the list — you'll hear when it arrives."
+                        : 'It was already on the list.');
+  } catch (e) { alert(e.message); }
+}
+
+// A title is short and specific; a mood tends to be longer or use feeling
+// words. Only used to pick what the waiting message says, so being wrong
+// costs nothing.
+const MOOD_WORDS = /\b(feel|feeling|mood|something|anything|funny|scary|sad|happy|gentle|cosy|cozy|light|heavy|good|great|best|night|watch|kids|family|date|rainy|sunday|quick|short|long|new|old|classic)\b/i;
+function isMoodish(q) {
+  const text = (q || '').trim();
+  return MOOD_WORDS.test(text) || text.split(/\s+/).length > 4;
+}
+
+function wireSelection() {
+  // Assigned, not addEventListener: cards outside the sortable block survive a
+  // re-sort, and a second listener on them would make every tap toggle twice.
+  out.querySelectorAll('.film[data-key]').forEach(el => {
+    el.onclick = () => {
+      const key = el.dataset.key;
+      if (!el.querySelector('.tick')) return;
+      if (picked.has(key)) { picked.delete(key); el.classList.remove('picked'); }
+      else { picked.set(key, true); el.classList.add('picked'); }
+      refreshBar();
+    };
+    if (picked.has(el.dataset.key)) el.classList.add('picked');
+  });
+}
+
+// ---- ordering the results ----
+// "Best match" is the order the search chose; the rest are the person's own.
+let lastFilms = [];
+let sortMode = 'best';
+try { sortMode = localStorage.getItem('plexget-sort') || 'best'; } catch (e) {}
+const SORTS = [['best', 'Best match'], ['new', 'Newest'],
+               ['az', 'A–Z'], ['added', 'New on the shelf']];
+
+function sortedFilms() {
+  const films = [...lastFilms];
+  if (sortMode === 'new') films.sort((a, b) => (b.year || 0) - (a.year || 0));
+  else if (sortMode === 'az') films.sort((a, b) => a.title.localeCompare(b.title));
+  else if (sortMode === 'added') films.sort((a, b) => (b.added_at || 0) - (a.added_at || 0));
+  return films;
+}
+
+function sortBar() {
+  if (lastFilms.length < 2) return '';
+  return `<div class="sortbar">` + SORTS.map(([key, label]) =>
+    `<button data-act="sortby" data-value="${key}"
+             class="${key === sortMode ? 'on' : ''}">${label}</button>`).join('') + `</div>`;
+}
+
+// How a film is drawn depends on the screen: search results take a tick for
+// picking, a playlist's own page takes a Remove instead. The sort bar serves
+// both, so the renderer travels with the screen rather than being baked in.
+let filmRenderer = (m) => filmCard(m, true);
+
+function resort(mode) {
+  sortMode = mode;
+  try { localStorage.setItem('plexget-sort', mode); } catch (e) {}
+  const box = document.getElementById('films');
+  if (!box) return;
+  box.innerHTML = sortedFilms().map(filmRenderer).join('');
+  wireSelection();
+  document.querySelectorAll('.sortbar button').forEach(b =>
+    b.classList.toggle('on', b.dataset.value === mode));
+}
+
+// ---- this person's own playlists ----
+function listFilmCard(list) {
+  return (m) => {
+    const poster = m.thumb
+      ? `<img src="/wanted/thumb?path=${encodeURIComponent(m.thumb)}" alt="" loading="lazy">`
+      : `<img alt="">`;
+    const meta = [m.year, m.rating ? '★ ' + m.rating : '',
+                  m.runtime_minutes ? m.runtime_minutes + ' min' : '']
+      .filter(Boolean).map(esc).join(' · ');
+    return `<div class="film" data-key="${esc(m.rating_key)}">
+        ${poster}
+        <div><h3>${esc(m.title)}</h3><div class="meta">${meta}</div></div>
+        <button class="unlist" data-act="unlist" data-value="${esc(m.rating_key)}"
+                data-list="${esc(list)}">Remove</button>
+      </div>`;
+  };
+}
+
+async function showLists() {
+  out.innerHTML = `<div class="backbar"><button data-act="home">← Home</button>
+    <span>My playlists</span></div><div class="thinking"><span class="line">Fetching your lists</span></div>`;
+  let d;
+  try { d = await (await fetch('/request/playlists')).json(); }
+  catch (e) { d = {playlists: []}; }
+  const lists = d.playlists || [];
+  out.innerHTML = `<div class="backbar"><button data-act="home">← Home</button>
+      <span>My playlists</span></div>`
+    + (lists.length
+      ? lists.map(p => `<button class="listrow" data-act="openlist" data-value="${esc(p.title)}">
+            <b>${esc(p.title)}</b><span>${p.items} film${p.items === 1 ? '' : 's'}</span></button>`).join('')
+      : `<div class="card">${personaSays('chilling', `<b>No lists yet.</b>
+           <div class="sub">Pick some films from a search and they land in one -
+           it shows up in your own Plex too.</div>`)}</div>`);
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function showListItems(name) {
+  out.innerHTML = `<div class="backbar"><button data-act="mylists">← My playlists</button>
+    <span>${esc(name)}</span></div><div class="thinking"><span class="line">Opening it up</span></div>`;
+  let d;
+  try { d = await (await fetch('/request/playlist/items?name=' + encodeURIComponent(name))).json(); }
+  catch (e) { d = {}; }
+  const films = d.films || [];
+  lastFilms = films;
+  filmRenderer = listFilmCard(name);
+  out.innerHTML = `<div class="backbar"><button data-act="mylists">← My playlists</button>
+      <span>${esc(name)}</span></div>`
+    + (films.length
+      ? `<div class="card good"><b id="listcount">${films.length} film${films.length === 1 ? '' : 's'}.</b>
+           <div class="sub">Playing order lives in Plex - this is for looking it over and pruning.</div></div>`
+        + sortBar() + `<div id="films">${sortedFilms().map(filmRenderer).join('')}</div>`
+      : `<div class="card">${personaSays('sitting',
+          `<b>${esc(d.error || 'This list is empty.')}</b>`)}</div>`);
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function unlist(btn) {
+  const key = btn.dataset.value, name = btn.dataset.list;
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const res = await fetch('/request/playlist/remove', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({playlist: name, rating_keys: [key]}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not remove that'); btn.disabled = false; btn.textContent = 'Remove'; return; }
+    lastFilms = lastFilms.filter(m => m.rating_key !== key);
+    btn.closest('.film').remove();
+    const count = document.getElementById('listcount');
+    if (count) count.textContent = `${lastFilms.length} film${lastFilms.length === 1 ? '' : 's'}.`;
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Remove';
+  }
+}
+
+function goHome(refresh) {
+  clearInterval(heroTimer); clearInterval(driftTimer); clearInterval(thinkingTimer);
+  picked.clear(); refreshBar();
+  input.value = '';
+  out.innerHTML = '';
+  document.getElementById('hero').innerHTML = '';
+  document.getElementById('shelf').innerHTML = '';
+  window.scrollTo({top: 0, behavior: refresh ? 'auto' : 'smooth'});
+  if (me) { loadPlaylists(); showShelf(); offerStarter(); }
+}
+
+// Pull down at the top of the page to refresh, since the standalone app has no
+// browser chrome to do it with. It has to stay out of the way of ordinary
+// scrolling: a first pass grabbed any downward drag and made the page feel
+// stuck, so the gesture only takes over once it is unmistakably a deliberate,
+// vertical pull from a page already at the very top.
+(function pullToRefresh() {
+  const el = document.getElementById('pull');
+  const say = document.getElementById('pullsay');
+  const WAKE = 45;        // ignore anything smaller: that is just a scroll
+  const THRESHOLD = 130;  // and this much again before it will fire
+  let startY = null, startX = null, pulled = 0, engaged = false, busy = false;
+
+  const reset = () => {
+    el.style.transform = 'translateY(-54px)';
+    el.style.opacity = 0;
+    el.classList.remove('armed');
+    startY = startX = null;
+    pulled = 0;
+    engaged = false;
+  };
+
+  document.addEventListener('touchstart', (e) => {
+    if (busy || window.scrollY > 2 || e.touches.length !== 1) { startY = null; return; }
+    if (e.target.closest('.reel, input, select, textarea, dialog')) { startY = null; return; }
+    startY = e.touches[0].clientY;
+    startX = e.touches[0].clientX;
+    pulled = 0;
+    engaged = false;
+  }, {passive: true});
+
+  document.addEventListener('touchmove', (e) => {
+    if (startY === null || busy || e.touches.length !== 1) return;
+    const dy = e.touches[0].clientY - startY;
+    const dx = Math.abs(e.touches[0].clientX - startX);
+    if (dy <= 0 || window.scrollY > 2) { if (engaged) reset(); startY = null; return; }
+    if (dx > dy * 0.6) { startY = null; return; }   // a sideways drag is not this
+    if (!engaged && dy < WAKE) return;              // let short drags scroll normally
+    engaged = true;
+    pulled = dy - WAKE;
+    e.preventDefault();
+    const travel = Math.min(pulled * 0.42, 84);
+    el.style.transform = `translateY(${travel - 54}px)`;
+    el.style.opacity = Math.min(travel / 44, 1);
+    const ready = pulled > THRESHOLD;
+    el.classList.toggle('armed', ready);
+    say.textContent = ready ? 'Let go to refresh' : 'Keep pulling';
+  }, {passive: false});
+
+  document.addEventListener('touchend', () => {
+    if (startY === null || busy) { reset(); return; }
+    const ready = engaged && pulled > THRESHOLD;
+    if (!ready) { reset(); return; }
+    busy = true;
+    el.classList.add('spinning');
+    say.textContent = 'Refreshing…';
+    el.style.transform = 'translateY(6px)';
+    try { goHome(true); } finally {
+      setTimeout(() => { el.classList.remove('spinning'); reset(); busy = false; }, 900);
+    }
+  }, {passive: true});
+})();
+
+async function find(query) {
+  picked.clear(); refreshBar();
+  clearInterval(heroTimer); clearInterval(driftTimer);
+  document.getElementById('hero').innerHTML = '';
+  document.getElementById('shelf').innerHTML = '';
+  const stopThinking = startThinking(query, isMoodish(query) ? 'mood' : 'title');
+  let d;
+  try {
+    const res = await fetch('/request/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query}),
+    });
+    d = await res.json();
+    stopThinking();
+    if (!res.ok) {
+      out.innerHTML = `<div class="card ${d.rate_limited ? 'warn' : 'bad'}">${
+        personaSays(d.rate_limited ? 'cheeky' : 'sorry',
+          `<b>${esc(d.error || 'That did not work')}</b>
+           ${d.hint ? `<div class="sub">${esc(d.hint)}</div>` : ''}`)}</div>`;
+      if (d.rate_limited) showShelf();
+      return;
+    }
+  } catch (e) {
+    stopThinking();
+    // A failed fetch on iOS reads "Load failed", which explains nothing. It
+    // is nearly always the connection dying under a slow answer - and the
+    // answer that took too long is cached now, so the retry is quick. Say
+    // that, and offer the retry as a button rather than a shrug.
+    out.innerHTML = `<div class="card warn"><b>The connection dropped mid-search.</b>
+      <div class="sub">Not your fault - it happens on the move. Try again;
+        the second run is much quicker.</div>
+      <button class="primary" data-act="look" data-value="${esc(query)}">Search again</button></div>`;
+    return;
+  }
+  playlistName = d.playlist_name || myDefaultList;
+  loadPlaylists();
+  const back = `<div class="backbar"><button data-act="home">← Home</button>
+    <span>Showing results for “${esc(query)}”</span></div>`;
+
+  // Somebody trying it on rather than asking for a film. The assistant
+  // answers, and that is the whole card - no results, no "nothing matched",
+  // no ask-for-it button, because there is nothing to ask for.
+  if (d.kind === 'cheeky') {
+    out.innerHTML = back + `<div class="card persona">${personaSays(brushOffMood(),
+        `<b>${esc(persona.name)} says</b>
+         <div class="sub">${esc(d.interpretation || brushOff())}</div>`)}
+      </div>`;
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    return;
+  }
+
+  // We do not have it: say so first, and offer to ask for it.
+  if (d.kind === 'title_missing') {
+    const guesses = d.did_you_mean || [];
+    const guessBlock = guesses.length
+      ? `<div class="rowhead">Which one do you mean?</div>` + guesses.map(g => `
+          <div class="guess">
+            ${g.poster ? `<img src="${esc(g.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+            <div><h3>${esc(g.title)}</h3>
+              <div class="meta">${[g.year, g.language ? g.language.toUpperCase() : '']
+                 .filter(Boolean).map(esc).join(' · ')}</div>
+              <div class="blurb">${esc(g.overview)}</div>
+              ${g.release_state === 'cinema' || g.release_state === 'unreleased'
+                ? `<div class="notyet">${g.release_state === 'cinema'
+                     ? "Chill - it's still in the cinema. Go watch it!"
+                     : `Not out yet${g.available_from ? ` - due ${esc(g.available_from)}` : ''}.`}</div>
+                   <button class="ghost" data-act="ask" data-notyet="1"
+                     data-when="${esc(g.available_from || '')}"
+                     data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}">🔔 Tell me when it lands</button>`
+                : `<button class="primary" data-act="ask" data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}">Ask for this one</button>`}
+            </div>
+          </div>`).join('')
+      : '';
+
+    const showGuesses = (d.did_you_mean_shows || []).length
+      ? `<div class="rowhead">Or is it a series?</div>` + d.did_you_mean_shows.slice(0, 3).map(g => `
+          <div class="guess">
+            ${g.poster ? `<img src="${esc(g.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+            <div><h3>${esc(g.title)}</h3>
+              <div class="meta">${[g.year, (g.all_seasons || []).length
+                 ? `${g.all_seasons.length} season${g.all_seasons.length === 1 ? '' : 's'}` : '']
+                 .filter(Boolean).map(esc).join(' · ')}</div>
+              <div class="blurb">${esc(g.overview)}</div>
+              <button class="primary" data-act="askshow" data-value="${esc(g.title)}" data-season="next">Ask for the whole series</button>
+              ${(g.all_seasons || []).length > 1
+                ? `<div class="seasons">` + g.all_seasons.map(n =>
+                    `<button data-act="askshow" data-value="${esc(g.title)}" data-season="${n}">S${n} only</button>`).join('') + `</div>`
+                : ''}
+            </div>
+          </div>`).join('')
+      : '';
+
+    out.innerHTML = back + `<div class="card warn" id="missing">
+        ${personaFace(guesses.length ? 'unsure' : 'sorry', 'tiny')}
+        <b>We don't have “${esc(query)}”.</b>
+        <div class="sub">${guesses.length
+          ? 'Pick the right one below and it goes on the list — you\'ll get a notification when it arrives.'
+          : 'Ask for it and it goes on the list — you\'ll get a notification when it arrives.'}</div>
+        ${guesses.length ? '' : `<button class="primary" data-act="ask" data-value="${esc(query)}">Ask for the film</button>
+           <button class="ghost" data-act="askshow" data-value="${esc(query)}" data-season="next">Ask for the series</button>`}
+      </div>` + guessBlock + showGuesses +
+      ((d.close || []).length
+        ? `<div class="rowhead">We do have these, if you meant one of them</div>`
+          + d.close.map(m => filmCard(m, true)).join('')
+        : '') +
+      (d.matches.length ? `<div class="rowhead">While you're here — similar things we do have</div>`
+        + d.matches.map(m => filmCard(m, true)).join('') : '');
+    wireSelection();
+    return;
+  }
+
+  if (!d.matches.length && !(d.shows || []).length) {
+    out.innerHTML = back + `<div class="card warn">${personaSays('shrug',
+        `<b>Nothing here matches that.</b>
+         <div class="sub">${esc(d.interpretation || '')}</div>
+         <button class="primary" data-act="ask" data-value="${esc(query)}">Ask for it instead</button>`)}
+      </div>`;
+    return;
+  }
+
+  const onlySeries = !d.matches.length && (d.shows || []).length;
+  const head = d.kind === 'title'
+    ? `<div class="card good"><b>${
+         onlySeries ? 'Yes — we have that.'
+         : d.matches.length === 1 ? 'Yes — we have that.' : 'We have these.'}</b>
+       <div class="sub">${
+         // The headline already says we have it; only add the detail when it
+         // says something more, like how many seasons.
+         (d.interpretation && d.interpretation !== 'We have that.')
+           ? esc(d.interpretation) + ' ' : ''}${
+         onlySeries ? '' : 'Tap to add it to one of your playlists.'}</div></div>`
+    : `<div class="card good"><b>${d.matches.length} to choose from</b>
+       <div class="sub">${esc(d.interpretation)}</div></div>`;
+
+  const missing = (d.captured_missing || []).length
+    ? `<div class="card"><b>${d.captured_missing.length} of these have gone missing from the drive.</b>
+       <div class="sub">Added to the wanted list so they can be replaced.</div></div>` : '';
+
+  const series = (d.shows || []).length
+    ? `<div class="rowhead">Series</div>` + d.shows.map(showCard).join('') : '';
+  lastFilms = d.matches || [];
+  filmRenderer = (m) => filmCard(m, true);
+  const films = d.matches.length
+    ? ((d.shows || []).length ? `<div class="rowhead">Films</div>` : '')
+      + sortBar() + `<div id="films">${sortedFilms().map(m => filmCard(m, true)).join('')}</div>`
+    : '';
+  out.innerHTML = back + head + missing + series + films;
+  wireSelection();
+}
+
+// ---- the wanted list ----
+const WANTED_SAYS = {
+  wanted:    ['warn', 'Waiting'],
+  acquired:  ['good', 'Arrived'],
+  dismissed: ['', 'Set aside'],
+};
+
+function wantedRow(w) {
+  const [tone, word] = WANTED_SAYS[w.status] || WANTED_SAYS.wanted;
+  const season = w.season ? ` \u2014 series ${w.season}` : (w.kind === 'show' ? ' \u2014 series' : '');
+  const asked = w.requested_by ? `Asked by ${esc(w.requested_by)}` : 'Asked for';
+  return `<div class="card ${tone}">
+      <b>${label(w.title, w.year)}${season}</b>
+      <div class="sub">${word} \u00b7 ${asked}</div>
+    </div>`;
+}
+
+async function showWanted() {
+  out.innerHTML = `<div class="backbar"><button data-act="home">\u2190 Home</button>
+    <span>The wanted list</span></div>
+    <div class="card">Fetching the list\u2026</div>`;
+  window.scrollTo({top: 0, behavior: 'smooth'});
+  let d;
+  try {
+    d = await (await fetch('/request/wanted/list')).json();
+  } catch (e) {
+    out.innerHTML = `<div class="card bad"><b>Could not fetch the list.</b>
+      <div class="sub">${esc(e.message)}</div></div>`;
+    return;
+  }
+  const items = d.items || [];
+  const of = (st) => items.filter(w => w.status === st);
+  const section = (st, head) => of(st).length
+    ? `<div class="rowhead">${head} (${of(st).length})</div>` + of(st).map(wantedRow).join('')
+    : '';
+
+  out.innerHTML = `<div class="backbar"><button data-act="home">\u2190 Home</button>
+      <span>The wanted list</span></div>` +
+    (items.length
+      ? section('wanted', 'Waiting') + section('acquired', 'Arrived') +
+        section('dismissed', 'Set aside')
+      : `<div class="card">${personaSays('looking', `<b>Nothing on the list yet.</b>
+         <div class="sub">Search for something we haven't got and it lands here.</div>`)}</div>`);
+}
+
+async function ask(title, btn) {
+  try {
+    const res = await fetch('/request/wanted', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not send that'); return; }
+    // Something not out yet is a standing order rather than a request: there
+    // is nothing to fetch today, so say what will actually happen.
+    const notYet = btn && btn.dataset.notyet;
+    const due = btn && btn.dataset.when ? ` It's due ${esc(btn.dataset.when)}.` : '';
+    let msg;
+    if (d.found) msg = `<b>Good news — we already have that.</b><div class="sub">${
+      esc(d.matches.map(m => m.title + ' (' + m.year + ')').join(', '))}</div>`;
+    else if (d.added_to_wanted) msg = notYet
+      ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
+      : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`;
+    else {
+      const status = d.wanted ? d.wanted.status : 'wanted';
+      const note = status === 'dismissed' ? 'That one has been asked for before and set aside for now.'
+        : status === 'acquired' ? 'That is marked as already picked up — it may still be arriving.'
+        : 'It was already on the list.';
+      msg = `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">${note}</div>`;
+    }
+    out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}${msg}</div>`);
+
+    // The card that said we hadn't got it, and the button that asked, are both
+    // out of date now - say so rather than leaving the old instruction standing.
+    if (d.added_to_wanted || d.wanted) {
+      const miss = document.getElementById('missing');
+      if (miss) {
+        miss.className = 'card good';
+        miss.innerHTML = `<b>${label(d.title, d.year)} is on the list.</b>` +
+          `<div class="sub">Ask for anything else below, or head back.</div>`;
+      }
+      if (btn) {
+        btn.textContent = 'On the list \u2713';
+        btn.disabled = true;
+        btn.classList.remove('primary');
+      }
+    }
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (e) { alert(e.message); }
+}
+
+// ---- playlists ----
+// The list they last added to. A household member building "Friday Films"
+// should land every later pick in it without re-choosing each time.
+function rememberList(name) { try { localStorage.setItem('plexget-list', name); } catch (e) {} }
+
+async function loadPlaylists() {
+  let lists = [], fallback = myDefaultList || 'My Picks';
+  try {
+    const res = await fetch('/request/playlists');
+    const d = await res.json();
+    lists = d.playlists || []; fallback = d.default || fallback;
+  } catch (e) { /* offer the default anyway */ }
+  myListCount = lists.length;
+  const seen = new Set(lists.map(p => p.title.toLowerCase()));
+  const options = [];
+  if (!seen.has(fallback.toLowerCase())) options.push(`<option value="${esc(fallback)}">${esc(fallback)}</option>`);
+  options.push(...lists.map(p => `<option value="${esc(p.title)}">${esc(p.title)} (${p.items})</option>`));
+  options.push(`<option value="__new__">+ New list…</option>`);
+  target.innerHTML = options.join('');
+  // Whatever they last added to is where the next add goes, until they say
+  // otherwise - the picker still offers everything else.
+  try {
+    const last = localStorage.getItem('plexget-list');
+    if (last && [...target.options].some(o => o.value === last)) target.value = last;
+  } catch (e) {}
+}
+
+function chosenList() {
+  if (target.value !== '__new__') return target.value;
+  return (prompt('Name this list', playlistName || myDefaultList) || '').trim();
+}
+
+document.getElementById('mylists').addEventListener('click', showLists);
+
+document.getElementById('clearpick').addEventListener('click', () => {
+  picked.clear();
+  out.querySelectorAll('.film.picked').forEach(el => el.classList.remove('picked'));
+  refreshBar();
+});
+
+document.getElementById('add').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget; btn.disabled = true;
+  try {
+    const res = await fetch('/request/playlist', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({playlist: chosenList(), rating_keys: [...picked.keys()]}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not add those'); return; }
+    out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}
+      <b>Added ${d.added} to “${esc(d.playlist)}”.</b>
+      <div class="sub">${d.created ? 'New list — ' : ''}it's in your Plex now.${
+        d.already_there ? ' ' + d.already_there + ' were already in it.' : ''}</div></div>`);
+    // This list is now where the next add goes - and if it was just made,
+    // reloading the picker is what gets it offered by name.
+    rememberList(d.playlist);
+    loadPlaylists();
+    picked.clear();
+    out.querySelectorAll('.film.picked').forEach(el => el.classList.remove('picked'));
+    refreshBar(); loadPlaylists();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (e) { alert(e.message); }
+  finally { btn.disabled = false; }
+});
+
+document.getElementById('makelist').addEventListener('click', async () => {
+  const query = input.value.trim();
+  if (!query) { input.focus(); return; }
+  input.blur();
+  const stopThinking = startThinking(query, 'list');
+  try {
+    const res = await fetch('/request/playlist/auto', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query, count: 12,
+                            include_missing: document.getElementById('alsomissing').checked}),
+    });
+    const d = await res.json();
+    stopThinking();
+    if (!res.ok) {
+      out.innerHTML = `<div class="card warn"><b>${esc(d.error || 'Could not build that')}</b>
+        <div class="sub">${esc(d.interpretation || 'Try describing it differently.')}</div></div>`;
+      return;
+    }
+    const alsoWanted = (d.also_wanted || []).length
+      ? `<div class="card warn">
+           <b>${d.also_wanted.length} more added to the wanted list.</b>
+           <div class="sub">These fit but aren't here yet — you'll hear when they arrive.</div>
+         </div>` + d.also_wanted.map(f => `
+           <div class="guess">
+             ${f.poster ? `<img src="${esc(f.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+             <div><h3>${esc(f.title)}</h3>
+               <div class="meta">${[f.year, f.rating ? '★ ' + f.rating : ''].filter(Boolean).map(esc).join(' · ')}</div>
+               <div class="blurb">On the wanted list.</div></div>
+           </div>`).join('')
+      : '';
+
+    rememberList(d.playlist);
+    loadPlaylists();
+    out.innerHTML = `<div class="backbar"><span>Playlist built</span><button data-act="home">← Home</button></div>
+      <div class="card good">
+        ${personaFace('excited', 'tiny')}
+        <b>${d.created ? 'Made' : 'Added to'} “${esc(d.playlist)}” — ${d.added} film(s).</b>
+        <div class="sub">${esc(d.interpretation)} It's in your Plex now.</div></div>`
+      + d.films.map(f => `<div class="film"><div><h3>${esc(f.title)}</h3>
+          <div class="meta">${esc(String(f.year || ''))}</div></div></div>`).join('')
+      + alsoWanted;
+    loadPlaylists();
+  } catch (e) {
+    stopThinking();
+    out.innerHTML = `<div class="card bad"><b>Could not build that</b><div class="sub">${esc(e.message)}</div></div>`;
+  }
+});
+
+document.getElementById('findbtn').addEventListener('click', () => {
+  const q = input.value.trim(); if (q) { input.blur(); find(q); }
+});
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); const q = input.value.trim(); if (q) { input.blur(); find(q); } }
+});
+document.getElementById('helpbtn').addEventListener('click', () => document.getElementById('help').showModal());
+document.getElementById('belltest').addEventListener('click', (ev) => {
+  document.getElementById('bellbox').close();
+  testPush(ev.currentTarget);
+});
+document.getElementById('appname').addEventListener('click', () => goHome());
+document.getElementById('appname').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goHome(); }
+});
+
+// ---- notifications ----
+// iOS only exposes notifications to a web app launched from the home screen.
+// In a Safari tab the Notification API is simply absent, so asking for
+// permission there throws and nothing appears to happen - which is exactly how
+// it looked. Every path now says something.
+function installedToHomeScreen() {
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+function pushSupport() {
+  if (!('serviceWorker' in navigator)) return 'no-sw';
+  if (!('PushManager' in window) || !('Notification' in window)) {
+    return installedToHomeScreen() ? 'unsupported' : 'needs-install';
+  }
+  return 'ok';
+}
+
+async function setupPush(force) {
+  if (pushSupport() !== 'ok') return pushSupport();
+  let reg;
+  try { reg = await navigator.serviceWorker.register('/sw.js', {scope: '/'}); }
+  catch (e) { return 'no-sw'; }
+  await navigator.serviceWorker.ready;
+
+  const existing = await reg.pushManager.getSubscription();
+  if (existing && !force) return 'already';
+  if (Notification.permission === 'denied') return 'blocked';
+  if (Notification.permission !== 'granted') {
+    if (!force) return 'not-asked';
+    if (await Notification.requestPermission() !== 'granted') return 'blocked';
+  }
+
+  const { key } = await (await fetch('/push/key')).json();
+  const sub = existing || await reg.pushManager.subscribe({
+    userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key),
+  });
+  await fetch('/push/subscribe', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({subscription: sub.toJSON()}),
+  });
+  return 'on';
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from([...atob(base64)].map(c => c.charCodeAt(0)));
+}
+
+const PUSH_SAYS = {
+  on: ['good', 'That is that sorted.',
+       'Notifications are on - you\'ll hear when your films arrive. ' +
+       '<button class="ghost" data-act="test">Send a test</button>', 'excited'],
+  already: ['good', 'Notifications are already on for this device.',
+            'Nothing more to do. <button class="ghost" data-act="test">Send a test</button>'],
+  blocked: ['warn', 'Notifications are switched off for this app.',
+            'Turn them back on in Settings → Notifications → PlexGet, then try again.'],
+  'needs-install': ['warn', 'Add PlexGet to your home screen first.',
+    'On an iPhone, notifications only work from the home screen icon, not a Safari tab. ' +
+    'Tap the share button at the bottom of Safari, choose <b>Add to Home Screen</b>, ' +
+    'then open PlexGet from the new icon and tap the bell again.'],
+  unsupported: ['warn', 'This device cannot do notifications.',
+                'It needs iOS 16.4 or newer, or a recent Android or desktop browser.'],
+  'no-sw': ['warn', 'Notifications are unavailable here.',
+            'The page needs to be opened over its normal address for this to work.'],
+  'not-asked': ['warn', 'Want a nudge when your films arrive?',
+                'Notifications are off. One tap turns them on - and off again any time.'],
+};
+
+async function notificationsOn() {
+  let state;
+  try { state = await setupPush(true); }
+  catch (e) { state = 'no-sw'; }
+  if (state === 'on' || state === 'already') {
+    // The ask is answered: any card still offering to turn notifications on
+    // goes, or the yes and the question sit on screen together.
+    document.querySelectorAll('[data-shut="not-asked"], [data-shut="needs-install"]')
+      .forEach(el => el.remove());
+  }
+  const [tone, title, detail, mood] = PUSH_SAYS[state] || PUSH_SAYS['no-sw'];
+  status(tone, title, detail, mood);
+}
+
+async function testPush(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  let d = {};
+  try {
+    d = await (await fetch('/push/test', {method: 'POST'})).json();
+  } catch (e) {
+    d = { sent: 0, failed: [e.message] };
+  }
+  const worked = d.sent > 0;
+  const why = worked
+    ? `Sent to ${d.sent} device${d.sent === 1 ? '' : 's'}. It should appear in a second or two.`
+    : (d.failed || []).length
+      ? esc(d.failed.join('; '))
+      : (installedToHomeScreen()
+          ? 'This device has not registered yet. Tap the bell to turn notifications on.'
+          : 'This device is in a Safari tab. Add PlexGet to your home screen and open it from there.');
+  status(worked ? 'good' : 'warn', worked ? 'Test sent' : 'Nothing to send to', why);
+  if (btn) { btn.disabled = false; btn.textContent = 'Send a test'; }
+}
+
+// ---- sign in ----
+function showSignedIn() {
+  whoami.innerHTML = `${esc(me.username)}
+    ${me.role === 'owner'
+      ? '<button class="icon-btn" data-act="announce" title="Tell the household">\u{1F4E3}</button>' : ''}
+    <button class="icon-btn" data-act="wanted" title="The wanted list">📋</button>
+    <button class="icon-btn" data-act="skins" title="Change the look">🎨</button>
+    <button class="icon-btn" data-act="bell" title="Notifications">🔔</button>
+    <button class="icon-btn" onclick="signOut()" title="Sign out" aria-label="Sign out">🚪</button>`;
+}
+
+async function signOut() {
+  await fetch('/auth/logout', {method: 'POST'});
+  try { localStorage.removeItem('plexget-known'); } catch (e) {}
+  location.reload();
+}
+
+let pollTimer = null;
+let pollWake = null;
+
+function stopPolling() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (pollWake) {
+    document.removeEventListener('visibilitychange', pollWake);
+    window.removeEventListener('pageshow', pollWake);
+    pollWake = null;
+  }
+}
+
+// One live code per device, shared by every tab and survived by reloads. The
+// old way minted a fresh pair of pins on every load of the sign-in screen, so
+// a confused retry left three tabs each showing a different code and polling
+// a different pin - and enough retries got the whole server rate-limited by
+// plex.tv, at which point nobody in the house could sign in at all.
+const PIN_KEY = 'plexget-pin';
+function storedPin() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PIN_KEY) || 'null');
+    // A minute's margin: a code about to lapse mid-type is worse than a new one.
+    if (p && p.id && Date.now() - p.at < ((p.expires_in || 900) - 60) * 1000) return p;
+  } catch (e) {}
+  return null;
+}
+function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch (e) {} }
+
+async function beginSignIn() {
+  stopPolling();   // a second attempt must not leave the first one running
+  // Clear the front page so the sign-in has it to itself. Anything since
+  // dropped from the markup is skipped rather than throwing - a missing
+  // element here used to kill the sign-in before it drew anything.
+  for (const sel of ['.searchbar', '.personagreet', '.minor']) {
+    const el = document.querySelector(sel);
+    if (el) el.style.display = 'none';
+  }
+  // The holding wordmark sits beside the results, not inside them, so it has
+  // to go by hand or the sign-in draws a second one underneath it.
+  const holding = document.getElementById('firstpaint');
+  if (holding) holding.remove();
+
+  const shell = (inner) => `<div class="welcome">
+      <div class="hero">
+        ${personaFace('welcome', 'tall')}
+        <div class="mark">Plex<span>Get</span></div>
+        <p class="tag">Ask for a film or a series. It turns up on the telly.</p>
+        <div class="strip"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="does">
+        <div>
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4.5-4.5"/></svg>
+          <div><b>See what's already there</b>
+          <p>Films and series, by name — or just say what you fancy, like
+             “something gentle after a long week”.</p></div>
+        </div>
+        <div>
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          <div><b>Ask for what isn't</b>
+          <p>One tap puts it on the list. You get a nudge when it arrives.</p></div>
+        </div>
+        <div>
+          <svg viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7"/><path d="M18 13v6M15 16h6"/></svg>
+          <div><b>Keep your own lists</b>
+          <p>Playlists you make here show up in your own Plex, on any device.</p></div>
+        </div>
+      </div>
+      ${inner}
+      <div class="aihint">
+        <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5 10.1 10.9 5.5 9l4.6-1.4z"/><path d="M18 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
+        <div><b>There's an AI in here</b>
+        <p>Describe what you're after and it works out what to look for.
+           It only ever searches this library — it can't fetch things off the internet,
+           write you an essay, or run up a bill.</p></div>
+      </div>
+      <p class="safety">Signing in with Plex is how we know it's you.
+         Your password stays with Plex — it never comes near this.</p>
+    </div>`;
+
+  out.innerHTML = shell(`<div class="signin"><div class="lead">Getting you a code…</div></div>`);
+
+  let pin = storedPin();
+  if (!pin) {
+    try {
+      const res = await fetch('/auth/start', {method: 'POST'});
+      const d = await res.json();
+      if (res.status === 429) {
+        // Plex or this server asking for a pause is a countdown, not a dead
+        // end - the retry happens by itself, so nobody is left guessing when.
+        const wait = Math.min(d.retry_after || 60, 120);
+        out.innerHTML = shell(`<div class="signin"><div class="lead">One moment</div>
+          <div class="why">${esc(d.error || 'Too many sign-ins at once.')}</div>
+          <div class="code" id="signin-wait">${wait}</div>
+          <div class="codelabel">seconds until it tries again by itself</div></div>`);
+        let left = wait;
+        const tick = setInterval(() => {
+          left -= 1;
+          const el = document.getElementById('signin-wait');
+          if (!el) { clearInterval(tick); return; }
+          el.textContent = left;
+          if (left <= 0) { clearInterval(tick); beginSignIn(); }
+        }, 1000);
+        return;
+      }
+      if (!res.ok) throw new Error(d.error || 'could not start');
+      pin = d;
+      pin.at = Date.now();
+      try { localStorage.setItem(PIN_KEY, JSON.stringify(pin)); } catch (e) {}
+    } catch (e) {
+      out.innerHTML = shell(`<div class="signin"><div class="lead">Couldn't reach Plex</div>
+        <div class="why">${esc(e.message)}</div>
+        <a class="bigbtn" href="#" onclick="beginSignIn();return false">Try again</a></div>`);
+      return;
+    }
+  }
+
+  out.innerHTML = shell(`<div class="signin">
+      <div class="lead">Sign in with Plex</div>
+      <div class="why">Takes about twenty seconds.</div>
+      <a class="bigbtn" href="${esc(pin.auth_url)}" target="_blank" rel="noopener">Sign in with Plex</a>
+      <div class="or">or enter this code</div>
+      <div class="code">${esc(pin.code)}</div>
+      <div class="codelabel">at <span class="url">plex.tv/link</span></div>
+      <div class="comeback">Once Plex says you're linked, <b>come back to this
+        tab</b> - the sign-in finishes here, by itself. No need to refresh.</div>
+      <div class="fallback">Button sending you in circles? Some accounts - Google
+        ones especially - get stuck on Plex&rsquo;s verify screen. The code always
+        works: open <span class="url">plex.tv/link</span> and type it in.
+        Same code on every tab - reloading won't change it.
+        <a href="#" onclick="clearPin();beginSignIn();return false">Get a fresh one</a>
+        if it's played out.</div>
+      <div class="status" id="signin-status"><span class="dot"></span>Waiting for you…</div>
+    </div>`);
+
+  // Signing in means leaving this tab for plex.tv, and iOS suspends timers in
+  // a tab you are not looking at - so the poll that should notice the link can
+  // sit idle for a minute after you come back. Waiting on the interval alone
+  // is what made it feel broken; coming back to the tab now checks at once.
+  async function checkPin() {
+    // Aged from when the code was minted, not when this tab drew it - the
+    // code is shared across tabs and a late tab must not think it younger.
+    if (Date.now() - (pin.at || 0) > (pin.expires_in || 900) * 1000) {
+      stopPolling(); clearPin();
+      document.getElementById('signin-status').innerHTML =
+        `That code expired. <a href="#" onclick="beginSignIn();return false">Get a new one</a>`;
+      return;
+    }
+    try {
+      const res = await fetch(`/auth/poll/${pin.id}` + (pin.link_id ? `?also=${pin.link_id}` : ''));
+      const d = await res.json();
+      if (res.status === 403) {
+        stopPolling(); clearPin();
+        // The server's refusal says what to do - no access means ask whoever
+        // runs the server, an unaccepted invite means go and accept it.
+        // Don't paper over it.
+        document.getElementById('signin-status').innerHTML =
+          `<b>${esc(d.error)}</b><br>
+           <a href="#" onclick="beginSignIn();return false">Try again once you have</a>`;
+        return;
+      }
+      if (d.status === 'unknown') {
+        // The server no longer recognises this code - restarted, most likely.
+        // Waiting would last for ever; say so and offer a new one.
+        stopPolling(); clearPin();
+        document.getElementById('signin-status').innerHTML =
+          `That code is no longer live. <a href="#" onclick="beginSignIn();return false">Get a new one</a>`;
+        return;
+      }
+      if (d.status === 'ok') {
+        stopPolling(); clearPin();
+        const status = document.getElementById('signin-status');
+        if (status) status.innerHTML = `<span class="dot"></span>Linked — setting you up…`;
+        // Do not reload on faith. The session cookie arrives on this poll's
+        // response, and Safari commits it asynchronously - a reload fired in
+        // the same breath can race it, and the fresh page turns up cookieless
+        // and shows the sign-in again. One phone did exactly that four times
+        // in a row, each a completed sign-in the page threw away. So: confirm
+        // the cookie answers before reloading, and if it never does, say what
+        // is actually wrong instead of quietly starting over.
+        // Probed with a cookie-only endpoint: /auth/me also road-tests the
+        // Plex token against the server, and a token seconds old can fail
+        // that check before Plex has caught up - which would end the very
+        // session being confirmed.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          await new Promise(r => setTimeout(r, 400));
+          try {
+            if ((await fetch('/request/wanted/list')).ok) { location.reload(); return; }
+          } catch (e) { /* try again */ }
+        }
+        if (status) status.innerHTML =
+          `<b>You're signed in with Plex, but this browser is not keeping the
+           session.</b><br>Private Browsing does this - open this page in a
+           normal tab and it will work.
+           <a href="#" onclick="beginSignIn();return false">Try again</a>`;
+      }
+    } catch (e) { /* keep waiting */ }
+  }
+
+  function onReturn() {
+    if (document.hidden) return;
+    const status = document.getElementById('signin-status');
+    if (status) status.innerHTML = `<span class="dot"></span>Checking…`;
+    checkPin();
+  }
+
+  // pageshow as well as visibilitychange: Safari restores a page from its
+  // back-forward cache without firing the latter.
+  pollWake = onReturn;
+  document.addEventListener('visibilitychange', pollWake);
+  window.addEventListener('pageshow', pollWake);
+  pollTimer = setInterval(checkPin, 2500);
+  // And once right away, not in 2.5 seconds. The tapped flow sends the person
+  // back here AFTER they have linked - a reused code may already be claimed,
+  // and those seconds of apparently nothing happening are exactly when
+  // somebody starts refreshing.
+  checkPin();
+}
+
+// The two faces of the quick-add, as geometry rather than glyphs.
+const QADD_PLUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+const QADD_TICK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12.5l5 5 10-11"/></svg>';
+
+function posterRow(row) {
+  // A div rather than a button: the + inside is a button of its own, and a
+  // button inside a button is invalid markup Safari resolves unpredictably.
+  return `<div class="row"><h4>${esc(row.title)}</h4><div class="reel">` +
+    row.films.map(f => `<div class="poster" data-act="look" data-value="${esc(f.title)}" role="button" tabindex="0">
+        <div class="shot">
+          <img src="/wanted/thumb?path=${encodeURIComponent(f.thumb)}" alt="" loading="lazy">
+          <button class="qadd" data-act="quickadd" data-key="${esc(f.rating_key)}"
+                  data-title="${esc(f.title)}" aria-label="Add to my list">${QADD_PLUS}</button>
+        </div>
+        <span>${esc(f.title)}</span></div>`).join('') +
+    `</div></div>`;
+}
+
+// One tap on a poster's +: the film lands in whichever list they last used,
+// no picker, no journey. The ✓ it turns into is the whole receipt.
+async function quickAdd(btn) {
+  let name = '';
+  try { name = localStorage.getItem('plexget-list') || ''; } catch (e) {}
+  name = name || myDefaultList || 'My Picks';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/request/playlist', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({playlist: name, rating_keys: [btn.dataset.key]}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not add that'); btn.disabled = false; return; }
+    btn.classList.add('done'); btn.innerHTML = QADD_TICK; btn.disabled = false;
+    rememberList(d.playlist);
+  } catch (e) { btn.disabled = false; }
+}
+
+function lookUp(title) { input.value = title; find(title); }
+
+// ---- press and hold for the full story ----
+// Everything on a poster or a film card is already a tap away from a search,
+// so the detail lives on a press-and-hold: the gesture people already use on
+// a phone for "tell me more", and one nobody hits by accident.
+const PRESS_MS = 450;
+let pressTimer = null, pressTarget = null, pressFired = false, pressAt = null;
+
+function keyFrom(el) {
+  const card = el.closest('.film[data-key]');
+  if (card) return {key: card.dataset.key, el: card};
+  const poster = el.closest('.poster');
+  const add = poster && poster.querySelector('.qadd');
+  return add ? {key: add.dataset.key, el: poster} : null;
+}
+
+function pressStart(ev) {
+  // Never on the + or a button: those have their own job, and holding one
+  // should not quietly become a different action.
+  if (ev.target.closest('.qadd, button:not(.poster), .shut')) return;
+  const found = keyFrom(ev.target);
+  if (!found || !found.key) return;
+  pressFired = false;
+  pressTarget = found.el;
+  const touch = ev.touches && ev.touches[0];
+  pressAt = touch ? {x: touch.clientX, y: touch.clientY} : null;
+  pressTimer = setTimeout(() => {
+    pressFired = true;
+    // Self-clearing: the flag exists to swallow the tap that follows a press,
+    // and if that tap never comes it must not lie in wait for an unrelated one.
+    setTimeout(() => { pressFired = false; }, 700);
+    pressTarget && pressTarget.classList.remove('pressing');
+    if (navigator.vibrate) navigator.vibrate(12);   // a small "got it"
+    showPeek(found.key);
+  }, PRESS_MS);
+  found.el.classList.add('pressing');
+}
+
+function pressCancel() {
+  clearTimeout(pressTimer);
+  pressTimer = null;
+  if (pressTarget) pressTarget.classList.remove('pressing');
+  pressTarget = null;
+}
+
+// A finger that wanders is scrolling, not pressing.
+function pressMove(ev) {
+  if (!pressAt || !ev.touches || !ev.touches[0]) return;
+  const t = ev.touches[0];
+  if (Math.abs(t.clientX - pressAt.x) > 10 || Math.abs(t.clientY - pressAt.y) > 10) pressCancel();
+}
+
+document.addEventListener('touchstart', pressStart, {passive: true});
+document.addEventListener('touchmove', pressMove, {passive: true});
+document.addEventListener('touchend', pressCancel);
+document.addEventListener('touchcancel', pressCancel);
+document.addEventListener('mousedown', (e) => { if (e.button === 0) pressStart(e); });
+document.addEventListener('mouseup', pressCancel);
+// Right-click is the same intent with a mouse.
+document.addEventListener('contextmenu', (ev) => {
+  const found = keyFrom(ev.target);
+  if (!found || !found.key || ev.target.closest('.qadd')) return;
+  ev.preventDefault();
+  showPeek(found.key);
+});
+// The press already answered; do not let the tap underneath run a search too.
+document.addEventListener('click', (ev) => {
+  if (pressFired) { pressFired = false; ev.stopPropagation(); ev.preventDefault(); }
+}, true);
+
+// Tapping the dark outside it closes it, the way a sheet should.
+document.getElementById('peek').addEventListener('click', (ev) => {
+  if (ev.target.id === 'peek') ev.target.close();
+});
+
+async function showPeek(key) {
+  const box = document.getElementById('peek');
+  const art = document.getElementById('peekart');
+  const body = document.getElementById('peekbody');
+  art.style.backgroundImage = '';
+  body.innerHTML = `<div class="sub" style="padding-top:34px">Looking it up…</div>`;
+  box.showModal();
+
+  let d;
+  try {
+    const res = await fetch('/request/detail?key=' + encodeURIComponent(key));
+    d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'could not fetch that');
+  } catch (e) {
+    body.innerHTML = `<div style="padding-top:34px"><b>Could not look that up.</b>
+      <div class="sub">${esc(e.message)}</div>
+      <div class="peekbar"><form method="dialog"><button class="primary">Close</button></form></div></div>`;
+    return;
+  }
+
+  if (d.art) art.style.backgroundImage =
+    `url('/wanted/thumb?path=${encodeURIComponent(d.art)}&width=900&height=500')`;
+
+  const facts = [
+    d.year, d.content_rating,
+    d.kind === 'show'
+      ? (d.seasons ? `${d.seasons} season${d.seasons === 1 ? '' : 's'}` : '') : '',
+    d.kind === 'show'
+      ? (d.episodes ? `${d.episodes} episodes` : '')
+      : (d.runtime_minutes ? `${d.runtime_minutes} min` : ''),
+    d.rating ? '★ ' + d.rating : '',
+    d.quality || '',
+  ].filter(Boolean).map(esc).join(' · ');
+
+  const line = (label, list) => (list && list.length)
+    ? `<div><b>${label}</b> ${esc(list.join(', '))}</div>` : '';
+
+  body.innerHTML = `
+    <h3>${esc(d.title)}</h3>
+    <div class="facts">${facts}</div>
+    ${d.tagline ? `<div class="blurb"><i>${esc(d.tagline)}</i></div>` : ''}
+    ${d.summary ? `<div class="blurb">${esc(d.summary)}</div>` : ''}
+    <div class="crew">
+      ${line('Genres', d.genres)}
+      ${line(d.directors && d.directors.length === 1 ? 'Director' : 'Directors', d.directors)}
+      ${line('Writing', d.writers)}
+      ${line('Starring', d.cast)}
+      ${d.studio ? `<div><b>Studio</b> ${esc(d.studio)}</div>` : ''}
+      ${d.kind === 'show' && d.watched_episodes
+        ? `<div><b>Watched</b> ${d.watched_episodes} of ${d.episodes || '?'} episodes</div>` : ''}
+    </div>
+    <div class="peekbar">
+      <button class="primary" id="peekadd">Add to my list</button>
+      <form method="dialog" style="margin-left:auto"><button class="ghost">Close</button></form>
+    </div>`;
+
+  const add = document.getElementById('peekadd');
+  add.onclick = async () => {
+    add.dataset.key = d.rating_key;
+    await quickAdd(add);
+    add.textContent = 'On your list ✓';
+    add.disabled = true;
+  };
+}
+
+let heroTimer = null;
+let driftTimer = null;
+
+function startHero(films) {
+  const withArt = films.filter(f => f.art).slice(0, 6);
+  if (!withArt.length) return;
+  const hero = document.getElementById('hero');
+  hero.innerHTML = `<div class="hero-reel">
+      ${withArt.map((f, i) => `<div class="frame${i === 0 ? ' on' : ''}"
+        style="background-image:url('/wanted/thumb?path=${encodeURIComponent(f.art)}&width=900&height=500')"></div>`).join('')}
+      <div class="veil"></div>
+      <div class="dots">${withArt.map((_, i) => `<i class="${i === 0 ? 'on' : ''}"></i>`).join('')}</div>
+      <div class="say"><b id="heroTitle">${esc(withArt[0].title)}</b>
+        <span id="heroSub">${esc(withArt[0].tagline || 'In the library now')}</span>
+        <button class="qadd" id="heroAdd" data-act="quickadd"
+                data-key="${esc(withArt[0].rating_key)}" data-title="${esc(withArt[0].title)}"
+                aria-label="Add to my list">${QADD_PLUS}</button></div>
+    </div>`;
+
+  const frames = [...hero.querySelectorAll('.frame')];
+  const dots = [...hero.querySelectorAll('.dots i')];
+  let at = 0;
+  clearInterval(heroTimer);
+  heroTimer = setInterval(() => {
+    frames[at].classList.remove('on');
+    dots[at].classList.remove('on');
+    at = (at + 1) % frames.length;
+    // restart the slow zoom on the frame coming in
+    frames[at].style.animation = 'none';
+    void frames[at].offsetWidth;
+    frames[at].style.animation = '';
+    frames[at].classList.add('on');
+    dots[at].classList.add('on');
+    document.getElementById('heroTitle').textContent = withArt[at].title;
+    document.getElementById('heroSub').textContent = withArt[at].tagline || 'In the library now';
+    // The + follows the film on screen, and un-ticks for the new one.
+    const heroAdd = document.getElementById('heroAdd');
+    if (heroAdd) {
+      heroAdd.dataset.key = withArt[at].rating_key;
+      heroAdd.dataset.title = withArt[at].title;
+      heroAdd.classList.remove('done');
+      heroAdd.innerHTML = QADD_PLUS;
+      heroAdd.disabled = false;
+    }
+  }, 5200);
+
+  hero.querySelector('.hero-reel').addEventListener('click', (e) => {
+    if (e.target.closest('.qadd')) return;   // the + is its own action
+    lookUp(withArt[at].title);
+  });
+}
+
+function startDrift(reel) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  reel.classList.add('drifting');
+  clearInterval(driftTimer);
+  let held = false;
+  ['pointerdown', 'touchstart', 'wheel'].forEach(evt =>
+    reel.addEventListener(evt, () => { held = true; reel.classList.remove('drifting'); }, {once: true, passive: true}));
+  driftTimer = setInterval(() => {
+    if (held) { clearInterval(driftTimer); return; }
+    if (reel.scrollLeft + reel.clientWidth >= reel.scrollWidth - 2) reel.scrollLeft = 0;
+    else reel.scrollLeft += 1;
+  }, 40);
+}
+
+async function showShelf() {
+  try {
+    const d = await (await fetch('/request/showcase')).json();
+    if (!d.rows || !d.rows.length) return;
+    document.getElementById('shelf').innerHTML = d.rows.map(posterRow).join('');
+    startHero(d.rows[0].films);
+    const first = document.querySelector('#shelf .reel');
+    if (first) startDrift(first);
+  } catch (e) { /* the shelf is a bonus, never a blocker */ }
+}
+
+async function askAnnouncement() {
+  const body = prompt("What shall I tell everyone?\n\nThey get a notification and see it in the app.");
+  if (!body || !body.trim()) return;
+  try {
+    const res = await fetch('/announce', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body: body.trim()}),
+    });
+    const d = await res.json();
+    if (!res.ok) { status('bad', 'That did not send', d.error || ''); return; }
+    status('good', 'Told everyone', `Notified ${d.sent} device${d.sent === 1 ? '' : 's'}.`);
+    showNotes();
+  } catch (e) { status('bad', 'That did not send', e.message); }
+}
+
+// ---- the bell: notes from the owner, and the push switch ----
+// Notes used to land as cards in front of whatever you came here to do, and
+// stayed until dismissed on that device. They live behind the bell now: a dot
+// says something is waiting, opening the bell reads it, and the dot goes.
+let notes = [];
+const SEEN_NOTES = 'plexget-seen-notes';
+const lastSeenNote = () => { try { return +(localStorage.getItem(SEEN_NOTES) || 0); }
+                             catch (e) { return 0; } };
+
+function markBell() {
+  const bell = document.querySelector('[data-act="bell"]');
+  if (!bell) return;
+  const unread = notes.filter(n => n.id > lastSeenNote()).length;
+  bell.classList.toggle('has-news', unread > 0);
+  bell.title = unread ? `${unread} note${unread === 1 ? '' : 's'} from the owner` : 'Notifications';
+}
+
+async function showNotes() {
+  try {
+    const d = await (await fetch('/request/announcements')).json();
+    notes = d.notes || [];
+  } catch (e) { notes = []; }
+  markBell();
+}
+
+async function openBell() {
+  const box = document.getElementById('bellbox');
+  const list = document.getElementById('bellnotes');
+  const push = document.getElementById('bellpush');
+
+  list.innerHTML = notes.length
+    ? notes.map(n => `<div class="note">
+         <b>From ${esc(n.posted_by || 'the owner')}</b>
+         ${esc(n.body)}
+       </div>`).join('')
+    : `<div class="sub">No notes from the owner just now.</div>`;
+
+  // What the bell is really for, said plainly, with the one button that
+  // changes it. The state is read fresh each time it opens.
+  let state = 'no-sw';
+  try { state = await setupPush(false); } catch (e) {}
+  const on = state === 'on' || state === 'already';
+  push.innerHTML = on
+    ? `<div style="margin-top:12px">Notifications are on for this device.</div>`
+    : `<div style="margin-top:12px">${esc((PUSH_SAYS[state] || PUSH_SAYS['no-sw'])[2].replace(/<[^>]*>/g, ''))}
+       ${state === 'not-asked'
+         ? '<div style="margin-top:10px"><button class="primary" id="bellon" type="button">Turn on notifications</button></div>' : ''}</div>`;
+  document.getElementById('belltest').style.display = on ? '' : 'none';
+
+  box.showModal();
+  // Seen is seen: the dot clears the moment the notes are actually in front
+  // of somebody, not when the page happens to load them.
+  if (notes.length) {
+    try { localStorage.setItem(SEEN_NOTES, String(Math.max(...notes.map(n => n.id)))); } catch (e) {}
+  }
+  markBell();
+
+  const turnOn = document.getElementById('bellon');
+  if (turnOn) turnOn.onclick = async () => { box.close(); await notificationsOn(); };
+}
+
+async function offerNudges() {
+  // Costs a model call, so it is asked for once a day per device rather than
+  // on every visit - and it is put away like any other card.
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    if (localStorage.getItem('plexget-nudged') === today) return;
+    if (shutAlready('nudges')) return;
+  } catch (e) { /* private mode - just carry on */ }
+  // One suggestion card per visit. The starter card and this one landing
+  // together is how the front page ends up a wall of things to close.
+  if (document.getElementById('starter')) return;
+  // Claimed BEFORE the fetch, not after: two views of the page racing each
+  // other both passed the check and each spent a model call. Undone below if
+  // nothing comes back, so a failed morning still gets an evening try.
+  try { localStorage.setItem('plexget-nudged', today); } catch (e) {}
+  let d;
+  try {
+    d = await (await fetch('/request/nudges')).json();
+  } catch (e) {
+    try { localStorage.removeItem('plexget-nudged'); } catch (e2) {}
+    return;
+  }
+  const picks = (d && d.picks) || [];
+  if (!picks.length) {
+    try { localStorage.removeItem('plexget-nudged'); } catch (e) {}
+    return;
+  }
+
+  out.insertAdjacentHTML('afterbegin', `<div class="card persona" data-shut="nudges">${shutter}
+      ${personaFace('good-idea', 'tiny')}
+      <b>Seeing as you liked those…</b>
+      ${picks.map(p => `<div class="nudge">
+          <button class="linkbtn" data-act="look" data-value="${esc(p.title)}">${label(p.title, p.year)}</button>
+          <div class="sub">${esc(p.line)}</div>
+        </div>`).join('')}
+    </div>`);
+}
+
+async function offerStarter() {
+  // An onboarding card, not a fixture: "start your list?" is for somebody
+  // with no list. Once they have one, the front page owes them quiet.
+  if (myListCount > 0) return;
+  try {
+    const d = await (await fetch('/request/suggestions')).json();
+    if (!d.picks || !d.picks.length || shutAlready('starter')) return;
+    const names = d.picks.map(p => label(p.title, p.year)).join(', ');
+    out.insertAdjacentHTML('afterbegin', `<div class="card" id="starter" data-shut="starter">
+        ${shutter}${personaFace('good-idea', 'tiny')}<b>Start your list?</b>
+        <div class="sub">${names} — ${esc(d.reason)}.</div>
+        <button class="primary" data-act="start" data-value="${esc(JSON.stringify(d.picks.map(p => p.rating_key)))}" data-list="${esc(d.playlist)}">Add these to my list</button>
+      </div>`);
+  } catch (e) { /* optional */ }
+}
+
+async function startList(keys, playlist) {
+  const res = await fetch('/request/playlist', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({playlist, rating_keys: keys}),
+  });
+  const d = await res.json();
+  const el = document.getElementById('starter');
+  if (res.ok) { rememberList(d.playlist); loadPlaylists(); }
+  if (el) el.outerHTML = res.ok
+    ? `<div class="card good"><b>Added ${d.added} to “${esc(d.playlist)}”.</b><div class="sub">Waiting in your Plex.</div></div>`
+    : `<div class="card bad"><b>${esc(d.error || 'Could not add those')}</b></div>`;
+  loadPlaylists();
+}
+
+async function boot() {
+  // Both at once. The persona is wanted before anything is drawn - beginSignIn
+  // paints the welcome face and runs from here - and asking for it after the
+  // session would put a second round trip in front of the first paint.
+  const [meRes, pRes] = await Promise.all([fetch('/auth/me'), fetch('/persona')]);
+  const d = await meRes.json();
+  // A server too old to know the route, or an answer that will not parse,
+  // leaves the plain defaults standing rather than stopping the page.
+  try {
+    const p = await pRes.json();
+    if (p && p.name) persona = {
+      name: p.name, greeting: p.greeting || '',
+      brush_offs: p.brush_offs || [], images: p.images || {},
+    };
+  } catch (e) { /* the defaults above are already a working assistant */ }
+
+  const greet = document.querySelector('.personagreet');
+  const line = greet && greet.querySelector('.personaline');
+  if (line) {
+    line.innerHTML = `Hi, I'm <b>${esc(persona.name)}</b> — ${esc(persona.greeting)}`;
+    greet.insertAdjacentHTML('afterbegin', personaFace('greeting'));
+    greet.hidden = false;
+  }
+
+  if (d.app_name) {
+    document.getElementById('appname').innerHTML = wordmark(d.app_name);
+    document.title = d.app_name;
+  }
+  if (d.user) {
+    me = d.user; myDefaultList = d.user.default_playlist || '';
+    try { localStorage.setItem('plexget-known', '1'); } catch (e) {}
+    document.documentElement.className = 'known';
+    const first = document.getElementById('firstpaint');
+    if (first) first.remove();
+    // Starter waits for the playlist count: it only shows for somebody with
+    // no list yet, and it cannot know that until the lists have loaded.
+    showSignedIn(); loadPlaylists().then(offerStarter); showShelf(); showNotes();
+    setTimeout(offerNudges, 2500);
+    try {
+      if (!localStorage.getItem('plexget-tour')) setTimeout(startTour, 900);
+    } catch (e) { /* private mode - the tour simply does not offer itself */ }
+    // Notifications are the bell's business, not the front page's. If they
+    // are not on yet the bell says so with its dot; nothing lands in front of
+    // what somebody actually came here to do.
+    setupPush(false).then(state => {
+      if (state !== 'on' && state !== 'already') {
+        const bell = document.querySelector('[data-act="bell"]');
+        if (bell && !bell.classList.contains('has-news')) {
+          bell.classList.add('has-news');
+          bell.title = 'Notifications are not on yet';
+        }
+      }
+    });
+  } else beginSignIn();
+}
+boot();
+</script>
+</body>
+</html>

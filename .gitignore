@@ -1,0 +1,40 @@
+# Local config - holds the Plex token and the TMDb, Sonarr and Radarr keys.
+# Copy config.example.yaml to config.yaml and fill in your own values.
+config.yaml
+
+# Environment for the optional Posteria container, and the model key.
+# Copy .env.example to .env.
+.env
+.env.local
+
+# Generated on first run: the key that signs push notifications, and the
+# encryption key for stored Plex tokens. Losing these is an inconvenience;
+# committing them is a good deal worse.
+data/
+
+# Scan database - rebuild with scripts/full_rescan.py
+*.db
+*.db-wal
+*.db-shm
+
+# Persona artwork is yours, not this project's, so only the icons that ship
+# are tracked and anything else dropped into that folder is left alone. An
+# icon that is meant to ship needs a line of its own here.
+/dashboard/icons/*
+!/dashboard/icons/apple-touch-icon.png
+!/dashboard/icons/icon-192.png
+!/dashboard/icons/icon-512.png
+!/dashboard/icons/share-card.png
+
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+logs/
+
+# Poster storage and container config, both bind-mounted by docker-compose.yml.
+posteria/
+
+.DS_Store

@@ -1,0 +1,85 @@
+# The optional companion, not the app itself. This project runs from main.py
+# on the machine that can see the media; what is defined here is Posteria, a
+# self-hosted poster manager that scanner/poster_manager.py hands poster work
+# to rather than writing Plex's artwork directly. Skip the whole file if you
+# do not care about posters - nothing else needs it.
+#
+# There are no credentials in here and none should ever be added. Every value
+# that matters comes from a file called .env sitting beside this one, which
+# docker compose reads by itself. Neither .env nor config.yaml is ever
+# committed; both are in .gitignore and belong there.
+#
+#   cp .env.example .env     # fill it in, then
+#   docker compose up -d
+#
+# The web interface then answers on http://localhost:1818.
+
+services:
+  posteria:
+    image: bozodev/posteria:latest
+    container_name: posteria
+    restart: unless-stopped
+    environment:
+      SITE_TITLE: "Posteria"
+
+      # The ${VAR:?message} form refuses to start rather than quietly bringing
+      # up a poster manager with no password on it, which is worth the noise.
+      AUTH_USERNAME: "${POSTERIA_USER:-admin}"
+      AUTH_PASSWORD: "${POSTERIA_PASSWORD:?set POSTERIA_PASSWORD in .env}"
+      AUTH_BYPASS: "false"
+      SESSION_DURATION: "3600"
+
+      # Plex as seen from inside a container, which is not localhost. The
+      # extra_hosts line below is what makes that name resolve; point this
+      # somewhere real if Plex is on another machine.
+      PLEX_SERVER_URL: "${PLEX_SERVER_URL:-http://host.docker.internal:32400}"
+      PLEX_TOKEN: "${PLEX_TOKEN:?set PLEX_TOKEN in .env}"
+
+      # Off, deliberately. Every poster applied through this project is the
+      # original artwork, and an overlay feature left on would undo that.
+      PLEX_REMOVE_OVERLAY_LABEL: "false"
+
+      # Whoever owns the poster files it writes. Set these to your own user,
+      # or the files come back owned by somebody who does not exist here and
+      # the poster tooling cannot replace them.
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-Etc/UTC}"
+
+      IMAGES_PER_PAGE: "24"
+      MAX_FILE_SIZE: "5242880"
+      IGNORE_ARTICLES_IN_SORT: "true"
+      SORT_BY_DATE_ADDED: "false"
+
+      # Imports are triggered by this project, so its own scheduler stays off.
+      # Two things importing on their own timetable fight over the same
+      # posters, and the loser is whichever ran first.
+      AUTO_IMPORT_ENABLED: "false"
+      AUTO_IMPORT_SCHEDULE: "1h"
+      AUTO_IMPORT_MOVIES: "false"
+      AUTO_IMPORT_SHOWS: "false"
+      AUTO_IMPORT_COLLECTIONS: "false"
+
+    ports:
+      # Host port first, and the only one worth changing.
+      - "${POSTERIA_PORT:-1818}:80"
+
+    volumes:
+      # Bind mounts rather than named volumes, because the poster tooling
+      # writes into the same folder the container reads from - a named volume
+      # would put it somewhere only Docker can reach.
+      - ./posteria/posters:/app/posters
+      - ./posteria/config:/app/config
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    extra_hosts:
+      # Lets the container reach a Plex server running on the host. Docker
+      # Desktop provides this name already; on Linux this line is what
+      # creates it.
+      - "host.docker.internal:host-gateway"
