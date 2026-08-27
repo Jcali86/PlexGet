@@ -104,6 +104,42 @@ Worth knowing before you clone it.
 
 ---
 
+## How this compares to Seerr and Ombi
+
+Fair question, and the answer decides whether you should be here at all.
+
+[Seerr](https://github.com/seerr-team/seerr) (the merged successor to
+Overseerr and Jellyseerr) and [Ombi](https://github.com/Ombi-app/Ombi) are
+request *pipelines*: browse a TMDb-style catalogue, click request, an approval
+lands in Sonarr or Radarr, the thing arrives. They are mature, polished, and
+better than this project at all of that. If what you want is "my users click a
+poster and the download pipeline takes it from there", stop reading and go and
+install Seerr — sincerely.
+
+PlexGet starts from the other end. It is about the library you already have.
+Somebody types "something gentle after a long week" or "films by Denis
+Villeneuve" or "comedy for an eight year old", and the answer comes off your
+own shelves — as a playlist in their own Plex account, filtered for the child
+where an age was mentioned. Only when the library comes up short does it turn
+into a request, and a request here is a line on a list and a notification when
+the film appears, not a trigger on a downloader.
+
+Nothing else seems to sit in this spot. The catalogue apps do requesting
+without the conversation; the AI projects around Plex
+([shortlist](https://github.com/stevezau/shortlist),
+[plex-recommendations-ai](https://github.com/rocstack/plex-recommendations-ai))
+do recommendations without the asking; the chat bots
+([Requestrr](https://github.com/darkalfx/requestrr)) do asking, but in rigid
+commands, inside Discord. The conversational front door onto your own
+collection — with the model choosing filters rather than inventing titles, so
+it can never recommend a film you do not own — is the part this project
+exists for.
+
+Run both, if you like. They do not overlap: Seerr manages what you are
+getting; this is for enjoying what you have got.
+
+---
+
 ## Requirements
 
 | | |
