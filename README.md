@@ -28,7 +28,7 @@ a phone.
 
 ## What it does
 
-### For the household
+### For your family and friends
 
 Someone asks for something and picks from what turns up.
 
