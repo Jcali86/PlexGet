@@ -334,6 +334,16 @@ def read_missing_and_origin(text, filters):
     body = text or ""
     if _ASKS_FOR_MISSING.search(body):
         filters.only_missing = True
+    # "New films we haven't got" names a year the model routinely drops, and
+    # discovery rightly refuses a brief that narrows nothing - so the model's
+    # perfectly faithful {only_missing: true} became an empty answer to the
+    # feature's own headline request. Same floor-not-ceiling rule: only when
+    # the words say recent, only for a missing search, and only if no year is
+    # already set.
+    if (filters.only_missing and not filters.year_from
+            and re.search(r"\bnew\b|\brecent\b|\blatest\b|\bjust (out|released)\b|this year", body, re.I)):
+        import datetime as _dt
+        filters.year_from = _dt.date.today().year - 1
     if not filters.origin_country:
         for pattern, code in _COUNTRY_WORDS:
             if re.search(pattern, body, re.I):
