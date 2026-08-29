@@ -467,6 +467,11 @@
                 fill: none; stroke-width: 1.8; margin-top: 2px; }
   .aihint b { display: block; margin-bottom: 2px; }
   .aihint p { margin: 0; color: var(--dim); font-size: 13px; }
+  /* The same card with the sparkle taken out of it: shown when an answer came
+     from the keyword rules, where the accent rail would be claiming a
+     cleverness this particular answer did not have. */
+  .aihint.plain { border-left-color: var(--dim); }
+  .aihint.plain svg { stroke: var(--dim); }
 
   .backbar {
     display: flex; align-items: center; gap: 12px; margin: 6px 0 14px;
@@ -1396,6 +1401,35 @@ function goHome(refresh) {
   }, {passive: true});
 })();
 
+// This answer came from the keyword rules rather than from reading the mood,
+// and the page used to give no sign of it - which is how "a movie that will
+// make me cry" came back looking like a considered answer when eighteen
+// regexes had shrugged at it.
+//
+// translated_by is the honest signal, not smart_mode: a key can be configured
+// and the call still time out or fail, and the answer on the page is blunt
+// either way. smart_mode only picks which of the two things to say, because
+// the advice differs - an owner who never set a key has nothing to wait for,
+// where a call that fell over will likely work on the next try. Nothing is
+// said for a title, a person or a brush-off: none of them wanted the model.
+function keywordNotice(d) {
+  if (d.translated_by !== 'keywords') return '';
+  const off = d.smart_mode === false;
+  return `<div class="aihint plain">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5 10.1 10.9 5.5 9l4.6-1.4z"/>
+      <path d="M4.5 19.5L19.5 4.5"/></svg>
+    <div><b>${off ? 'Matched on keywords, not on mood.'
+                  : 'Matched on keywords this time.'}</b>
+    <p>${off
+      ? 'Reading a mood is not switched on for this server, so this is a plain '
+        + 'word match. Naming a film, a genre or a director works just as well.'
+      : 'I could not reach the mood reader just then, so this is a plain word '
+        + 'match. Try again in a moment - or name a film, a genre or a '
+        + 'director, which never needs it.'}</p></div>
+  </div>`;
+}
+
 async function find(query) {
   picked.clear(); refreshBar();
   clearInterval(heroTimer); clearInterval(driftTimer);
@@ -1433,7 +1467,7 @@ async function find(query) {
   playlistName = d.playlist_name || myDefaultList;
   loadPlaylists();
   const back = `<div class="backbar"><button data-act="home">← Home</button>
-    <span>Showing results for “${esc(query)}”</span></div>`;
+    <span>Showing results for “${esc(query)}”</span></div>` + keywordNotice(d);
 
   // Somebody trying it on rather than asking for a film. The assistant
   // answers, and that is the whole card - no results, no "nothing matched",
