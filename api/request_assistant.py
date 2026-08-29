@@ -265,6 +265,39 @@ _COUNTRY_WORDS = [
     (r"\birish\b|\bireland\b", "IE"),
 ]
 
+_ASKS_FOR_MISSING = re.compile(
+    r"not in plex|not on plex|don'?t have|do not have|dont have|"
+    r"haven'?t got|havent got|not got|we lack|missing from|"
+    r"not in (?:the )?library|don'?t own|do not own|what am i missing",
+    re.I,
+)
+
+
+def read_missing_and_origin(text, filters):
+    """Read "not in plex" and "British" straight from the words.
+
+    Run on the model's answer as well as the keyword rules', because these two
+    are the fields it hurts most to miss. Asking for what the library has NOT
+    got is not a shade of the request, it is the request; answer it with the
+    shelves and you have returned the opposite of what was asked for, which is
+    exactly how "Classic UK tv shows that are not in plex" came back as a
+    Japanese series from 2022 that was already on them.
+
+    A floor, never a ceiling. It can only ever turn only_missing on, and only
+    fills origin_country when the model left it empty - the model reads
+    phrasings no list of words will catch, and this must not overrule it.
+    """
+    body = text or ""
+    if _ASKS_FOR_MISSING.search(body):
+        filters.only_missing = True
+    if not filters.origin_country:
+        for pattern, code in _COUNTRY_WORDS:
+            if re.search(pattern, body, re.I):
+                filters.origin_country = code
+                break
+    return filters
+
+
 _FALLBACK_RULES = [
     (r"rom.?com|romantic comedy", {"genres": ["Romance", "Comedy"]}),
     (r"\brom(ance|antic)\b", {"genres": ["Romance"]}),
@@ -395,22 +428,7 @@ def _fallback_translate(request_text):
     if re.search(r"\bnot seen|never seen|something new|unwatched|havent seen|haven't seen\b", text):
         filters.unwatched_only = True
 
-    # "that are not in plex", "stuff we haven't got", "what am I missing". Read
-    # from the words as well as asked of the model, because it is the whole
-    # point of the request when somebody says it - answering with the shelves
-    # is not a worse answer, it is the opposite of the one they asked for.
-    if re.search(r"not in plex|not on plex|don'?t have|do not have|dont have|"
-                 r"haven'?t got|havent got|not got|we lack|missing from|"
-                 r"not in (?:the )?library|don'?t own|do not own|what am i missing",
-                 text):
-        filters.only_missing = True
-
-    # Where something is from, when the request says. Only the handful people
-    # actually ask for; anything subtler is the model's job.
-    for pattern, code in _COUNTRY_WORDS:
-        if re.search(pattern, text):
-            filters.origin_country = code
-            break
+    read_missing_and_origin(request_text, filters)
     if re.search(r"atmos|surround|sound", text):
         filters.atmos = True
 
@@ -552,6 +570,10 @@ def translate(request_text, token=None):
     # regex to prevent.
     if filters.is_title and reads_as_description(request_text):
         filters.is_title = False
+    # The words get a say too. A model that reads "not in plex" as background
+    # colour rather than the point of the sentence leaves only_missing unset,
+    # and the search then answers with the shelf it was asked to skip.
+    read_missing_and_origin(request_text, filters)
     _translations[_cache_key(request_text)] = (time.time(), filters.model_copy(deep=True))
     if len(_translations) > 500:
         oldest = sorted(_translations.items(), key=lambda kv: kv[1][0])[:200]
