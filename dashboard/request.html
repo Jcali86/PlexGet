@@ -60,6 +60,23 @@
     --on-accent: #ffffff; --bar: rgba(20,20,20,.97); --veil: 20,20,20;
     --top: #0b0b0b; --green: #46d369; --red: #e50914; --poster-radius: 4px;
   }
+
+  /* Bruce: true black and gunmetal, the emblem ghosted behind everything.
+     Named for a jet black French bulldog, who is named for the other one.
+     The background is #000 exactly, so OLED panels switch those pixels off;
+     the tile is dimmed by the wash laid over it rather than by editing the
+     file, which keeps the ghost faint without ever lifting the black. */
+  body[data-skin="bruce"] {
+    --bg: #000000; --surface: #101114; --surface2: #17181c; --border: #262a31;
+    --text: #e8eaed; --dim: #8b909a; --accent: #c3c9d1; --accent-dark: #a7aeb8;
+    --on-accent: #0b0c0e; --bar: rgba(0,0,0,.97); --veil: 0,0,0;
+    --top: #000000; --green: #4ade80; --red: #f2545b; --poster-radius: 6px;
+    background-color: #000;
+    background-image: linear-gradient(rgba(0,0,0,.93), rgba(0,0,0,.93)),
+                      url("/icons/bruce-logo.png");
+    background-size: auto, 220px auto;
+    background-repeat: repeat;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   /* `clip`, not `hidden`: hidden makes these scroll containers, which
      quietly stops the sticky header sticking. */
@@ -737,6 +754,10 @@
       <span class="chips2"><i style="background:#141414"></i><i style="background:#e50914"></i></span>
       <span><b>Streaming</b><span>Near-black with one red</span></span>
     </button>
+    <button class="skin" data-act="skin" data-value="bruce" data-skin-choice="bruce">
+      <span class="chips2"><i style="background:#000"></i><i style="background:#c3c9d1"></i></span>
+      <span><b>Bruce</b><span>Jet black, gunmetal, and a very good dog</span></span>
+    </button>
   </div>
   <form method="dialog"><button class="primary">Done</button></form>
 </dialog>
@@ -884,7 +905,7 @@ function status(tone, title, detail, mood) {
 }
 
 // Which look this person prefers, remembered on their own device.
-const SKINS = ['plex', 'blockbuster', 'netflix'];
+const SKINS = ['plex', 'blockbuster', 'netflix', 'bruce'];
 function applySkin(skin) {
   const chosen = SKINS.includes(skin) ? skin : 'plex';
   document.body.dataset.skin = chosen;
