@@ -1407,6 +1407,28 @@ function goHome(refresh) {
   }, {passive: true});
 })();
 
+// Things the library has not got, found on TMDb rather than on the shelves.
+// Shown when the request asked for exactly that ("not in plex") or when the
+// checkbox did. Every one is a real title with a real year, so the button
+// beside it puts something on the wanted list that can be gone and found.
+function missingBlock(d, heading) {
+  const items = d.missing || [];
+  if (!items.length) return '';
+  const shows = !!d.missing_are_shows;
+  return `<div class="rowhead">${esc(heading)}</div>` + items.map(m => `
+    <div class="guess">
+      ${m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+      <div><h3>${esc(m.title)}</h3>
+        <div class="meta">${[m.year, m.rating ? '\u2605 ' + m.rating : '']
+           .filter(Boolean).map(esc).join(' \u00b7 ')}</div>
+        <div class="blurb">${esc(m.overview || '')}</div>
+        ${shows
+          ? `<button class="primary" data-act="askshow" data-value="${esc(m.title)}" data-season="next">Ask for the series</button>`
+          : `<button class="primary" data-act="ask" data-value="${esc(m.title + (m.year ? ' (' + m.year + ')' : ''))}">Ask for it</button>`}
+      </div>
+    </div>`).join('');
+}
+
 // This answer came from the keyword rules rather than from reading the mood,
 // and the page used to give no sign of it - which is how "a movie that will
 // make me cry" came back looking like a considered answer when eighteen
@@ -1446,7 +1468,8 @@ async function find(query) {
   try {
     const res = await fetch('/request/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query}),
+      body: JSON.stringify({query,
+                            include_missing: document.getElementById('alsomissing').checked}),
     });
     d = await res.json();
     stopThinking();
@@ -1547,7 +1570,21 @@ async function find(query) {
     return;
   }
 
-  if (!d.matches.length && !(d.shows || []).length) {
+  // They asked for what we have not got, so that is the entire answer - there
+  // is deliberately nothing from the shelves here.
+  if (d.kind === 'missing_only') {
+    const found = (d.missing || []).length;
+    out.innerHTML = back + `<div class="card ${found ? 'good' : 'warn'}">
+        ${personaFace(found ? 'excited' : 'shrug', 'tiny')}
+        <b>${found ? `${found} we haven't got.` : "Nothing to suggest there."}</b>
+        <div class="sub">${esc(d.interpretation || '')}</div></div>`
+      + missingBlock(d, 'Ask for any of these');
+    wireSelection();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    return;
+  }
+
+  if (!d.matches.length && !(d.shows || []).length && !(d.missing || []).length) {
     out.innerHTML = back + `<div class="card warn">${personaSays('shrug',
         `<b>Nothing here matches that.</b>
          <div class="sub">${esc(d.interpretation || '')}</div>
@@ -1567,6 +1604,9 @@ async function find(query) {
          (d.interpretation && d.interpretation !== 'We have that.')
            ? esc(d.interpretation) + ' ' : ''}${
          onlySeries ? '' : 'Tap to add it to one of your playlists.'}</div></div>`
+    : !d.matches.length && (d.missing || []).length
+    ? `<div class="card warn"><b>None of that is here yet.</b>
+       <div class="sub">${esc(d.interpretation)} Ask for any of the below.</div></div>`
     : `<div class="card good"><b>${d.matches.length} to choose from</b>
        <div class="sub">${esc(d.interpretation)}</div></div>`;
 
@@ -1582,7 +1622,8 @@ async function find(query) {
     ? ((d.shows || []).length ? `<div class="rowhead">Films</div>` : '')
       + sortBar() + `<div id="films">${sortedFilms().map(m => filmCard(m, true)).join('')}</div>`
     : '';
-  out.innerHTML = back + head + missing + series + films;
+  out.innerHTML = back + head + missing + series + films
+    + missingBlock(d, "While we're at it — ones we haven't got");
   wireSelection();
 }
 

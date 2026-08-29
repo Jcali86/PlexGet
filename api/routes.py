@@ -44,6 +44,7 @@ from scanner.wanted_search import (
     export_text as wanted_export_text,
     recheck as recheck_wanted,
     search_and_capture,
+    search_shows,
 )
 from analyzer import MediaAnalyzer
 from config import config
@@ -1352,6 +1353,38 @@ def create_app():
         add_season_detail(result)
         result["captured_missing"] = captured
         result["smart_mode"] = has_api_key()
+
+        # "Classic UK tv shows that are not in plex" - the shelves cannot answer
+        # that, by definition, so TMDb does. Runs when the request said so
+        # (only_missing) or when the checkbox did (include_missing); the first
+        # replaces the library results, the second rounds them out.
+        wants_missing = (result.get("filters") or {}).get("only_missing")
+        if wants_missing or body.get("include_missing"):
+            filters = result.get("filters") or {}
+            # held_titles on a missing-only answer, otherwise whatever is
+            # already on the page - either way, what not to offer again.
+            held = result.get("held_titles")
+            if held is None:
+                held = ([m["title"] for m in result.get("matches") or []]
+                        + [x["title"] for x in result.get("shows") or []])
+            as_shows = result.get("wants_shows")
+            if as_shows is None:
+                as_shows = bool(result.get("shows"))
+            try:
+                result["missing"] = (tmdb_lookup.discover_shows(filters, exclude_titles=held)
+                                     if as_shows else
+                                     tmdb_lookup.discover(filters, exclude_titles=held))
+            except Exception:
+                # Discovery is the trimming on an answer that already exists,
+                # or an empty list on one that does not. Neither is worth
+                # failing a search over.
+                result["missing"] = []
+            result["missing_are_shows"] = bool(as_shows)
+            if wants_missing and not result["missing"]:
+                result["interpretation"] = (
+                    "I could not find anything to suggest that you have not already "
+                    "got. Try naming a genre, or where it should be from."
+                )
         # Answered from cache or by keywords: the model was never asked, so give
         # the reservation back.
         if result.get("translated_by") != "model" and reservation:
@@ -1434,23 +1467,34 @@ def create_app():
         except PlexUnavailable as e:
             give_back()
             return plex_trouble(e)
-        if not found["matches"]:
+        wants_missing = (found.get("filters") or {}).get("only_missing")
+        rounding_out = bool(body.get("include_missing")) or bool(wants_missing)
+        # No films to point a playlist at. That is a dead end only when nothing
+        # else was asked for: "shows we haven't got" has nothing on the shelf by
+        # definition, and answering it with a 404 is how a ticked box and a
+        # request that spelled it out both came back as "nothing matches that".
+        if not found["matches"] and not rounding_out:
             give_back()
             return jsonify({"error": "nothing in the library matches that",
                             "interpretation": found["interpretation"]}), 404
 
         name = (body.get("playlist") or found["playlist_name"]).strip()
-        try:
-            result = user_library.add_to_playlist(
-                user.get("plex_token"), name,
-                [m["rating_key"] for m in found["matches"]], user["username"],
-            )
-        except PermissionError:
-            give_back()
-            return jsonify({"error": "sign in again to use your own playlists"}), 401
-        except Exception as e:
-            give_back()
-            return jsonify({"error": str(e)}), 500
+        if found["matches"]:
+            try:
+                result = user_library.add_to_playlist(
+                    user.get("plex_token"), name,
+                    [m["rating_key"] for m in found["matches"]], user["username"],
+                )
+            except PermissionError:
+                give_back()
+                return jsonify({"error": "sign in again to use your own playlists"}), 401
+            except Exception as e:
+                give_back()
+                return jsonify({"error": str(e)}), 500
+        else:
+            # Nothing was added because nothing here fitted. The wanted list
+            # below is the whole answer, and the page says so.
+            result = {"playlist": name, "added": 0, "created": False}
         result["interpretation"] = found["interpretation"]
         result["films"] = [{"title": m["title"], "year": m["year"]} for m in found["matches"]]
         # Answered from cache or by keywords: the model was never asked, so the
@@ -1462,17 +1506,30 @@ def create_app():
         # They cannot go in a Plex playlist - there is nothing to point at - so
         # they go on the wanted list instead, and the playlist grows into them.
         result["also_wanted"] = []
-        if body.get("include_missing"):
-            have = [m["title"] for m in found["matches"]]
-            candidates = tmdb_lookup.discover(found.get("filters") or {}, exclude_titles=have, limit=8)
+        if rounding_out:
+            have = ([m["title"] for m in found["matches"]]
+                    + list(found.get("held_titles") or []))
+            as_shows = bool(found.get("wants_shows"))
+            result["wanted_are_shows"] = as_shows
+            candidates = (tmdb_lookup.discover_shows(found.get("filters") or {},
+                                                    exclude_titles=have, limit=8)
+                          if as_shows else
+                          tmdb_lookup.discover(found.get("filters") or {},
+                                               exclude_titles=have, limit=8))
             db = Database()
             try:
                 for film in candidates:
                     # Cheap, and it stops us asking for something on the shelf:
                     # discovery only knows what we showed it, not the library.
+                    # A series has to be looked for among the series: asking
+                    # the film sections for Fawlty Towers finds nothing, and
+                    # puts a show we already have on the wanted list.
                     try:
-                        if search_by_title(f"{film['title']} ({film['year']})" if film["year"]
-                                           else film["title"], user.get("plex_token")):
+                        if as_shows:
+                            if search_shows(film["title"], user.get("plex_token")):
+                                continue
+                        elif search_by_title(f"{film['title']} ({film['year']})" if film["year"]
+                                             else film["title"], user.get("plex_token")):
                             continue
                     except PlexUnavailable:
                         break
@@ -1480,6 +1537,7 @@ def create_app():
                         film["title"], film["year"], query,
                         notes=f"Suggested while building “{name}”"
                              + (f" for {user['username']}" if user else ""),
+                        kind="show" if as_shows else "film",
                     )
                     if created:
                         db.conn.execute(
