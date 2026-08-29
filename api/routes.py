@@ -714,7 +714,13 @@ def create_app():
         defaults, because a page with no name on it is worse than a plain one.
         """
         p = persona.persona()
-        out = jsonify({k: p[k] for k in ("name", "greeting", "brush_offs", "images")})
+        # smart_mode rides along because the welcome screen tells people there
+        # is an AI in here, and that card is drawn before anybody has signed
+        # in - so the flag has to be readable before anybody has signed in too.
+        # It is a capability, not a secret: it says a provider is configured
+        # and nothing whatever about which one, which model, or the key.
+        out = jsonify({k: p[k] for k in ("name", "greeting", "brush_offs", "images")}
+                      | {"smart_mode": has_api_key()})
         # Not cached: an owner who renames the assistant and restarts should
         # see the new name on the next load, not whenever a browser feels like
         # asking again.

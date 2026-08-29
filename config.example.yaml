@@ -177,6 +177,11 @@ posteria:
 # Anthropic is the only provider written so far. Another is one new file in
 # api/ai/ and one word changed here - see the note at the top of api/ai/base.py.
 ai:
+  # The block that makes the request page what it is. Leaving it unconfigured
+  # is supported - the search drops to a keyword map and the page stops
+  # claiming an assistant it cannot reach - but it is a degraded mode, not the
+  # intended one. Set a key.
+
   # Loads api/ai/<provider>_provider.py. Nothing else knows the name.
   provider: "anthropic"
 

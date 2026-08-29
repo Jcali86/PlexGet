@@ -832,6 +832,12 @@ const esc = s => {
 // no persona configured at all leaves them standing for good.
 let persona = {name: 'Assistant', greeting: '', brush_offs: [], images: {}};
 
+// Whether this server has a model behind the search. Assumed true until
+// /persona says otherwise, because that is how the app is meant to be run and
+// a momentary "no AI here" on a slow first paint would be a lie on almost
+// every install. Only ever used to take a claim away, never to add one.
+let smartMode = true;
+
 // The assistant may have a face per mood, and may just as well have none:
 // artwork is optional, and only the moods actually named in config and found
 // on disk come back. A mood with nothing behind it draws nothing at all,
@@ -1989,13 +1995,19 @@ async function beginSignIn() {
         </div>
       </div>
       ${inner}
-      <div class="aihint">
+      ${smartMode ? `<div class="aihint">
         <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5 10.1 10.9 5.5 9l4.6-1.4z"/><path d="M18 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
         <div><b>There's an AI in here</b>
         <p>Describe what you're after and it works out what to look for.
            It only ever searches this library — it can't fetch things off the internet,
            write you an essay, or run up a bill.</p></div>
-      </div>
+      </div>` : `<div class="aihint plain">
+        <svg viewBox="0 0 24 24"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z"/><path d="M16 16l4 4"/></svg>
+        <div><b>Search the shelves</b>
+        <p>Name a film, a series, an actor or a director and you'll be told
+           whether it's here. Describe the sort of thing you're after and it
+           matches on what it can. It only ever searches this library.</p></div>
+      </div>`}
       <p class="safety">Signing in with Plex is how we know it's you.
          Your password stays with Plex — it never comes near this.</p>
     </div>`;
@@ -2552,6 +2564,9 @@ async function boot() {
       name: p.name, greeting: p.greeting || '',
       brush_offs: p.brush_offs || [], images: p.images || {},
     };
+    // Strictly false, not merely falsy: a server too old to send the field at
+    // all must keep the claim rather than lose it to an undefined.
+    if (p && p.smart_mode === false) smartMode = false;
   } catch (e) { /* the defaults above are already a working assistant */ }
 
   const greet = document.querySelector('.personagreet');
