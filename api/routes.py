@@ -72,6 +72,16 @@ def disk_label(path):
     return None
 
 
+# What this build can do. Anything added here is something a page or a caller
+# can check for rather than infer from behaviour.
+BUILD = "missing-search-1"
+FEATURES = [
+    "mood-search",
+    "missing-search",     # "not in plex" answered from TMDb, films and series
+    "keyword-notice",     # the page says when an answer came from the keyword rules
+]
+
+
 def create_app():
     app = Flask(__name__)
     # Whatever puts https in front of this - a tunnel, a reverse proxy, a
@@ -91,7 +101,10 @@ def create_app():
 
     @app.route("/health")
     def health():
-        return jsonify({"status": "ok"})
+        # BUILD is bumped when something lands that changes what the page can
+        # do, so "have I actually deployed this?" is one curl rather than an
+        # afternoon of reading screenshots.
+        return jsonify({"status": "ok", "build": BUILD, "features": FEATURES})
 
     @app.route("/summary")
     def summary():
@@ -1206,6 +1219,35 @@ def create_app():
                 show["all_seasons"], show["missing_seasons"] = [], []
         return result
 
+    def only_what_we_lack(candidates, token, as_shows=False):
+        """Drop anything from a discovery list that is on the shelves after all.
+
+        The exclusion list handed to TMDb is the titles already on the page,
+        and that is at most a screenful - MAX_MATCHES is 24. A library with
+        three hundred comedies in it has told discovery about twenty-four of
+        them, so "top comedy not in plex" came back recommending a film that
+        was in plex. Every candidate is checked against the library properly
+        before it is offered, which is what the playlist builder was already
+        doing one route over.
+        """
+        keep = []
+        for item in candidates or []:
+            title, year = item.get("title"), item.get("year")
+            try:
+                if as_shows:
+                    if search_shows(title, token):
+                        continue
+                elif search_by_title(f"{title} ({year})" if year else title, token):
+                    continue
+            except PlexUnavailable:
+                # Plex went away mid-check. Offering a film somebody may
+                # already own beats failing the search, and asking for one
+                # twice is caught on the wanted list anyway.
+                keep.extend(candidates[len(keep):])
+                break
+            keep.append(item)
+        return keep
+
     @app.route("/request/search", methods=["POST"])
     def request_search():
         """Plain-English film request -> films from this library."""
@@ -1371,9 +1413,11 @@ def create_app():
             if as_shows is None:
                 as_shows = bool(result.get("shows"))
             try:
-                result["missing"] = (tmdb_lookup.discover_shows(filters, exclude_titles=held)
-                                     if as_shows else
-                                     tmdb_lookup.discover(filters, exclude_titles=held))
+                candidates = (tmdb_lookup.discover_shows(filters, exclude_titles=held)
+                              if as_shows else
+                              tmdb_lookup.discover(filters, exclude_titles=held))
+                result["missing"] = only_what_we_lack(
+                    candidates, user.get("plex_token"), as_shows)
             except Exception:
                 # Discovery is the trimming on an answer that already exists,
                 # or an empty list on one that does not. Neither is worth

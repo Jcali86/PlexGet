@@ -505,7 +505,11 @@ def translate(request_text, token=None):
     key = _cache_key(request_text)
     cached = _translations.get(key)
     if cached and time.time() - cached[0] < TRANSLATION_TTL:
-        return cached[1].model_copy(deep=True), "cache"
+        # Corrected on the way out as well as the way in: an entry written
+        # before these two reads existed would otherwise keep answering with
+        # the shelf for six hours after the fix that stopped it.
+        return read_missing_and_origin(
+            request_text, cached[1].model_copy(deep=True)), "cache"
 
     llm = ai.provider()
     if llm is None:
