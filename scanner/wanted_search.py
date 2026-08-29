@@ -365,18 +365,27 @@ def search_and_capture(db, query, capture=True):
         return result
 
     matches = narrow_by_year(search_plex(title), year)
-    result["matches"] = matches
-    result["found"] = bool(matches)
+    # Only certainty answers "we have that" - the same bar search_by_title
+    # holds. A confidence of 1 is the making-of documentary, or Taxi Driver
+    # turning up for "Taxi": worth mentioning, never worth claiming, and
+    # claiming it here is how somebody asks for The Odyssey, is told "good
+    # news, we already have that" on the strength of "The Odyssey: The Making
+    # of an Epic", and never gets the film they wanted.
+    certain = [m for m in matches if m.get("confidence", 2) >= 2]
+    result["matches"] = certain
+    result["close"] = [m for m in matches
+                       if m.get("confidence") == 1 and not m["file_missing"]]
 
     # Plex still lists a film after its file disappears. If every copy of every
     # match is gone, the library cannot actually play it, so it belongs on the
     # wanted list even though the search "found" something.
-    playable = [m for m in matches if not m["file_missing"]]
-    result["file_missing"] = bool(matches) and not playable
+    playable = [m for m in certain if not m["file_missing"]]
+    result["found"] = bool(playable)
+    result["file_missing"] = bool(certain) and not playable
     if playable or not capture:
         return result
-    if matches:
-        gone = matches[0]
+    if certain:
+        gone = certain[0]
         note = "Plex lists this but the file is missing from disk"
         row, created = db.insert_wanted(
             gone["title"], gone["year"], (query or "").strip(), notes=note
@@ -406,8 +415,11 @@ def recheck(db):
         # Plex keeps listing a title after its file is gone - which is often
         # exactly why the title is on this list. Only a copy that can actually
         # be played means it has arrived; otherwise announcing "it's here" is a
-        # lie, and it would flip straight back on the next check.
-        playable = [m for m in matches if not m["file_missing"]]
+        # lie, and it would flip straight back on the next check. The same
+        # goes for a companion piece: the making-of arriving is not the film
+        # arriving, however alike the names.
+        playable = [m for m in matches
+                    if not m["file_missing"] and m.get("confidence", 2) >= 2]
         if playable:
             found = dict(entry)
             found["matches"] = playable

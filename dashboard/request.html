@@ -1697,6 +1697,15 @@ async function ask(title, btn) {
         : 'It was already on the list.';
       msg = `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">${note}</div>`;
     }
+    // The shelf holds something with a confusable name — the making-of, or
+    // Taxi Driver for "Taxi". Say so without claiming it, so the person knows
+    // the library search wasn't blind and the ask still went through.
+    const close = d.close || [];
+    if (!d.found && close.length) {
+      msg += `<div class="sub">Nearest thing on the shelf: ${
+        esc(close.slice(0, 2).map(m => m.title + (m.year ? ' (' + m.year + ')' : '')).join(', '))
+        } — not the one you asked for, so it stays on the list.</div>`;
+    }
     out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}${msg}</div>`);
 
     // The card that said we hadn't got it, and the button that asked, are both
