@@ -215,6 +215,9 @@ ai:
 #
 # There are two worked examples in personas/, one warm and one dry, along with
 # a note on what each field is for.
+# One word here names a shipped persona instead - `persona: bruce` reads
+# personas/bruce.yaml, and personas/README.md lists the others. Writing the
+# block out, as below, keeps working exactly as before.
 persona:
   # What it calls itself, on the page and in its own instructions.
   name: "Reel"

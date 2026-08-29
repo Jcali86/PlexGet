@@ -10,19 +10,30 @@ Two worked examples sit in this folder:
 | --- | --- |
 | `warm-and-chatty.yaml` | Pleased you asked, has opinions, not in a hurry |
 | `dry-and-minimal.yaml` | Says the least that will do, and stops |
+| `bruce.yaml` | A jet black French bulldog on night watch, made for the Bruce skin |
 
 They exist to show the range rather than to be adopted as they are. Neither is
 a default; the default is what `config.example.yaml` ships with.
 
 ## Using one
 
-There is no include mechanism — the config loader reads one file and that is
-all it does. So a persona is used by copying it in:
+Name it. One word in `config.yaml`, in place of the whole block:
+
+```yaml
+persona: bruce
+```
+
+That reads `personas/bruce.yaml` — any file in this folder works the same way
+— and a restart picks it up. The persona is read once and kept, in the same
+way as every other config value, so nothing here changes under a running
+process.
+
+To customise one instead, copy it in the old way:
 
 1. Open the file you want, and copy everything from `persona:` downwards.
-2. Paste it into `config.yaml`, replacing the `persona:` block already there.
-3. Restart the server. The persona is read once and kept, in the same way as
-   every other config value, so nothing here changes under a running process.
+2. Paste it into `config.yaml`, replacing the `persona:` line or block
+   already there, and edit to taste.
+3. Restart the server.
 
 Leave a field out and the built-in default takes its place. Leave the whole
 block out and a plain, neutral helper answers instead, which is a perfectly

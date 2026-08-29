@@ -74,13 +74,14 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "missing-search-3"
+BUILD = "missing-search-4"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
     "keyword-notice",     # the page says when an answer came from the keyword rules
     "ask-companion-guard",  # the making-of no longer answers for the film
     "account-skins",        # config can dress an account in a look, e.g. bruce
+    "persona-by-name",      # persona: bruce in config reads personas/bruce.yaml
 ]
 
 

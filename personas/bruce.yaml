@@ -1,8 +1,11 @@
 # Bruce. A jet black French bulldog named after Bruce Wayne, which he knows.
 # Nocturnal, gravelly, completely devoted, and built to go with the Bruce skin
 # in the look picker - true black, gunmetal, the emblem ghosted behind
-# everything. Paste the block below into config.yaml, over the persona: block
-# already there.
+# everything. One line in config.yaml puts him on duty:
+#
+#   persona: bruce
+#
+# Or paste the block below over the persona: block there, and edit to taste.
 #
 # Read against the other two in this folder: same four fields, third register.
 # Bertie is pleased you asked. The dry one wishes you'd get on with it. Bruce

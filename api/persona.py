@@ -14,8 +14,11 @@ allowed to do.
 """
 
 import random
+import sys
 from pathlib import Path
 from urllib.parse import quote
+
+import yaml
 
 from config import config
 
@@ -54,6 +57,41 @@ MAX_BRUSH_OFF = 300
 MAX_BRUSH_OFFS = 40
 MAX_EXAMPLE = 200
 MAX_EXAMPLES = 12
+
+# The worked personas that ship with the project, loadable by name.
+PERSONAS = Path(__file__).resolve().parent.parent / "personas"
+
+
+def _named(name):
+    """The persona block out of personas/<name>.yaml, or {}.
+
+    `persona: bruce` in config means personas/bruce.yaml, so adopting a house
+    persona is one word rather than a forty-line paste - the same bargain the
+    ai providers make, a file and a name. The name is a bare word only: a path
+    separator or a leading dot is refused rather than tidied, because this
+    string chooses which file on disk gets read.
+
+    Anything short of success is {} and a line on stderr, never an error - a
+    misspelt persona must cost the page its character, not its ability to
+    answer, which is the same rule the rest of the block already lives by.
+    """
+    name = (name or "").strip().lower()
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return {}
+    path = PERSONAS / f"{name}.yaml"
+    if not path.is_file():
+        print(f"persona: there is no personas/{name}.yaml, "
+              "so the plain default is standing in", file=sys.stderr)
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as problem:
+        print(f"persona: personas/{name}.yaml would not parse ({problem}), "
+              "so the plain default is standing in", file=sys.stderr)
+        return {}
+    block = loaded.get("persona") if isinstance(loaded, dict) else None
+    return block if isinstance(block, dict) else {}
+
 
 # Read once and kept, the way the genre list is: a persona changes when
 # somebody edits a file, and that means a restart, same as every other setting.
@@ -143,6 +181,10 @@ def persona():
         # anybody has signed in, so it answers whatever it is handed.
         loaded = config if isinstance(config, dict) else {}
         block = loaded.get("persona")
+        # A bare word names a file in personas/ - `persona: bruce`. A block
+        # written out in config carries on exactly as before.
+        if isinstance(block, str):
+            block = _named(block)
         if not isinstance(block, dict):
             block = {}
         _persona = {
