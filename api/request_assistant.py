@@ -246,6 +246,50 @@ class MovieFilters(BaseModel):
         default="", description="One friendly sentence explaining how the request was read."
     )
 
+# What actually crosses the wire to the model. Byte-for-byte the schema that
+# was tested against the API on 2026-08-29, and it must stay that way without
+# a very good reason: the structured-output endpoint compiles a grammar per
+# novel schema and caches it, and this one is compiled, cached and answers in
+# about three seconds. MovieFilters itself, at sixteen fields, is REJECTED -
+# a 400 after roughly 185 seconds of server-side grinding, on every single
+# call, with nothing cached. That is the "adding a field breaks the API"
+# folklore made precise. The three presentation fields ride as one string
+# here and are unfolded on arrival; everything else maps by name.
+class WireFilters(BaseModel):
+    """What a request means, in terms this library can answer."""
+
+    genres: list[str] = Field(default_factory=list, description="Genres to match, from the allowed list. Two or three is usually right.")
+    exclude_genres: list[str] = Field(default_factory=list, description="Genres to rule out, e.g. Horror for a light-hearted request.")
+    min_rating: float | None = Field(default=None, description="Audience rating floor out of 10, e.g. 7.0 for 'good'.")
+    year_from: int | None = Field(default=None, description="Earliest release year.")
+    year_to: int | None = Field(default=None, description="Latest release year.")
+    max_runtime_minutes: int | None = Field(default=None, description="Runtime ceiling when the request implies one.")
+    min_runtime_minutes: int | None = Field(default=None, description="Runtime floor, for requests wanting something substantial.")
+    presentation: str = Field(default="", description="Space-separated picture and sound demands, from: 4k, 1080, 720, hdr, atmos. Use '4k hdr' for big-screen or best-quality requests; empty otherwise.")
+    unwatched_only: bool = Field(default=False, description="Only films nobody has played yet, for 'something new' or 'not seen'.")
+    only_missing: bool = Field(default=False, description="They want what the library does NOT have - 'not in plex', 'stuff we haven't got'.")
+    origin_country: str = Field(default="", description="ISO country code when they say where it is from, e.g. GB for 'classic UK tv'.")
+    playlist_name: str = Field(default="", description="A short, warm playlist name for this request.")
+    is_title: bool = Field(default=False, description="True when this names one particular film rather than a mood, genre or occasion.")
+    interpretation: str = Field(default="", description="One friendly sentence explaining how the request was read.")
+
+
+def _unfold(wire):
+    """A WireFilters answer widened back into the MovieFilters everything uses."""
+    spoken = set((wire.presentation or "").lower().split())
+    return MovieFilters(
+        genres=wire.genres, exclude_genres=wire.exclude_genres,
+        min_rating=wire.min_rating, year_from=wire.year_from, year_to=wire.year_to,
+        max_runtime_minutes=wire.max_runtime_minutes,
+        min_runtime_minutes=wire.min_runtime_minutes,
+        min_resolution=next((r for r in ("4k", "1080", "720") if r in spoken), None),
+        hdr="hdr" in spoken, atmos="atmos" in spoken,
+        unwatched_only=wire.unwatched_only, only_missing=wire.only_missing,
+        origin_country=wire.origin_country, playlist_name=wire.playlist_name,
+        is_title=wire.is_title, interpretation=wire.interpretation,
+    )
+
+
 
 # Phrases the keyword fallback understands. Order matters: first match wins per key.
 # Where a request says something is from. Two-letter codes, because that is
@@ -553,8 +597,9 @@ def translate(request_text, token=None):
         "filters for a film library. If a request is not about films, choose "
         "sensible general filters and say so plainly in interpretation."
     )
-    filters = llm.structured(system=system, prompt=f"Request: {request_text}",
-                             schema=MovieFilters)
+    answer = llm.structured(system=system, prompt=f"Request: {request_text}",
+                            schema=WireFilters)
+    filters = _unfold(answer) if answer is not None else None
     # None covers a slow call, a refusal, and output that would not parse - the
     # model can decline to fill the schema at all and hand back nothing, and an
     # adversarial request is the likeliest reason. All of them fall through to
