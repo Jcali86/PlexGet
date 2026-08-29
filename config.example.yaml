@@ -177,6 +177,11 @@ posteria:
 # Anthropic is the only provider written so far. Another is one new file in
 # api/ai/ and one word changed here - see the note at the top of api/ai/base.py.
 ai:
+  # The block that makes the request page what it is. Leaving it unconfigured
+  # is supported - the search drops to a keyword map and the page stops
+  # claiming an assistant it cannot reach - but it is a degraded mode, not the
+  # intended one. Set a key.
+
   # Loads api/ai/<provider>_provider.py. Nothing else knows the name.
   provider: "anthropic"
 
@@ -210,6 +215,9 @@ ai:
 #
 # There are two worked examples in personas/, one warm and one dry, along with
 # a note on what each field is for.
+# One word here names a shipped persona instead - `persona: bruce` reads
+# personas/bruce.yaml, and personas/README.md lists the others. Writing the
+# block out, as below, keeps working exactly as before.
 persona:
   # What it calls itself, on the page and in its own instructions.
   name: "Reel"
@@ -292,6 +300,14 @@ app:
     server_per_day: 400
     max_query_chars: 200
 
+
+# ---- Looks assigned to accounts. Optional. ----
+# Everyone picks their own look on the request page and it stays with their
+# device. Name an account here to dress it in a particular look on every
+# device it signs in from - their own pick, made in the picker, still wins.
+# Looks: plex, blockbuster, netflix, bruce.
+skins:
+  some-plex-username: bruce
 
 # ---- Notifications. Optional. ----
 # Everything this app can send. Turn any of them off, or reword them - {braces}

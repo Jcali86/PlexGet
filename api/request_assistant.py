@@ -223,6 +223,19 @@ class MovieFilters(BaseModel):
     playlist_name: str = Field(
         default="", description="A short, warm playlist name for this request."
     )
+    only_missing: bool = Field(
+        default=False,
+        description="True when they want things the library does NOT have - "
+                    "'not in plex', 'stuff we haven't got', 'what am I missing'. "
+                    "These come from TMDb and go on the wanted list; nothing on "
+                    "the shelves is offered.",
+    )
+    origin_country: str = Field(
+        default="",
+        description="Two-letter country code when the request names where "
+                    "something is from - 'British sitcoms' is GB, 'Korean "
+                    "thrillers' KR, 'Nordic noir' SE. Empty when it does not.",
+    )
     is_title: bool = Field(
         default=False,
         description="True when this names one particular film - 'Inception', "
@@ -235,6 +248,56 @@ class MovieFilters(BaseModel):
 
 
 # Phrases the keyword fallback understands. Order matters: first match wins per key.
+# Where a request says something is from. Two-letter codes, because that is
+# what TMDb's discovery takes.
+_COUNTRY_WORDS = [
+    (r"\bbritish\b|\bbritain\b|\buk\b|\bu\.k\.|\benglish\b|\bengland\b|\bbrit(?:com|s)\b", "GB"),
+    (r"\bkorean\b|\bk-?drama\b|\bkorea\b", "KR"),
+    (r"\bjapanese\b|\bjapan\b|\banime\b", "JP"),
+    (r"\bfrench\b|\bfrance\b", "FR"),
+    (r"\bspanish\b|\bspain\b", "ES"),
+    (r"\bitalian\b|\bitaly\b", "IT"),
+    (r"\bgerman\b|\bgermany\b", "DE"),
+    (r"\bnordic\b|\bscandinavian\b|\bswedish\b|\bsweden\b", "SE"),
+    (r"\bdanish\b|\bdenmark\b", "DK"),
+    (r"\baustralian\b|\baustralia\b|\baussie\b", "AU"),
+    (r"\bcanadian\b|\bcanada\b", "CA"),
+    (r"\birish\b|\bireland\b", "IE"),
+]
+
+_ASKS_FOR_MISSING = re.compile(
+    r"not in plex|not on plex|don'?t have|do not have|dont have|"
+    r"haven'?t got|havent got|not got|we lack|missing from|"
+    r"not in (?:the )?library|don'?t own|do not own|what am i missing",
+    re.I,
+)
+
+
+def read_missing_and_origin(text, filters):
+    """Read "not in plex" and "British" straight from the words.
+
+    Run on the model's answer as well as the keyword rules', because these two
+    are the fields it hurts most to miss. Asking for what the library has NOT
+    got is not a shade of the request, it is the request; answer it with the
+    shelves and you have returned the opposite of what was asked for, which is
+    exactly how "Classic UK tv shows that are not in plex" came back as a
+    Japanese series from 2022 that was already on them.
+
+    A floor, never a ceiling. It can only ever turn only_missing on, and only
+    fills origin_country when the model left it empty - the model reads
+    phrasings no list of words will catch, and this must not overrule it.
+    """
+    body = text or ""
+    if _ASKS_FOR_MISSING.search(body):
+        filters.only_missing = True
+    if not filters.origin_country:
+        for pattern, code in _COUNTRY_WORDS:
+            if re.search(pattern, body, re.I):
+                filters.origin_country = code
+                break
+    return filters
+
+
 _FALLBACK_RULES = [
     (r"rom.?com|romantic comedy", {"genres": ["Romance", "Comedy"]}),
     (r"\brom(ance|antic)\b", {"genres": ["Romance"]}),
@@ -249,6 +312,16 @@ _FALLBACK_RULES = [
     (r"documentar|true story|real life", {"genres": ["Documentary"]}),
     (r"myster|whodunn?it|detective", {"genres": ["Mystery"]}),
     (r"thriller|tense|suspense", {"genres": ["Thriller", "Suspense"]}),
+    # A good cry is one of the three or four things people actually come here
+    # asking for, and it used to match nothing at all - which read as a film
+    # we did not have. Every phrase is one nobody titles a film with: bare
+    # "cry" is left alone so Cry Macho stays a film, and it is the asking
+    # shape - "make me cry", "a good cry" - that is matched instead.
+    (r"makes? me cry|made me cry|make you cry|a good cry|want to cry|have a cry|"
+     r"tear.?jerk|\bweepie\b|\bweepy\b|\bsad\b|\bsadder\b|\bsaddest\b|"
+     r"heart.?breaking|heart.?wrenching|gut.?wrenching|\bemotional\b|\bpoignant\b|"
+     r"bitter.?sweet|melancholy|\bdepressing\b|good sob|floods of tears",
+     {"genres": ["Drama"], "exclude_genres": ["Horror"], "min_rating": 7.0}),
     (r"drama|serious|moving", {"genres": ["Drama"]}),
     (r"fantasy|magic|wizard", {"genres": ["Fantasy"]}),
     (r"crime|heist|gangster", {"genres": ["Crime"]}),
@@ -285,6 +358,50 @@ def library_genres(token=None):
     return _genres
 
 
+# ---- a sentence is not a film's name ---------------------------------------
+
+# Asking shapes. A film's name does not address the person reading it, so none
+# of these appear in one: "make me cry", "for us", "in the mood for", "a film
+# that". Deliberately narrow - bare pronouns are left out, because Despicable
+# Me, Me Before You and I Know What You Did Last Summer are all titles and all
+# full of them.
+_DESCRIBES = re.compile(
+    r"\bmakes?\s+(me|us|you)\b|\bmade\s+(me|us)\b"
+    r"|\b(for|to|at|with)\s+(me|us)\b|\bfor\s+(my|our)\b"
+    r"|\bi\s+(want|need|fancy|feel|could|should|haven'?t|have\s+not|don'?t|"
+    r"can'?t|cannot|never)\b"
+    r"|\bi'?m\s+(after|in|looking|feeling)\b"
+    r"|\bin the mood\b|\bfeel like\b|\bwe'?re after\b"
+    r"|\bwhat\s+(should|can|could|do)\s+(i|we|you)\b"
+    r"|\brecommend|\bsuggest\b|\blooking for\b|\b(give|show|find|get)\s+me\b"
+    r"|\b(a|an|any|some|the)\s+(film|movie|flick|series|show)s?\s+"
+    r"(that|which|to|for|about|where|with|like)\b"
+    r"|\bsomething\s+(to|for|that|which|like|about|new|different|else)\b",
+    re.I,
+)
+
+
+def reads_as_description(text):
+    """Is this someone describing what they want, rather than naming a film?
+
+    It matters because "not a mood I understand" and "a film we do not have"
+    used to be the same answer, and the page says the second one out loud:
+    "A movie that will make me cry" came back as *We don't have "A movie that
+    will make me cry"*, with a button offering to put that sentence on the
+    wanted list and a round of TMDb lookups spent hunting for it.
+
+    Both halves have to agree before a phrase is kept away from the title
+    machinery. Titles are short and do not address you; requests are long and
+    do little else. So a short phrase is always allowed to be a title - which
+    is what saves Despicable Me and Me Before You - and a long one is only a
+    request if it is actually shaped like one.
+    """
+    body = (text or "").strip()
+    if len(re.findall(r"[\w']+", body)) < 5:
+        return False
+    return bool(_DESCRIBES.search(body))
+
+
 def _fallback_translate(request_text):
     """Keyword translation, used when there is no model to ask."""
     text = (request_text or "").lower()
@@ -310,6 +427,8 @@ def _fallback_translate(request_text):
         filters.min_rating = filters.min_rating or 7.5
     if re.search(r"\bnot seen|never seen|something new|unwatched|havent seen|haven't seen\b", text):
         filters.unwatched_only = True
+
+    read_missing_and_origin(request_text, filters)
     if re.search(r"atmos|surround|sound", text):
         filters.atmos = True
 
@@ -332,14 +451,27 @@ def _fallback_translate(request_text):
     meaningful = (filters.genres or filters.exclude_genres or filters.unwatched_only
                   or filters.year_from or filters.year_to or filters.min_rating
                   or filters.min_resolution or filters.max_runtime_minutes
-                  or filters.min_runtime_minutes or filters.hdr or filters.atmos)
+                  or filters.min_runtime_minutes or filters.hdr or filters.atmos
+                  or filters.only_missing or filters.origin_country)
     if not meaningful:
-        filters.is_title = True
+        # Nothing matched, so this is either a mood these rules are too blunt
+        # for or a film we do not hold - and the two are answered very
+        # differently, one with a shelf of suggestions and one with an offer
+        # to order it in. Only a phrase that is not shaped like a request is
+        # allowed to be the second.
         filters.genres = ["Comedy", "Drama"]
-        filters.interpretation = (
-            f"I could not tell what {request_text!r} means, so here are some well-rated "
-            "crowd-pleasers. Try naming a genre or mood."
-        )
+        if reads_as_description(request_text):
+            filters.interpretation = (
+                "I could not work out what you were after there, so here are some "
+                "well-rated crowd-pleasers. Try naming a mood or a genre - "
+                "\"something gentle\", \"funny for the kids\"."
+            )
+        else:
+            filters.is_title = True
+            filters.interpretation = (
+                f"I could not tell what {request_text!r} means, so here are some well-rated "
+                "crowd-pleasers. Try naming a genre or mood."
+            )
     elif filters.genres:
         filters.interpretation = "Matched on: " + ", ".join(filters.genres)
     elif filters.unwatched_only:
@@ -373,7 +505,11 @@ def translate(request_text, token=None):
     key = _cache_key(request_text)
     cached = _translations.get(key)
     if cached and time.time() - cached[0] < TRANSLATION_TTL:
-        return cached[1].model_copy(deep=True), "cache"
+        # Corrected on the way out as well as the way in: an entry written
+        # before these two reads existed would otherwise keep answering with
+        # the shelf for six hours after the fix that stopped it.
+        return read_missing_and_origin(
+            request_text, cached[1].model_copy(deep=True)), "cache"
 
     llm = ai.provider()
     if llm is None:
@@ -401,6 +537,11 @@ def translate(request_text, token=None):
         "- Only set a year range if the request implies one.\n"
 
         "- Never invent film titles; you are choosing filters, not films.\n"
+        "- only_missing: set it when they are asking for what the library does "
+        "NOT have - 'not in plex', 'stuff we haven't got'. It is the whole "
+        "point of such a request, so do not answer it with the shelves.\n"
+        "- origin_country: set it when they say where something is from. "
+        "'Classic UK tv' is GB and an old year range, not a genre.\n"
         "- interpretation: one short sentence in your own voice, said to the "
         "person - like you're leaning over and telling them what you've pulled out. "
         "Never a status report.\n"
@@ -426,6 +567,17 @@ def translate(request_text, token=None):
     # The two free-text fields are the only place model output reaches the page.
     filters.interpretation = " ".join((filters.interpretation or "").split())[:240]
     filters.playlist_name = " ".join((filters.playlist_name or "").split())[:60]
+    # The same guard the keyword rules use, for the same reason: a phrase shaped
+    # like a request is not one film's name, whoever decided it was. A model
+    # that ticks is_title on "a film that will make me cry" puts *We don't have
+    # "a film that will make me cry"* on the page, and that is worth spending a
+    # regex to prevent.
+    if filters.is_title and reads_as_description(request_text):
+        filters.is_title = False
+    # The words get a say too. A model that reads "not in plex" as background
+    # colour rather than the point of the sentence leaves only_missing unset,
+    # and the search then answers with the shelf it was asked to skip.
+    read_missing_and_origin(request_text, filters)
     _translations[_cache_key(request_text)] = (time.time(), filters.model_copy(deep=True))
     if len(_translations) > 500:
         oldest = sorted(_translations.items(), key=lambda kv: kv[1][0])[:200]
@@ -437,7 +589,8 @@ def translate(request_text, token=None):
     if not (filters.genres or filters.exclude_genres or filters.unwatched_only
             or filters.year_from or filters.year_to or filters.min_rating
             or filters.min_resolution or filters.max_runtime_minutes
-            or filters.min_runtime_minutes or filters.hdr or filters.atmos):
+            or filters.min_runtime_minutes or filters.hdr or filters.atmos
+            or filters.only_missing or filters.origin_country):
         return _fallback_translate(request_text), "keywords"
     return filters, "model"
 
@@ -902,9 +1055,14 @@ def search(request_text, limit=MAX_MATCHES, token=None):
     # Asked for television, answer with television. The film libraries hold
     # plenty of things with TV in the name, and offering those to somebody
     # after a series is how "comedy TV shows" came back as South Park films.
-    if wants_television(request_text):
+    is_tv = wants_television(request_text)
+    shows = []
+    if is_tv:
         shows = find_shows(filters, limit=limit, token=token, age=age)
-        if shows:
+        # only_missing falls through: what is on the shelf is the one thing
+        # such a request did not ask for, and the search above was run to know
+        # which titles the discovery step should leave out.
+        if shows and not filters.only_missing:
             said = ("Series" + (f" from {', '.join(filters.genres)}" if filters.genres else "")
                     + " on the shelf.")
             if age:
@@ -921,6 +1079,29 @@ def search(request_text, limit=MAX_MATCHES, token=None):
                 "shows": shows,
                 "unavailable": [],
             }
+
+    if filters.only_missing:
+        # Nothing on the shelf is offered. The library is read only to build the
+        # exclusion list, and for television that has already happened above -
+        # running the film search here would exclude the wrong titles and cost
+        # a Plex round trip nobody asked for.
+        held = ([x["title"] for x in shows] if is_tv
+                else [m["title"] for m in
+                      find_matches(filters, limit=limit, token=token, age=age)[0]])
+        return {
+            "request": (request_text or "").strip(),
+            "for_age": age,
+            "kind": "missing_only",
+            "translated_by": source,
+            "filters": filters.model_dump(),
+            "interpretation": filters.interpretation,
+            "playlist_name": filters.playlist_name or "Worth getting",
+            "matches": [],
+            "shows": [],
+            "held_titles": held,
+            "wants_shows": is_tv,
+            "unavailable": [],
+        }
 
     matches, genres_used, unavailable = find_matches(filters, limit=limit, token=token, age=age)
 

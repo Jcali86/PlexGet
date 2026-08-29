@@ -293,37 +293,72 @@ def discover(filters, exclude_titles=(), limit=8):
 
     ids = genre_ids()
     wanted = [ids[g.strip().lower()] for g in (filters.get("genres") or []) if g.strip().lower() in ids]
-    if not wanted:
+    country = (filters.get("origin_country") or "").strip().upper()
+
+    def year_of(key):
+        try:
+            return int(filters.get(key))
+        except (TypeError, ValueError):
+            return None
+
+    year_from, year_to = year_of("year_from"), year_of("year_to")
+
+    # A genre is not the only brief there is. "New films that are not in plex
+    # yet" names a year and nothing else, and returning empty without one
+    # answered exactly that request with nothing at all. Anything that narrows
+    # the field will do; only a request that narrows nothing is refused, since
+    # popularity alone would just list whatever is out this week.
+    if not (wanted or country or year_from or year_to or filters.get("min_rating")):
         return []
 
     params = {
         "api_key": config["tmdb"]["api_key"],
         "language": config["tmdb"].get("language", "en-US"),
-        "with_genres": ",".join(str(i) for i in wanted),
         "sort_by": "popularity.desc",
-        "vote_count.gte": 200,          # enough votes to mean something
         "include_adult": "false",
         "page": 1,
     }
+    if country:
+        params["with_origin_country"] = country
     if filters.get("min_rating"):
         params["vote_average.gte"] = filters["min_rating"]
-    if filters.get("year_from"):
-        params["primary_release_date.gte"] = f"{filters['year_from']}-01-01"
-    if filters.get("year_to"):
-        params["primary_release_date.lte"] = f"{filters['year_to']}-12-31"
+    if year_from:
+        params["primary_release_date.gte"] = f"{year_from}-01-01"
+    if year_to:
+        params["primary_release_date.lte"] = f"{year_to}-12-31"
     if filters.get("max_runtime_minutes"):
         params["with_runtime.lte"] = filters["max_runtime_minutes"]
     if filters.get("min_runtime_minutes"):
         params["with_runtime.gte"] = filters["min_runtime_minutes"]
 
-    try:
-        response = requests.get(
-            f"{config['tmdb']['base_url']}/discover/movie", params=params, timeout=15
-        )
-        response.raise_for_status()
-        results = response.json().get("results", [])
-    except Exception:
-        return []
+    # Votes are how TMDb says somebody has actually seen a thing, and two
+    # hundred of them is a fair bar for a film that has been out for years. It
+    # is the wrong bar for one released last month - which is the only kind
+    # "new films we haven't got" is asking about - so when the request reaches
+    # into the last couple of years, the bar comes down with it.
+    this_year = datetime.date.today().year
+    params["vote_count.gte"] = 20 if (year_from and year_from >= this_year - 2) else 200
+
+    def ask(join):
+        if wanted:
+            params["with_genres"] = join.join(str(i) for i in wanted)
+        try:
+            response = requests.get(
+                f"{config['tmdb']['base_url']}/discover/movie", params=params, timeout=15
+            )
+            response.raise_for_status()
+            return response.json().get("results", [])
+        except Exception:
+            return []
+
+    # A comma is AND, which is what "romantic comedy" means and why it stays
+    # the first thing tried. Three or more genres AND-ed together reliably
+    # returns nothing, though, and somebody listing that many is describing a
+    # range rather than an intersection - so an empty answer is asked again as
+    # an OR before it is believed.
+    results = ask(",")
+    if not results and len(wanted) > 1:
+        results = ask("|")
 
     def flatten(text):
         """Compare titles the way a person would, so "Se7en" is not a new film."""
@@ -352,6 +387,150 @@ def discover(filters, exclude_titles=(), limit=8):
             "poster": POSTER + item["poster_path"] if item.get("poster_path") else "",
             "rating": round(item.get("vote_average", 0), 1),
         })
+        if len(found) >= limit:
+            break
+    return found
+
+
+# ---- what the library has not got ------------------------------------------
+
+# TMDb numbers television genres separately from films, and does not use the
+# same names: there is no Thriller on television, Action and Adventure are one
+# genre, and so are Sci-Fi and Fantasy. The model chooses from the library's
+# own genre names, so those have to be translated on the way out. One name may
+# open several doors, which is why the values are lists.
+_TV_ALIASES = {
+    "action": ["action & adventure"],
+    "adventure": ["action & adventure"],
+    "science fiction": ["sci-fi & fantasy"],
+    "sci-fi": ["sci-fi & fantasy"],
+    "fantasy": ["sci-fi & fantasy"],
+    "war": ["war & politics"],
+    # Television has no Thriller or Suspense of its own; what people mean by it
+    # lives under Mystery and Crime, so ask for both rather than nothing.
+    "thriller": ["mystery", "crime"],
+    "suspense": ["mystery", "crime"],
+    "horror": ["mystery"],
+    "music": ["reality"],
+    "musical": ["reality"],
+    "history": ["documentary"],
+}
+
+_TV_GENRE_IDS = {}
+
+
+def show_genre_ids():
+    """TMDb's television genre numbering, fetched once."""
+    global _TV_GENRE_IDS
+    if _TV_GENRE_IDS or not configured():
+        return _TV_GENRE_IDS
+    try:
+        response = requests.get(
+            f"{config['tmdb']['base_url']}/genre/tv/list",
+            params={"api_key": config["tmdb"]["api_key"],
+                    "language": config["tmdb"].get("language", "en-US")},
+            timeout=12,
+        )
+        response.raise_for_status()
+        _TV_GENRE_IDS = {g["name"].strip().lower(): g["id"] for g in response.json().get("genres", [])}
+    except Exception:
+        return {}
+    return _TV_GENRE_IDS
+
+
+def _tv_genre_numbers(names):
+    """Library genre names as TMDb television genre ids, aliases applied."""
+    table = show_genre_ids()
+    if not table:
+        return []
+    numbers = []
+    for name in names or []:
+        key = (name or "").strip().lower()
+        for candidate in _TV_ALIASES.get(key, [key]):
+            number = table.get(candidate)
+            if number and number not in numbers:
+                numbers.append(number)
+    return numbers
+
+
+def discover_shows(filters, exclude_titles=(), limit=8):
+    """Series matching the brief that the library does not have.
+
+    The television half of discover(), and the same bargain: everything here is
+    a real series with a real year, so what lands on the wanted list is
+    something somebody can actually go and find.
+
+    Genres are OR-ed rather than AND-ed. "From animated to thrillers" is a
+    range somebody is describing, not a series that must be all three at once -
+    and asking TMDb for the intersection of three genres reliably returns
+    nothing, which reads on the page as "there is none of that in the world".
+    """
+    if not configured():
+        return []
+
+    wanted = _tv_genre_numbers(filters.get("genres"))
+    country = (filters.get("origin_country") or "").strip().upper()
+    # With neither a genre nor a country there is no brief to discover against,
+    # and popularity.desc alone would just return whatever is on television
+    # this week.
+    if not wanted and not country:
+        return []
+
+    params = {
+        "api_key": config["tmdb"]["api_key"],
+        "language": config["tmdb"].get("language", "en-US"),
+        "sort_by": "popularity.desc",
+        # Television carries far fewer votes than film, so the film threshold
+        # of 200 would throw away most of what anybody means by a good series.
+        "vote_count.gte": 40,
+        "include_adult": "false",
+        "page": 1,
+    }
+    if wanted:
+        params["with_genres"] = "|".join(str(i) for i in wanted)
+    if country:
+        params["with_origin_country"] = country
+    if filters.get("min_rating"):
+        params["vote_average.gte"] = filters["min_rating"]
+    if filters.get("year_from"):
+        params["first_air_date.gte"] = f"{filters['year_from']}-01-01"
+    if filters.get("year_to"):
+        params["first_air_date.lte"] = f"{filters['year_to']}-12-31"
+
+    try:
+        response = requests.get(
+            f"{config['tmdb']['base_url']}/discover/tv", params=params, timeout=15
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+    except Exception:
+        return []
+
+    def flatten(text):
+        return re.sub(r"[^a-z]", "", (text or "").lower())
+
+    already = {flatten(t) for t in exclude_titles if t}
+    already.discard("")
+    found = []
+    for item in results:
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        flat = flatten(name)
+        if not flat or flat in already:
+            continue
+        if any(fuzz.ratio(flat, seen) >= 88 for seen in already):
+            continue
+        first = (item.get("first_air_date") or "")[:4]
+        found.append({
+            "title": name,
+            "year": int(first) if first.isdigit() else None,
+            "overview": (item.get("overview") or "").strip(),
+            "poster": POSTER + item["poster_path"] if item.get("poster_path") else "",
+            "rating": round(item.get("vote_average", 0), 1),
+            "kind": "show",
+        })
+        already.add(flat)
         if len(found) >= limit:
             break
     return found

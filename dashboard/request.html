@@ -60,6 +60,23 @@
     --on-accent: #ffffff; --bar: rgba(20,20,20,.97); --veil: 20,20,20;
     --top: #0b0b0b; --green: #46d369; --red: #e50914; --poster-radius: 4px;
   }
+
+  /* Bruce: true black and gunmetal, the emblem ghosted behind everything.
+     Named for a jet black French bulldog, who is named for the other one.
+     The background is #000 exactly, so OLED panels switch those pixels off;
+     the tile is dimmed by the wash laid over it rather than by editing the
+     file, which keeps the ghost faint without ever lifting the black. */
+  body[data-skin="bruce"] {
+    --bg: #000000; --surface: #101114; --surface2: #17181c; --border: #262a31;
+    --text: #e8eaed; --dim: #8b909a; --accent: #c3c9d1; --accent-dark: #a7aeb8;
+    --on-accent: #0b0c0e; --bar: rgba(0,0,0,.97); --veil: 0,0,0;
+    --top: #000000; --green: #4ade80; --red: #f2545b; --poster-radius: 6px;
+    background-color: #000;
+    background-image: linear-gradient(rgba(0,0,0,.93), rgba(0,0,0,.93)),
+                      url("/icons/bruce-logo.png");
+    background-size: auto, 220px auto;
+    background-repeat: repeat;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   /* `clip`, not `hidden`: hidden makes these scroll containers, which
      quietly stops the sticky header sticking. */
@@ -467,6 +484,11 @@
                 fill: none; stroke-width: 1.8; margin-top: 2px; }
   .aihint b { display: block; margin-bottom: 2px; }
   .aihint p { margin: 0; color: var(--dim); font-size: 13px; }
+  /* The same card with the sparkle taken out of it: shown when an answer came
+     from the keyword rules, where the accent rail would be claiming a
+     cleverness this particular answer did not have. */
+  .aihint.plain { border-left-color: var(--dim); }
+  .aihint.plain svg { stroke: var(--dim); }
 
   .backbar {
     display: flex; align-items: center; gap: 12px; margin: 6px 0 14px;
@@ -732,6 +754,10 @@
       <span class="chips2"><i style="background:#141414"></i><i style="background:#e50914"></i></span>
       <span><b>Streaming</b><span>Near-black with one red</span></span>
     </button>
+    <button class="skin" data-act="skin" data-value="bruce" data-skin-choice="bruce">
+      <span class="chips2"><i style="background:#000"></i><i style="background:#c3c9d1"></i></span>
+      <span><b>Bruce</b><span>Jet black, gunmetal, and a very good dog</span></span>
+    </button>
   </div>
   <form method="dialog"><button class="primary">Done</button></form>
 </dialog>
@@ -827,6 +853,12 @@ const esc = s => {
 // no persona configured at all leaves them standing for good.
 let persona = {name: 'Assistant', greeting: '', brush_offs: [], images: {}};
 
+// Whether this server has a model behind the search. Assumed true until
+// /persona says otherwise, because that is how the app is meant to be run and
+// a momentary "no AI here" on a slow first paint would be a lie on almost
+// every install. Only ever used to take a claim away, never to add one.
+let smartMode = true;
+
 // The assistant may have a face per mood, and may just as well have none:
 // artwork is optional, and only the moods actually named in config and found
 // on disk come back. A mood with nothing behind it draws nothing at all,
@@ -873,14 +905,19 @@ function status(tone, title, detail, mood) {
 }
 
 // Which look this person prefers, remembered on their own device.
-const SKINS = ['plex', 'blockbuster', 'netflix'];
-function applySkin(skin) {
+const SKINS = ['plex', 'blockbuster', 'netflix', 'bruce'];
+function applySkin(skin, picked) {
   const chosen = SKINS.includes(skin) ? skin : 'plex';
   document.body.dataset.skin = chosen;
   // A browser set to refuse site data throws here rather than shrugging, and
   // this runs before the rest of the page has been built - a look that cannot
   // be remembered until next time is no reason for nothing at all to load.
-  try { localStorage.setItem('plexget-skin', chosen); } catch (e) {}
+  try {
+    localStorage.setItem('plexget-skin', chosen);
+    // Only a tap in the picker counts as choosing. The flag is what lets a
+    // person's own pick outrank a look the owner assigned to their account.
+    if (picked) localStorage.setItem('plexget-skin-picked', '1');
+  } catch (e) {}
   const theme = getComputedStyle(document.body).getPropertyValue('--top').trim();
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && theme) meta.setAttribute('content', theme);
@@ -1101,7 +1138,7 @@ const ACTIONS = {
   tournext: () => nextTourStep(),
   tourskip: () => endTour(),
   tour:  () => { document.getElementById('help').close(); startTour(); },
-  skin:  (btn) => applySkin(btn.dataset.value),
+  skin:  (btn) => applySkin(btn.dataset.value, true),
   askshow: (btn) => askShow(btn.dataset.value, btn.dataset.season,
                             (btn.dataset.seasons || '').split(',').filter(Boolean)),
   sortby: (btn) => resort(btn.dataset.value),
@@ -1396,6 +1433,57 @@ function goHome(refresh) {
   }, {passive: true});
 })();
 
+// Things the library has not got, found on TMDb rather than on the shelves.
+// Shown when the request asked for exactly that ("not in plex") or when the
+// checkbox did. Every one is a real title with a real year, so the button
+// beside it puts something on the wanted list that can be gone and found.
+function missingBlock(d, heading) {
+  const items = d.missing || [];
+  if (!items.length) return '';
+  const shows = !!d.missing_are_shows;
+  return `<div class="rowhead">${esc(heading)}</div>` + items.map(m => `
+    <div class="guess">
+      ${m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+      <div><h3>${esc(m.title)}</h3>
+        <div class="meta">${[m.year, m.rating ? '\u2605 ' + m.rating : '']
+           .filter(Boolean).map(esc).join(' \u00b7 ')}</div>
+        <div class="blurb">${esc(m.overview || '')}</div>
+        ${shows
+          ? `<button class="primary" data-act="askshow" data-value="${esc(m.title)}" data-season="next">Ask for the series</button>`
+          : `<button class="primary" data-act="ask" data-value="${esc(m.title + (m.year ? ' (' + m.year + ')' : ''))}">Ask for it</button>`}
+      </div>
+    </div>`).join('');
+}
+
+// This answer came from the keyword rules rather than from reading the mood,
+// and the page used to give no sign of it - which is how "a movie that will
+// make me cry" came back looking like a considered answer when eighteen
+// regexes had shrugged at it.
+//
+// translated_by is the honest signal, not smart_mode: a key can be configured
+// and the call still time out or fail, and the answer on the page is blunt
+// either way. smart_mode only picks which of the two things to say, because
+// the advice differs - an owner who never set a key has nothing to wait for,
+// where a call that fell over will likely work on the next try. Nothing is
+// said for a title, a person or a brush-off: none of them wanted the model.
+function keywordNotice(d) {
+  if (d.translated_by !== 'keywords') return '';
+  const off = d.smart_mode === false;
+  return `<div class="aihint plain">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5 10.1 10.9 5.5 9l4.6-1.4z"/>
+      <path d="M4.5 19.5L19.5 4.5"/></svg>
+    <div><b>${off ? 'Matched on keywords, not on mood.'
+                  : 'Matched on keywords this time.'}</b>
+    <p>${off
+      ? 'Reading a mood is not switched on for this server, so this is a plain '
+        + 'word match. Naming a film, a genre or a director works just as well.'
+      : 'I could not reach the mood reader just then, so this is a plain word '
+        + 'match. Try again in a moment - or name a film, a genre or a '
+        + 'director, which never needs it.'}</p></div>
+  </div>`;
+}
+
 async function find(query) {
   picked.clear(); refreshBar();
   clearInterval(heroTimer); clearInterval(driftTimer);
@@ -1406,7 +1494,8 @@ async function find(query) {
   try {
     const res = await fetch('/request/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query}),
+      body: JSON.stringify({query,
+                            include_missing: document.getElementById('alsomissing').checked}),
     });
     d = await res.json();
     stopThinking();
@@ -1433,7 +1522,7 @@ async function find(query) {
   playlistName = d.playlist_name || myDefaultList;
   loadPlaylists();
   const back = `<div class="backbar"><button data-act="home">← Home</button>
-    <span>Showing results for “${esc(query)}”</span></div>`;
+    <span>Showing results for “${esc(query)}”</span></div>` + keywordNotice(d);
 
   // Somebody trying it on rather than asking for a film. The assistant
   // answers, and that is the whole card - no results, no "nothing matched",
@@ -1507,7 +1596,21 @@ async function find(query) {
     return;
   }
 
-  if (!d.matches.length && !(d.shows || []).length) {
+  // They asked for what we have not got, so that is the entire answer - there
+  // is deliberately nothing from the shelves here.
+  if (d.kind === 'missing_only') {
+    const found = (d.missing || []).length;
+    out.innerHTML = back + `<div class="card ${found ? 'good' : 'warn'}">
+        ${personaFace(found ? 'excited' : 'shrug', 'tiny')}
+        <b>${found ? `${found} we haven't got.` : "Nothing to suggest there."}</b>
+        <div class="sub">${esc(d.interpretation || '')}</div></div>`
+      + missingBlock(d, 'Ask for any of these');
+    wireSelection();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    return;
+  }
+
+  if (!d.matches.length && !(d.shows || []).length && !(d.missing || []).length) {
     out.innerHTML = back + `<div class="card warn">${personaSays('shrug',
         `<b>Nothing here matches that.</b>
          <div class="sub">${esc(d.interpretation || '')}</div>
@@ -1527,6 +1630,9 @@ async function find(query) {
          (d.interpretation && d.interpretation !== 'We have that.')
            ? esc(d.interpretation) + ' ' : ''}${
          onlySeries ? '' : 'Tap to add it to one of your playlists.'}</div></div>`
+    : !d.matches.length && (d.missing || []).length
+    ? `<div class="card warn"><b>None of that is here yet.</b>
+       <div class="sub">${esc(d.interpretation)} Ask for any of the below.</div></div>`
     : `<div class="card good"><b>${d.matches.length} to choose from</b>
        <div class="sub">${esc(d.interpretation)}</div></div>`;
 
@@ -1542,7 +1648,8 @@ async function find(query) {
     ? ((d.shows || []).length ? `<div class="rowhead">Films</div>` : '')
       + sortBar() + `<div id="films">${sortedFilms().map(m => filmCard(m, true)).join('')}</div>`
     : '';
-  out.innerHTML = back + head + missing + series + films;
+  out.innerHTML = back + head + missing + series + films
+    + missingBlock(d, "While we're at it — ones we haven't got");
   wireSelection();
 }
 
@@ -1615,6 +1722,15 @@ async function ask(title, btn) {
         : status === 'acquired' ? 'That is marked as already picked up — it may still be arriving.'
         : 'It was already on the list.';
       msg = `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">${note}</div>`;
+    }
+    // The shelf holds something with a confusable name — the making-of, or
+    // Taxi Driver for "Taxi". Say so without claiming it, so the person knows
+    // the library search wasn't blind and the ask still went through.
+    const close = d.close || [];
+    if (!d.found && close.length) {
+      msg += `<div class="sub">Nearest thing on the shelf: ${
+        esc(close.slice(0, 2).map(m => m.title + (m.year ? ' (' + m.year + ')' : '')).join(', '))
+        } — not the one you asked for, so it stays on the list.</div>`;
     }
     out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}${msg}</div>`);
 
@@ -1955,13 +2071,19 @@ async function beginSignIn() {
         </div>
       </div>
       ${inner}
-      <div class="aihint">
+      ${smartMode ? `<div class="aihint">
         <svg viewBox="0 0 24 24"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5 10.1 10.9 5.5 9l4.6-1.4z"/><path d="M18 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
         <div><b>There's an AI in here</b>
         <p>Describe what you're after and it works out what to look for.
            It only ever searches this library — it can't fetch things off the internet,
            write you an essay, or run up a bill.</p></div>
-      </div>
+      </div>` : `<div class="aihint plain">
+        <svg viewBox="0 0 24 24"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z"/><path d="M16 16l4 4"/></svg>
+        <div><b>Search the shelves</b>
+        <p>Name a film, a series, an actor or a director and you'll be told
+           whether it's here. Describe the sort of thing you're after and it
+           matches on what it can. It only ever searches this library.</p></div>
+      </div>`}
       <p class="safety">Signing in with Plex is how we know it's you.
          Your password stays with Plex — it never comes near this.</p>
     </div>`;
@@ -2518,6 +2640,9 @@ async function boot() {
       name: p.name, greeting: p.greeting || '',
       brush_offs: p.brush_offs || [], images: p.images || {},
     };
+    // Strictly false, not merely falsy: a server too old to send the field at
+    // all must keep the claim rather than lose it to an undefined.
+    if (p && p.smart_mode === false) smartMode = false;
   } catch (e) { /* the defaults above are already a working assistant */ }
 
   const greet = document.querySelector('.personagreet');
@@ -2534,6 +2659,12 @@ async function boot() {
   }
   if (d.user) {
     me = d.user; myDefaultList = d.user.default_playlist || '';
+    // The look the owner assigned to this account, worn on every device it
+    // signs in from - unless the person has picked their own here, which wins.
+    // Guarded by SKINS so a typo in config dresses nobody in the fallback.
+    let pickedOwn = false;
+    try { pickedOwn = localStorage.getItem('plexget-skin-picked') === '1'; } catch (e) {}
+    if (d.user.skin && SKINS.includes(d.user.skin) && !pickedOwn) applySkin(d.user.skin);
     try { localStorage.setItem('plexget-known', '1'); } catch (e) {}
     document.documentElement.className = 'known';
     const first = document.getElementById('firstpaint');

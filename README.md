@@ -38,8 +38,12 @@ Anything vaguer goes to a language model, which turns the phrase into *filters*
 the whole trick: an invented title is a film you do not own, whereas a filter
 can only ever select from what is actually on the shelves.
 
-Without a model key it still works. A keyword map handles "romcom" and "90s
-action"; it does not handle "something gentle after a long week".
+**The model is the point of this, and the default configuration assumes one.**
+Set a provider key and the request page does what it was built to do. Without
+one it still answers rather than erroring: a keyword map handles "romcom" and
+"90s action", but it does not handle "something gentle after a long week", and
+the page stops claiming an AI it has not got. Treat that as a degraded mode to
+run in briefly, not a way to run it.
 
 What they get:
 
@@ -148,7 +152,7 @@ getting; this is for enjoying what you have got.
 | Python | 3.11 or newer |
 | A Plex token | Yours, the server owner's — see below |
 | TMDb API key | Optional but recommended. Free. Without it, requests for films you do not own cannot be identified properly |
-| An AI provider key | Optional. Without it, free-form requests fall back to keyword matching |
+| An AI provider key | **Expected.** This is what the request page is built around. Without it, free-form requests drop to keyword matching and the page stops advertising an assistant it cannot reach |
 | ffmpeg | Optional, and only for the quality audit, which shells out to `ffprobe` |
 
 For notifications and add-to-home-screen the page has to be served over HTTPS.
