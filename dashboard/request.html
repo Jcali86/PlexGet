@@ -851,7 +851,7 @@ const esc = s => {
 // Whoever this house has answering the door. The defaults stand until
 // /persona lands, so nothing below throws in the meantime - and a server with
 // no persona configured at all leaves them standing for good.
-let persona = {name: 'Assistant', greeting: '', brush_offs: [], images: {}};
+let persona = {name: 'Assistant', greeting: '', brush_offs: [], brush_off_moods: [], images: {}};
 
 // Whether this server has a model behind the search. Assumed true until
 // /persona says otherwise, because that is how the app is meant to be run and
@@ -882,7 +882,10 @@ const personaSays = (mood, inner) => {
 // the same pose every time would make a random reply feel scripted. Whittled
 // down to the poses this persona actually has, and empty when it has none.
 const brushOffMood = () => {
-  const poses = ['cheeky', 'shrug', 'unsure'].filter(m => persona.images[m]);
+  // The persona may name its own rotation; without one, the standard trio.
+  const pool = (persona.brush_off_moods && persona.brush_off_moods.length)
+    ? persona.brush_off_moods : ['cheeky', 'shrug', 'unsure'];
+  const poses = pool.filter(m => persona.images[m]);
   return poses.length ? poses[Math.floor(Math.random() * poses.length)] : '';
 };
 // The server sends the real brush-off with the answer; this is only for a card

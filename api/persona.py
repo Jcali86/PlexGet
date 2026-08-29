@@ -1,3 +1,4 @@
+import re
 """Who the assistant is: what it is called, how it talks, and what it says to
 somebody having a go at it.
 
@@ -150,7 +151,12 @@ def _images(raw):
     if not isinstance(raw, dict):
         return {}
     found = {}
-    for mood in MOODS:
+    # The drawn moods first, then any extra keys - a persona may carry poses
+    # beyond the fixed set purely so brush_off_moods below can rotate through
+    # them. A slug nothing references simply never gets asked for.
+    for mood in list(MOODS) + [k for k in raw if isinstance(k, str)
+                               and re.fullmatch(r"[a-z0-9-]{1,30}", k)
+                               and k not in MOODS]:
         name = raw.get(mood)
         if not isinstance(name, str):
             continue
@@ -194,6 +200,11 @@ def persona():
             "brush_offs": _brush_offs(block.get("brush_offs")),
             "examples": _examples(block.get("examples")),
             "images": _images(block.get("images")),
+            # Which poses the brush-off card may pick from. Left unset, the
+            # page falls back to its own trio; named here, a persona can give
+            # a random reply a random face to match.
+            "brush_off_moods": [m for m in (block.get("brush_off_moods") or [])
+                                if isinstance(m, str)][:8],
         }
     return _persona
 
