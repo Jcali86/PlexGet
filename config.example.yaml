@@ -298,6 +298,14 @@ app:
     max_query_chars: 200
 
 
+# ---- Looks assigned to accounts. Optional. ----
+# Everyone picks their own look on the request page and it stays with their
+# device. Name an account here to dress it in a particular look on every
+# device it signs in from - their own pick, made in the picker, still wins.
+# Looks: plex, blockbuster, netflix, bruce.
+skins:
+  some-plex-username: bruce
+
 # ---- Notifications. Optional. ----
 # Everything this app can send. Turn any of them off, or reword them - {braces}
 # are filled in when it sends, and nothing else is ever sent. Two of these go

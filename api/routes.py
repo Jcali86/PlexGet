@@ -74,13 +74,33 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "missing-search-2"
+BUILD = "missing-search-3"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
     "keyword-notice",     # the page says when an answer came from the keyword rules
     "ask-companion-guard",  # the making-of no longer answers for the film
+    "account-skins",        # config can dress an account in a look, e.g. bruce
 ]
+
+
+def assigned_skin(username):
+    """The look the owner has assigned to this account, or "".
+
+    Looks are picked per device, and that stays true - this is the one
+    exception, for an owner who wants somebody's account dressed a particular
+    way on every device they sign in from. A skins block in config maps
+    account name to look; the page treats it as the account's default, and a
+    person who has deliberately picked their own look keeps it.
+    """
+    block = config.get("skins") if isinstance(config, dict) else None
+    if not isinstance(block, dict) or not username:
+        return ""
+    wanted = username.strip().lower()
+    for name, skin in block.items():
+        if str(name).strip().lower() == wanted:
+            return str(skin or "").strip().lower()
+    return ""
 
 
 def create_app():
@@ -1073,6 +1093,7 @@ def create_app():
         if user:
             safe = {k: v for k, v in user.items() if k != "plex_token"}
             safe["default_playlist"] = user_library.default_playlist_name(user["username"])
+            safe["skin"] = assigned_skin(user["username"])
         return jsonify({"user": safe, "app_name": user_library.app_name()})
 
     @app.route("/auth/logout", methods=["POST"])

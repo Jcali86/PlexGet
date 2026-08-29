@@ -906,13 +906,18 @@ function status(tone, title, detail, mood) {
 
 // Which look this person prefers, remembered on their own device.
 const SKINS = ['plex', 'blockbuster', 'netflix', 'bruce'];
-function applySkin(skin) {
+function applySkin(skin, picked) {
   const chosen = SKINS.includes(skin) ? skin : 'plex';
   document.body.dataset.skin = chosen;
   // A browser set to refuse site data throws here rather than shrugging, and
   // this runs before the rest of the page has been built - a look that cannot
   // be remembered until next time is no reason for nothing at all to load.
-  try { localStorage.setItem('plexget-skin', chosen); } catch (e) {}
+  try {
+    localStorage.setItem('plexget-skin', chosen);
+    // Only a tap in the picker counts as choosing. The flag is what lets a
+    // person's own pick outrank a look the owner assigned to their account.
+    if (picked) localStorage.setItem('plexget-skin-picked', '1');
+  } catch (e) {}
   const theme = getComputedStyle(document.body).getPropertyValue('--top').trim();
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && theme) meta.setAttribute('content', theme);
@@ -1133,7 +1138,7 @@ const ACTIONS = {
   tournext: () => nextTourStep(),
   tourskip: () => endTour(),
   tour:  () => { document.getElementById('help').close(); startTour(); },
-  skin:  (btn) => applySkin(btn.dataset.value),
+  skin:  (btn) => applySkin(btn.dataset.value, true),
   askshow: (btn) => askShow(btn.dataset.value, btn.dataset.season,
                             (btn.dataset.seasons || '').split(',').filter(Boolean)),
   sortby: (btn) => resort(btn.dataset.value),
@@ -2654,6 +2659,12 @@ async function boot() {
   }
   if (d.user) {
     me = d.user; myDefaultList = d.user.default_playlist || '';
+    // The look the owner assigned to this account, worn on every device it
+    // signs in from - unless the person has picked their own here, which wins.
+    // Guarded by SKINS so a typo in config dresses nobody in the fallback.
+    let pickedOwn = false;
+    try { pickedOwn = localStorage.getItem('plexget-skin-picked') === '1'; } catch (e) {}
+    if (d.user.skin && SKINS.includes(d.user.skin) && !pickedOwn) applySkin(d.user.skin);
     try { localStorage.setItem('plexget-known', '1'); } catch (e) {}
     document.documentElement.className = 'known';
     const first = document.getElementById('firstpaint');
