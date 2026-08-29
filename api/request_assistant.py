@@ -249,6 +249,16 @@ _FALLBACK_RULES = [
     (r"documentar|true story|real life", {"genres": ["Documentary"]}),
     (r"myster|whodunn?it|detective", {"genres": ["Mystery"]}),
     (r"thriller|tense|suspense", {"genres": ["Thriller", "Suspense"]}),
+    # A good cry is one of the three or four things people actually come here
+    # asking for, and it used to match nothing at all - which read as a film
+    # we did not have. Every phrase is one nobody titles a film with: bare
+    # "cry" is left alone so Cry Macho stays a film, and it is the asking
+    # shape - "make me cry", "a good cry" - that is matched instead.
+    (r"makes? me cry|made me cry|make you cry|a good cry|want to cry|have a cry|"
+     r"tear.?jerk|\bweepie\b|\bweepy\b|\bsad\b|\bsadder\b|\bsaddest\b|"
+     r"heart.?breaking|heart.?wrenching|gut.?wrenching|\bemotional\b|\bpoignant\b|"
+     r"bitter.?sweet|melancholy|\bdepressing\b|good sob|floods of tears",
+     {"genres": ["Drama"], "exclude_genres": ["Horror"], "min_rating": 7.0}),
     (r"drama|serious|moving", {"genres": ["Drama"]}),
     (r"fantasy|magic|wizard", {"genres": ["Fantasy"]}),
     (r"crime|heist|gangster", {"genres": ["Crime"]}),
@@ -283,6 +293,50 @@ def library_genres(token=None):
         # Keep the readable ones; some libraries carry stray non-English tags.
         _genres = sorted(g for g in found if re.match(r"^[\x20-\x7e]+$", g))
     return _genres
+
+
+# ---- a sentence is not a film's name ---------------------------------------
+
+# Asking shapes. A film's name does not address the person reading it, so none
+# of these appear in one: "make me cry", "for us", "in the mood for", "a film
+# that". Deliberately narrow - bare pronouns are left out, because Despicable
+# Me, Me Before You and I Know What You Did Last Summer are all titles and all
+# full of them.
+_DESCRIBES = re.compile(
+    r"\bmakes?\s+(me|us|you)\b|\bmade\s+(me|us)\b"
+    r"|\b(for|to|at|with)\s+(me|us)\b|\bfor\s+(my|our)\b"
+    r"|\bi\s+(want|need|fancy|feel|could|should|haven'?t|have\s+not|don'?t|"
+    r"can'?t|cannot|never)\b"
+    r"|\bi'?m\s+(after|in|looking|feeling)\b"
+    r"|\bin the mood\b|\bfeel like\b|\bwe'?re after\b"
+    r"|\bwhat\s+(should|can|could|do)\s+(i|we|you)\b"
+    r"|\brecommend|\bsuggest\b|\blooking for\b|\b(give|show|find|get)\s+me\b"
+    r"|\b(a|an|any|some|the)\s+(film|movie|flick|series|show)s?\s+"
+    r"(that|which|to|for|about|where|with|like)\b"
+    r"|\bsomething\s+(to|for|that|which|like|about|new|different|else)\b",
+    re.I,
+)
+
+
+def reads_as_description(text):
+    """Is this someone describing what they want, rather than naming a film?
+
+    It matters because "not a mood I understand" and "a film we do not have"
+    used to be the same answer, and the page says the second one out loud:
+    "A movie that will make me cry" came back as *We don't have "A movie that
+    will make me cry"*, with a button offering to put that sentence on the
+    wanted list and a round of TMDb lookups spent hunting for it.
+
+    Both halves have to agree before a phrase is kept away from the title
+    machinery. Titles are short and do not address you; requests are long and
+    do little else. So a short phrase is always allowed to be a title - which
+    is what saves Despicable Me and Me Before You - and a long one is only a
+    request if it is actually shaped like one.
+    """
+    body = (text or "").strip()
+    if len(re.findall(r"[\w']+", body)) < 5:
+        return False
+    return bool(_DESCRIBES.search(body))
 
 
 def _fallback_translate(request_text):
@@ -334,12 +388,24 @@ def _fallback_translate(request_text):
                   or filters.min_resolution or filters.max_runtime_minutes
                   or filters.min_runtime_minutes or filters.hdr or filters.atmos)
     if not meaningful:
-        filters.is_title = True
+        # Nothing matched, so this is either a mood these rules are too blunt
+        # for or a film we do not hold - and the two are answered very
+        # differently, one with a shelf of suggestions and one with an offer
+        # to order it in. Only a phrase that is not shaped like a request is
+        # allowed to be the second.
         filters.genres = ["Comedy", "Drama"]
-        filters.interpretation = (
-            f"I could not tell what {request_text!r} means, so here are some well-rated "
-            "crowd-pleasers. Try naming a genre or mood."
-        )
+        if reads_as_description(request_text):
+            filters.interpretation = (
+                "I could not work out what you were after there, so here are some "
+                "well-rated crowd-pleasers. Try naming a mood or a genre - "
+                "\"something gentle\", \"funny for the kids\"."
+            )
+        else:
+            filters.is_title = True
+            filters.interpretation = (
+                f"I could not tell what {request_text!r} means, so here are some well-rated "
+                "crowd-pleasers. Try naming a genre or mood."
+            )
     elif filters.genres:
         filters.interpretation = "Matched on: " + ", ".join(filters.genres)
     elif filters.unwatched_only:
@@ -426,6 +492,13 @@ def translate(request_text, token=None):
     # The two free-text fields are the only place model output reaches the page.
     filters.interpretation = " ".join((filters.interpretation or "").split())[:240]
     filters.playlist_name = " ".join((filters.playlist_name or "").split())[:60]
+    # The same guard the keyword rules use, for the same reason: a phrase shaped
+    # like a request is not one film's name, whoever decided it was. A model
+    # that ticks is_title on "a film that will make me cry" puts *We don't have
+    # "a film that will make me cry"* on the page, and that is worth spending a
+    # regex to prevent.
+    if filters.is_title and reads_as_description(request_text):
+        filters.is_title = False
     _translations[_cache_key(request_text)] = (time.time(), filters.model_copy(deep=True))
     if len(_translations) > 500:
         oldest = sorted(_translations.items(), key=lambda kv: kv[1][0])[:200]
