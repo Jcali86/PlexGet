@@ -313,6 +313,14 @@ before you publish the host, not after.
 
 ## Making it yours
 
+### Looks, made in the app
+
+The owner can build new looks without touching a file: the look picker has a
+**Make a look** button (owner only) asking for a name, six colours and an
+optional tiling PNG wallpaper. Saved looks join the picker for the whole
+household and live under `data/`, never in the repository. Household members
+choose looks; only the owner makes or removes them.
+
 Everything in this section lives in `config.yaml`. All of it is optional, and
 leaving it out gets you a plain, neutral version rather than an error.
 

@@ -27,6 +27,7 @@ from api import suggestions as suggest
 from api import tmdb_lookup
 from api import push as web_push
 from api import user_library
+from api import themes as looks
 from api.ai import has_api_key
 from api.request_assistant import (
     close_matches,
@@ -734,6 +735,54 @@ def create_app():
             ],
         })
 
+    @app.route("/themes")
+    def themes_list():
+        """The owner-made looks, for everyone's picker. Open like /persona:
+        the page paints its skin before anybody signs in."""
+        out = jsonify({"themes": looks.themes()})
+        out.headers["Cache-Control"] = "no-store"
+        return out
+
+    @app.route("/themes/art/<slug>.png")
+    def themes_art(slug):
+        """A look's wallpaper. The slug is validated, never joined as a path."""
+        path = looks.art_path(slug)
+        if path is None:
+            return jsonify({"error": "no such look"}), 404
+        resp = send_from_directory(str(path.parent), path.name, mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=600"
+        return resp
+
+    @app.route("/themes/save", methods=["POST"])
+    def themes_save():
+        """Make or replace a look. Owner tier by placement: this path is
+        neither open nor household, so the guard already refuses everyone
+        else - members wear looks, the owner makes them."""
+        body = request.get_json(silent=True) or {}
+        art = None
+        data_url = body.get("wallpaper") or ""
+        if data_url.startswith("data:image/png;base64,"):
+            import base64
+            try:
+                art = base64.b64decode(data_url.split(",", 1)[1])
+            except Exception:
+                return jsonify({"error": "that wallpaper would not decode"}), 400
+            if len(art) > 2_000_000:
+                return jsonify({"error": "keep the wallpaper under 2MB"}), 400
+            if not art.startswith(b"\x89PNG"):
+                return jsonify({"error": "the wallpaper has to be a PNG"}), 400
+        try:
+            slug = looks.save(body.get("name"), body.get("colors") or {}, art)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"slug": slug, "themes": looks.themes()})
+
+    @app.route("/themes/<slug>/delete", methods=["POST"])
+    def themes_delete(slug):
+        """Take a look down for everyone. Owner tier, same as making one."""
+        looks.remove(slug)
+        return jsonify({"themes": looks.themes()})
+
     @app.route("/persona")
     def persona_config():
         """What the assistant is called, and what it says for itself.
@@ -1117,8 +1166,9 @@ def create_app():
     # else - scans, fixers, poster tools, exports, the dashboard - is the
     # owner's alone. Written this way round so that publishing the host more
     # widely cannot quietly expose an endpoint nobody remembered.
-    OPEN_PATHS = {"/", "/request", "/health", "/manifest.webmanifest", "/persona", "/sw.js"}
-    OPEN_PREFIXES = ("/auth/", "/icons/")
+    OPEN_PATHS = {"/", "/request", "/health", "/manifest.webmanifest", "/persona",
+                  "/themes", "/sw.js"}
+    OPEN_PREFIXES = ("/auth/", "/icons/", "/themes/art/")
     HOUSEHOLD_PATHS = {"/wanted/thumb"}
     HOUSEHOLD_PREFIXES = ("/request/", "/push/")
 

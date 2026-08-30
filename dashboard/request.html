@@ -669,6 +669,13 @@
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog h3 { margin: 0 0 12px; font-size: 17px; }
 
+  .lookform { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .lookform label { display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; font-size: 13px; color: var(--dim); }
+  .lookform input[type=color] { width: 44px; height: 32px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface); padding: 2px; }
+  .lookform input[type=text] { flex: 1; padding: 8px 10px; font-size: 14px; }
+  .lookform input[type=file] { font-size: 12px; max-width: 160px; }
   .skins { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 16px; }
   .skin {
     display: flex; align-items: center; gap: 12px; padding: 11px 13px; cursor: pointer;
@@ -758,7 +765,9 @@
       <span class="chips2"><i style="background:#000"></i><i style="background:#c3c9d1"></i></span>
       <span><b>Bruce</b><span>Jet black, gunmetal, and a very good dog</span></span>
     </button>
+    <div id="customskins"></div>
   </div>
+  <button class="ghost" id="makelook" type="button" hidden style="margin-bottom:10px">+ Make a look</button>
   <form method="dialog"><button class="primary">Done</button></form>
 </dialog>
 
@@ -775,6 +784,27 @@
     <button class="ghost" id="belltest" type="button">Send a test</button>
     <form method="dialog" style="margin-left:auto"><button class="primary">Done</button></form>
   </div>
+</dialog>
+
+<dialog id="lookmaker">
+  <h3>Make a look</h3>
+  <p class="sub" style="margin:0 0 12px">Six colours and, if you like, a small PNG
+    that tiles behind everything. It joins the picker for the whole household.</p>
+  <div class="lookform">
+    <label>Name <input id="lk-name" type="text" maxlength="40" placeholder="Midnight"></label>
+    <label>Background <input id="lk-bg" type="color" value="#101014"></label>
+    <label>Cards <input id="lk-surface" type="color" value="#1a1a20"></label>
+    <label>Lines <input id="lk-border" type="color" value="#33333a"></label>
+    <label>Text <input id="lk-text" type="color" value="#eeeef2"></label>
+    <label>Accent <input id="lk-accent" type="color" value="#e5a00d"></label>
+    <label>Warnings <input id="lk-red" type="color" value="#e2493f"></label>
+    <label>Wallpaper <input id="lk-art" type="file" accept="image/png"></label>
+  </div>
+  <div class="row" style="display:flex;gap:8px;margin-top:14px">
+    <button class="primary" id="lk-save" type="button">Save the look</button>
+    <form method="dialog" style="margin-left:auto"><button class="ghost">Cancel</button></form>
+  </div>
+  <div class="sub" id="lk-said" style="margin-top:8px"></div>
 </dialog>
 
 <dialog id="help">
@@ -909,6 +939,93 @@ function status(tone, title, detail, mood) {
 
 // Which look this person prefers, remembered on their own device.
 const SKINS = ['plex', 'blockbuster', 'netflix', 'bruce'];
+
+// ---- looks the owner made ----
+// Fetched, not shipped: the owner builds these in the app from six colours
+// and an optional wallpaper, and they join the picker for everyone. Each one
+// arrives as a full variable set and becomes CSS injected here - the page
+// treats it exactly like a built-in from then on.
+let customThemes = [];
+function mountThemes(list) {
+  customThemes = list || [];
+  let css = '';
+  for (const t of customThemes) {
+    const slug = 'c-' + t.slug;
+    if (!SKINS.includes(slug)) SKINS.push(slug);
+    const c = t.colors;
+    css += `body[data-skin="${slug}"] {
+      --bg: ${c.bg}; --surface: ${c.surface}; --surface2: ${c.surface2};
+      --border: ${c.border}; --text: ${c.text}; --dim: ${c.dim};
+      --accent: ${c.accent}; --accent-dark: ${c.accent_dark};
+      --on-accent: ${c.on_accent}; --bar: ${c.bg}f7;
+      --top: ${c.top}; --green: ${c.green}; --red: ${c.red};
+      --veil: ${parseInt(c.bg.slice(1,3),16)},${parseInt(c.bg.slice(3,5),16)},${parseInt(c.bg.slice(5,7),16)};
+    }\n`;
+    if (t.wallpaper) {
+      css += `body[data-skin="${slug}"]::before {
+        content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+        background-image: url("${t.wallpaper}");
+        background-size: 230px auto; background-repeat: repeat; opacity: .3; }
+      body[data-skin="${slug}"] > *:not(header):not(dialog) { position: relative; z-index: 1; }\n`;
+    }
+  }
+  let tag = document.getElementById('customthemes');
+  if (!tag) { tag = document.createElement('style'); tag.id = 'customthemes'; document.head.appendChild(tag); }
+  tag.textContent = css;
+  const box = document.getElementById('customskins');
+  if (box) box.innerHTML = customThemes.map(t => `
+    <button class="skin" data-act="skin" data-value="c-${t.slug}" data-skin-choice="c-${t.slug}">
+      <span class="chips2"><i style="background:${t.colors.bg}"></i><i style="background:${t.colors.border}"></i><i style="background:${t.colors.accent}"></i></span>
+      <span><b>${esc(t.name)}</b><span>Made here${me && me.role === 'owner'
+        ? ` &middot; <a href="#" data-act="unlook" data-value="${t.slug}">remove</a>` : ''}</span></span>
+    </button>`).join('');
+  // A remembered custom look loads before its CSS exists and falls back to
+  // plex; now that the CSS is here, the remembered choice gets its paint.
+  try {
+    const want = localStorage.getItem('plexget-skin');
+    if (want && want.startsWith('c-') && SKINS.includes(want)
+        && document.body.dataset.skin !== want) applySkin(want);
+  } catch (e) {}
+}
+// The maker itself. The button only shows for the owner, and the server
+// would refuse anybody else anyway - the button is honesty, the guard is law.
+document.getElementById('makelook').addEventListener('click', () => {
+  document.getElementById('lookmaker').showModal();
+});
+document.getElementById('lk-save').addEventListener('click', async () => {
+  const said = document.getElementById('lk-said');
+  const grab = (id) => document.getElementById(id).value;
+  const body = {
+    name: grab('lk-name'),
+    colors: {bg: grab('lk-bg'), surface: grab('lk-surface'), border: grab('lk-border'),
+             text: grab('lk-text'), accent: grab('lk-accent'), red: grab('lk-red')},
+  };
+  const file = document.getElementById('lk-art').files[0];
+  if (file) {
+    if (file.size > 2_000_000) { said.textContent = 'Keep the wallpaper under 2MB.'; return; }
+    body.wallpaper = await new Promise((res) => {
+      const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(file);
+    });
+    if (!String(body.wallpaper).startsWith('data:image/png')) {
+      said.textContent = 'The wallpaper has to be a PNG.'; return;
+    }
+  }
+  said.textContent = 'Saving…';
+  try {
+    const res = await fetch('/themes/save', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const d = await res.json();
+    if (!res.ok) { said.textContent = d.error || 'That did not save.'; return; }
+    mountThemes(d.themes || []);
+    document.getElementById('lookmaker').close();
+    said.textContent = '';
+    applySkin('c-' + d.slug, true);
+  } catch (e) { said.textContent = 'That did not save.'; }
+});
+
+async function loadThemes() {
+  try { mountThemes((await (await fetch('/themes')).json()).themes); } catch (e) {}
+}
 function applySkin(skin, picked) {
   const chosen = SKINS.includes(skin) ? skin : 'plex';
   document.body.dataset.skin = chosen;
@@ -916,7 +1033,10 @@ function applySkin(skin, picked) {
   // this runs before the rest of the page has been built - a look that cannot
   // be remembered until next time is no reason for nothing at all to load.
   try {
-    localStorage.setItem('plexget-skin', chosen);
+    // Never let the fallback overwrite a remembered choice: an owner-made
+    // look is applied before its CSS has arrived, falls back to plex for a
+    // moment, and writing that moment to storage would forget the real pick.
+    if (chosen === skin) localStorage.setItem('plexget-skin', chosen);
     // Only a tap in the picker counts as choosing. The flag is what lets a
     // person's own pick outrank a look the owner assigned to their account.
     if (picked) localStorage.setItem('plexget-skin-picked', '1');
@@ -1142,6 +1262,14 @@ const ACTIONS = {
   tourskip: () => endTour(),
   tour:  () => { document.getElementById('help').close(); startTour(); },
   skin:  (btn) => applySkin(btn.dataset.value, true),
+  unlook: async (btn) => {
+    if (!confirm('Take this look away for everyone?')) return;
+    try {
+      const d = await (await fetch('/themes/' + encodeURIComponent(btn.dataset.value) + '/delete',
+                                   {method: 'POST'})).json();
+      mountThemes(d.themes || []);
+    } catch (e) {}
+  },
   askshow: (btn) => askShow(btn.dataset.value, btn.dataset.season,
                             (btn.dataset.seasons || '').split(',').filter(Boolean)),
   sortby: (btn) => resort(btn.dataset.value),
@@ -2630,6 +2758,7 @@ async function startList(keys, playlist) {
 }
 
 async function boot() {
+  loadThemes();
   // Both at once. The persona is wanted before anything is drawn - beginSignIn
   // paints the welcome face and runs from here - and asking for it after the
   // session would put a second round trip in front of the first paint.
@@ -2674,6 +2803,7 @@ async function boot() {
     if (first) first.remove();
     // Starter waits for the playlist count: it only shows for somebody with
     // no list yet, and it cannot know that until the lists have loaded.
+    if (d.user.role === 'owner') document.getElementById('makelook').hidden = false;
     showSignedIn(); loadPlaylists().then(offerStarter); showShelf(); showNotes();
     setTimeout(offerNudges, 2500);
     try {
