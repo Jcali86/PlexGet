@@ -313,6 +313,23 @@ before you publish the host, not after.
 
 ## Making it yours
 
+### A playlist for somebody else
+
+Plex has no way to put a playlist in another account - you can share one of
+yours, which arrives as yours, shared. This can, for anyone who has signed in
+here: their sign-in leaves a per-server token, and a list built with it simply
+belongs to them.
+
+The owner gets a **for whom** picker beside the add button; everybody else only
+ever builds their own. A new list made this way carries *"Made for you by
+&lt;name&gt;"* as its Plex summary, so it never appears out of nowhere. People
+who have not signed in are not offered, since there is no account to write to,
+and a token that has expired since says so plainly rather than failing.
+
+Worth thinking about before you use it: this writes into somebody's personal
+Plex account with a credential they handed over in order to sign in. For a
+household that is usually a kindness. It is still their account.
+
 ### Looks, made in the app
 
 The owner can build new looks without touching a file: the look picker has a

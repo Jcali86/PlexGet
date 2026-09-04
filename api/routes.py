@@ -6,6 +6,7 @@ import re
 import time
 
 import requests
+from plexapi.exceptions import Unauthorized
 
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -1526,14 +1527,44 @@ def create_app():
         keys = (body.get("rating_keys") or [])[:60]
         if not keys:
             return jsonify({"error": "pick at least one film"}), 400
+
+        # Building a list for somebody else is the owner's alone. This route is
+        # household tier because everybody uses it for themselves, so the check
+        # is made here rather than left to the guard - a member naming somebody
+        # else must be refused, not quietly served.
+        token, whose, note = user.get("plex_token"), user["username"], ""
+        for_user = " ".join((body.get("for_user") or "").split())[:60]
+        if for_user and for_user != user["username"]:
+            if user.get("role") != "owner":
+                return jsonify({"error": "only the owner can build a list for somebody else"}), 403
+            db = Database()
+            try:
+                theirs = plex_auth.token_for(db, for_user)
+            finally:
+                db.close()
+            if not theirs:
+                return jsonify({
+                    "error": f"{for_user} has not signed in here yet, so there is "
+                             "nowhere to put it. Ask them to open the app once.",
+                }), 409
+            token, whose = theirs, for_user
+            # A list that turns up unannounced should say where it came from.
+            note = f"Made for you by {user['username']}"
+
         try:
-            result = user_library.add_to_playlist(
-                user.get("plex_token"), name, keys, user["username"]
-            )
+            result = user_library.add_to_playlist(token, name, keys, whose, note)
         except PermissionError:
             return jsonify({"error": "sign in again to use your own playlists"}), 401
+        except Unauthorized:
+            # Their token died - a password change, or signing out everywhere.
+            return jsonify({
+                "error": f"{whose}'s sign-in has expired. Ask them to open the "
+                         "app once and try again.",
+            }), 409
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        if whose != user["username"]:
+            result["for_user"] = whose
         return jsonify(result)
 
     @app.route("/request/playlist/auto", methods=["POST"])
@@ -1704,6 +1735,23 @@ def create_app():
         finally:
             db.close()
         return jsonify({"notes": notes})
+
+    @app.route("/members")
+    def members_list():
+        """Who the owner can build a playlist for.
+
+        Owner tier by placement - this is not under /request/, so the guard
+        refuses everybody else before the handler runs. Only people who have
+        signed in appear: a sign-in is what leaves the token behind, and
+        without one there is no account to put a playlist in.
+        """
+        db = Database()
+        try:
+            people = plex_auth.members_with_tokens(db)
+        finally:
+            db.close()
+        me = (current_user() or {}).get("username")
+        return jsonify({"members": [m for m in people if m["username"] != me]})
 
     @app.route("/announce", methods=["POST"])
     def announce():

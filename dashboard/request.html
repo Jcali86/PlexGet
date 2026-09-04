@@ -742,6 +742,7 @@
 
 <div class="bar" id="bar">
   <button class="none" id="clearpick" type="button" aria-label="Clear selection">None</button>
+  <select id="forwho" aria-label="Whose list" hidden></select>
   <select id="target" aria-label="Which playlist"></select>
   <button class="primary" id="add">Add <span id="count">0</span></button>
 </div>
@@ -1924,23 +1925,43 @@ document.getElementById('clearpick').addEventListener('click', () => {
   refreshBar();
 });
 
+// Building a list for somebody else: the owner's alone, and only for people
+// who have signed in at least once - a sign-in is what leaves the token that
+// makes the list theirs rather than a shared copy of the owner's.
+const forwho = document.getElementById('forwho');
+async function loadMembers() {
+  if (!me || me.role !== 'owner') return;
+  let people = [];
+  try { people = (await (await fetch('/members')).json()).members || []; } catch (e) { return; }
+  if (!people.length) return;
+  forwho.innerHTML = `<option value="">for me</option>`
+    + people.map(p => `<option value="${esc(p.username)}">for ${esc(p.username)}</option>`).join('');
+  forwho.hidden = false;
+}
+
 document.getElementById('add').addEventListener('click', async (ev) => {
   const btn = ev.currentTarget; btn.disabled = true;
   try {
     const res = await fetch('/request/playlist', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({playlist: chosenList(), rating_keys: [...picked.keys()]}),
+      body: JSON.stringify({playlist: chosenList(), rating_keys: [...picked.keys()],
+                            for_user: forwho.hidden ? '' : forwho.value}),
     });
     const d = await res.json();
     if (!res.ok) { alert(d.error || 'Could not add those'); return; }
+    const theirs = d.for_user;
     out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}
-      <b>Added ${d.added} to “${esc(d.playlist)}”.</b>
-      <div class="sub">${d.created ? 'New list — ' : ''}it's in your Plex now.${
+      <b>Added ${d.added} to “${esc(d.playlist)}”${theirs ? ' for ' + esc(theirs) : ''}.</b>
+      <div class="sub">${d.created ? 'New list — ' : ''}${theirs
+        ? `it is in ${esc(theirs)}'s own Plex, and says you made it.`
+        : "it's in your Plex now."}${
         d.already_there ? ' ' + d.already_there + ' were already in it.' : ''}</div></div>`);
     // This list is now where the next add goes - and if it was just made,
     // reloading the picker is what gets it offered by name.
-    rememberList(d.playlist);
-    loadPlaylists();
+    // Only remember it as the default when it is mine; the picker lists my
+    // playlists, and pinning somebody else's name into it would send my next
+    // add to a list I cannot see.
+    if (!theirs) { rememberList(d.playlist); loadPlaylists(); }
     picked.clear();
     out.querySelectorAll('.film.picked').forEach(el => el.classList.remove('picked'));
     refreshBar(); loadPlaylists();
@@ -2804,7 +2825,7 @@ async function boot() {
     // Starter waits for the playlist count: it only shows for somebody with
     // no list yet, and it cannot know that until the lists have loaded.
     if (d.user.role === 'owner') document.getElementById('makelook').hidden = false;
-    showSignedIn(); loadPlaylists().then(offerStarter); showShelf(); showNotes();
+    showSignedIn(); loadPlaylists().then(offerStarter); loadMembers(); showShelf(); showNotes();
     setTimeout(offerNudges, 2500);
     try {
       if (!localStorage.getItem('plexget-tour')) setTimeout(startTour, 900);

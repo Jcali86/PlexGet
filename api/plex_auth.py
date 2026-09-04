@@ -398,6 +398,41 @@ def token_alive(plex_token):
     return r.status_code != 401
 
 
+def token_for(db, username):
+    """The freshest stored Plex token for a household member, or None.
+
+    Every sign-in leaves the per-server token behind, which is what lets the
+    owner act for somebody who is not here - making a playlist that belongs to
+    them rather than one of the owner's shared out. Newest first, because a
+    token dies when they change their password or sign out everywhere, and the
+    most recent sign-in is the likeliest to still be alive.
+    """
+    ensure_table(db)
+    rows = db.conn.execute(
+        "SELECT plex_token_enc FROM sessions WHERE username = ? "
+        "AND plex_token_enc IS NOT NULL AND plex_token_enc != '' "
+        "ORDER BY last_seen DESC", (username,)).fetchall()
+    for row in rows:
+        token = decrypt(row["plex_token_enc"])
+        if token:
+            return token
+    return None
+
+
+def members_with_tokens(db):
+    """Everyone the owner could make a playlist for, newest sign-in first.
+
+    Somebody who has never opened the app has left no token, so they are not
+    offered - there would be no account to put the playlist in.
+    """
+    ensure_table(db)
+    rows = db.conn.execute(
+        "SELECT username, MAX(last_seen) AS seen FROM sessions "
+        "WHERE plex_token_enc IS NOT NULL AND plex_token_enc != '' "
+        "GROUP BY username ORDER BY seen DESC").fetchall()
+    return [{"username": r["username"], "last_seen": r["seen"]} for r in rows]
+
+
 def end_session(db, token):
     ensure_table(db)
     db.conn.execute("DELETE FROM sessions WHERE token = ?", (token,))

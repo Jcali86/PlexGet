@@ -160,8 +160,13 @@ def remove_from_playlist(token, name, rating_keys):
     return {"playlist": playlist.title, "removed": len(items)}
 
 
-def add_to_playlist(token, playlist_name, rating_keys, username=""):
-    """Put films into one of this person's playlists, creating it if needed."""
+def add_to_playlist(token, playlist_name, rating_keys, username="", note=""):
+    """Put films into one of this person's playlists, creating it if needed.
+
+    `note` is written onto a newly made list as its summary. It exists for the
+    playlist an owner makes on somebody else's behalf: a list that turns up in
+    your Plex unannounced should say where it came from.
+    """
     server = as_user(token)
     name = (playlist_name or "").strip() or default_playlist_name(username or "My")
 
@@ -178,7 +183,12 @@ def add_to_playlist(token, playlist_name, rating_keys, username=""):
         (p for p in server.playlists() if p.title.lower() == name.lower()), None
     )
     if existing is None:
-        server.createPlaylist(name, items=items)
+        made = server.createPlaylist(name, items=items)
+        if note:
+            try:
+                made.editSummary(note)
+            except Exception:
+                pass        # a summary is a nicety, never worth failing over
         return {"playlist": name, "added": len(items), "created": True}
 
     already = {item.ratingKey for item in existing.items()}
