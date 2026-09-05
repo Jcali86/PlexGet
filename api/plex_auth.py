@@ -419,6 +419,24 @@ def token_for(db, username):
     return None
 
 
+def member_session(db, username):
+    """A member's Plex id and freshest token, or None.
+
+    The id is what their watch history is filed under and the token is what
+    reads it, so building a list out of somebody's own taste needs both.
+    """
+    ensure_table(db)
+    rows = db.conn.execute(
+        "SELECT plex_user_id, plex_token_enc FROM sessions WHERE username = ? "
+        "AND plex_token_enc IS NOT NULL AND plex_token_enc != '' "
+        "ORDER BY last_seen DESC", (username,)).fetchall()
+    for row in rows:
+        token = decrypt(row["plex_token_enc"])
+        if token:
+            return {"id": row["plex_user_id"], "token": token}
+    return None
+
+
 def members_with_tokens(db):
     """Everyone the owner could make a playlist for, newest sign-in first.
 

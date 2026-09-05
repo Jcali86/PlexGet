@@ -14,6 +14,23 @@ the library with, and if you have not shared with them, they do not get in.
 
 ---
 
+## The one Plex will not do
+
+You can share a playlist with someone. You cannot *give* them one — Plex
+playlists belong to an account, and a shared list arrives as yours, borrowed.
+
+This puts a playlist **in their account**. Theirs to rename, reorder or delete,
+on every device they sign into, and it will still be there if they stop using
+this app entirely. The owner picks a person, then either describes what they
+would like or builds it out of **what that person has actually been watching** —
+read with their own token, filed under their own account, so it is their taste
+being answered rather than yours. Nothing is written until the films are on the
+screen and you say go.
+
+Nothing else in this corner of the self-hosting world seems to do it.
+
+---
+
 ## Screenshots
 
 None here yet, on purpose — the page is skinned and named by you, and a set of
@@ -315,13 +332,14 @@ before you publish the host, not after.
 
 ### A playlist for somebody else
 
-Plex has no way to put a playlist in another account - you can share one of
-yours, which arrives as yours, shared. This can, for anyone who has signed in
+The headline feature above, in detail. It works for anyone who has signed in
 here: their sign-in leaves a per-server token, and a list built with it simply
 belongs to them.
 
-The owner gets a **for whom** picker beside the add button; everybody else only
-ever builds their own. A new list made this way carries *"Made for you by
+The owner gets a lit **Make someone a playlist** door on the front page, with a
+page of its own, plus a quicker **for whom** picker beside the add button for
+when you are already looking at films. Everybody else only ever builds their
+own. A new list made this way carries *"Made for you by
 &lt;name&gt;"* as its Plex summary, so it never appears out of nowhere. People
 who have not signed in are not offered, since there is no account to write to,
 and a token that has expired since says so plainly rather than failing.

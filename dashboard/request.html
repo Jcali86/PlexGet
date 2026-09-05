@@ -171,6 +171,40 @@
   /* Both doors the same size, whatever their labels: they are a matched pair
      and one growing taller than the other is the sort of thing you feel
      before you can name it. */
+  /* The gift door. Full width and lit, because it is the one thing here that
+     Plex itself will not do - a list that lands in somebody else's account,
+     theirs to keep. The other two doors are for yourself; this one is not. */
+  .giftbtn {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 10px;
+    padding: 14px; font-size: 14.5px; font-weight: 600; text-align: left;
+    color: var(--text); background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-radius: 12px; cursor: pointer;
+    box-shadow: 0 2px 16px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .giftbtn .ic { font-size: 18px; line-height: 1; flex: none; }
+  .giftbtn .sub { display: block; font-size: 12px; font-weight: 400; color: var(--dim); }
+  .giftbtn .chev { margin-left: auto; color: var(--accent); font-size: 18px; font-weight: 700; }
+  .giftbtn:active { border-color: var(--accent); }
+
+  /* the gift page */
+  .giftlead { padding: 14px; margin-bottom: 12px; border-radius: var(--radius);
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  .giftlead b { display: block; font-size: 15px; margin-bottom: 4px; }
+  .giftstep { font-size: 12px; font-weight: 700; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--dim); margin: 18px 2px 8px; }
+  .who { display: flex; flex-wrap: wrap; gap: 8px; }
+  .who button {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    font-size: 14px; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+  }
+  .who button.on { border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+  .who button .seen { font-size: 11.5px; color: var(--dim); }
+  .giftask { display: flex; gap: 8px; margin-top: 4px; }
+  .giftask input { flex: 1; }
   .doorbtn {
     display: flex; align-items: center; gap: 9px; text-align: left;
     padding: 13px 14px; min-height: 50px; box-sizing: border-box;
@@ -722,6 +756,12 @@
     </button>
     <button class="doorbtn" id="mylists" type="button">
       <span class="ic">🎞️</span><span>My playlists</span><span class="chev">›</span>
+    </button>
+    <button class="giftbtn" id="giftbtn" type="button" hidden>
+      <span class="ic">🎁</span>
+      <span>Make someone a playlist
+        <span class="sub">Lands in their own Plex — the thing Plex itself won't do</span></span>
+      <span class="chev">›</span>
     </button>
     <label class="opt"><input type="checkbox" id="alsomissing"> include ones we haven't got</label>
     <button class="linkbtn" id="helpbtn" type="button">Help</button>
@@ -1276,6 +1316,11 @@ const ACTIONS = {
   sortby: (btn) => resort(btn.dataset.value),
   quickadd: (btn) => quickAdd(btn),
   mylists: () => showLists(),
+  gift: () => showGift(),
+  giftwho: (btn) => giftPick(btn.dataset.value),
+  giftbuild: () => giftBuild(),
+  gifttaste: () => giftTaste(),
+  giftsend: (btn) => giftSend(btn),
   openlist: (btn) => showListItems(btn.dataset.value),
   unlist: (btn) => unlist(btn),
   start: (btn) => {
@@ -1925,6 +1970,156 @@ document.getElementById('clearpick').addEventListener('click', () => {
   refreshBar();
 });
 
+// ---- making somebody else a playlist ----
+// The one thing here Plex will not do for you: a list that belongs to another
+// account. Two ways in - describe what they would like, or build it out of
+// what they have actually been watching - and nothing is written to their
+// Plex until the films are on the screen and the owner says go.
+let giftFor = '';
+let giftFilms = [];
+
+async function showGift() {
+  clearInterval(heroTimer); clearInterval(driftTimer); clearInterval(thinkingTimer);
+  document.getElementById('hero').innerHTML = '';
+  document.getElementById('shelf').innerHTML = '';
+  picked.clear(); refreshBar();
+  giftFor = ''; giftFilms = [];
+
+  let people = [];
+  try { people = (await (await fetch('/members')).json()).members || []; } catch (e) {}
+
+  out.innerHTML = `<div class="backbar"><button data-act="home">\u2190 Home</button>
+      <span>Make someone a playlist</span></div>
+    <div class="giftlead"><b>\u{1F381} A list that is genuinely theirs</b>
+      <div class="sub">Plex can only share a playlist of yours, which arrives as
+        yours. This puts one <i>in their account</i> - theirs to keep, rename or
+        delete, and it says you made it.</div></div>
+    ${people.length ? `
+      <div class="giftstep">Who is it for?</div>
+      <div class="who" id="giftwho">${people.map(p => `
+        <button data-act="giftwho" data-value="${esc(p.username)}">
+          ${esc(p.username)}<span class="seen">${esc((p.last_seen || '').slice(0, 10))}</span>
+        </button>`).join('')}</div>
+      <div id="giftrest"></div>`
+    : `<div class="card warn"><b>Nobody has signed in yet.</b>
+        <div class="sub">A list can only be put in an account that has opened
+          this at least once. Ask them to sign in, then come back.</div></div>`}`;
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function giftPick(username) {
+  giftFor = username;
+  document.querySelectorAll('#giftwho button').forEach(b =>
+    b.classList.toggle('on', b.dataset.value === username));
+  document.getElementById('giftrest').innerHTML = `
+    <div class="giftstep">What should be in it?</div>
+    <div class="giftask">
+      <input id="giftq" type="text" placeholder="feel good comedies, something for a rainy Sunday"
+             autocomplete="off" enterkeyhint="go">
+      <button class="primary" data-act="giftbuild">Find them</button>
+    </div>
+    <div class="minor" style="margin-top:10px">
+      <button class="doorbtn" data-act="gifttaste" style="grid-column:1/-1">
+        <span class="ic">\u{1F52E}</span><span>Use what ${esc(username)} has been watching</span>
+        <span class="chev">\u203A</span>
+      </button>
+    </div>
+    <div id="giftout"></div>`;
+  const box = document.getElementById('giftq');
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter') giftBuild(); });
+  box.focus();
+}
+
+function giftShow(films, why) {
+  giftFilms = films;
+  const box = document.getElementById('giftout');
+  if (!films.length) {
+    box.innerHTML = `<div class="card warn"><b>Nothing in the library fits that.</b>
+      <div class="sub">Try describing it differently.</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="giftstep">For ${esc(giftFor)} \u2014 ${films.length} film${films.length === 1 ? '' : 's'}</div>
+    <div class="card"><b>${esc(why)}</b>
+      <div class="sub">Nothing is in their Plex yet. Name it and send it over.</div></div>
+    <div class="giftask">
+      <input id="giftname" type="text" maxlength="80"
+             value="${esc('From ' + (me ? me.username : 'me'))}" autocomplete="off">
+      <button class="primary" data-act="giftsend">Put it in ${esc(giftFor)}'s Plex</button>
+    </div>`
+    + films.map(m => filmCard(m, false)).join('');
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function giftBuild() {
+  const q = (document.getElementById('giftq').value || '').trim();
+  if (!q) return;
+  const stop = startThinking(q, 'mood');
+  try {
+    const res = await fetch('/request/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: q}),
+    });
+    const d = await res.json();
+    stop(); clearInterval(thinkingTimer);
+    giftPick(giftFor);
+    document.getElementById('giftq').value = q;
+    if (!res.ok) {
+      document.getElementById('giftout').innerHTML =
+        `<div class="card bad"><b>${esc(d.error || 'That did not work')}</b></div>`;
+      return;
+    }
+    giftShow((d.matches || []).slice(0, 24), d.interpretation || `Films for "${q}"`);
+  } catch (e) {
+    stop(); clearInterval(thinkingTimer);
+    giftPick(giftFor);
+    document.getElementById('giftout').innerHTML =
+      `<div class="card bad"><b>That did not work</b><div class="sub">${esc(e.message)}</div></div>`;
+  }
+}
+
+async function giftTaste() {
+  const box = document.getElementById('giftout');
+  box.innerHTML = `<div class="card"><b>Reading what ${esc(giftFor)} has been watching\u2026</b></div>`;
+  try {
+    const d = await (await fetch(`/members/${encodeURIComponent(giftFor)}/picks`)).json();
+    if (d.error && !(d.picks || []).length) {
+      box.innerHTML = `<div class="card warn"><b>${esc(d.error)}</b></div>`;
+      return;
+    }
+    giftShow(d.picks || [], `Chosen from ${giftFor}'s own watching \u2014 ${d.reason || ''}`);
+  } catch (e) {
+    box.innerHTML = `<div class="card bad"><b>Could not read their history</b></div>`;
+  }
+}
+
+async function giftSend(btn) {
+  const name = (document.getElementById('giftname').value || '').trim();
+  if (!name) { alert('Give the list a name'); return; }
+  btn.disabled = true; btn.textContent = 'Sending\u2026';
+  try {
+    const res = await fetch('/request/playlist', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({playlist: name, for_user: giftFor,
+                            rating_keys: giftFilms.map(f => f.rating_key)}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || 'Could not send that'); btn.disabled = false;
+                   btn.textContent = `Put it in ${giftFor}'s Plex`; return; }
+    out.innerHTML = `<div class="backbar"><button data-act="home">\u2190 Home</button>
+        <span>Sent</span></div>
+      <div class="card good">${personaFace('excited', 'tiny')}
+        <b>\u{1F381} ${esc(name)} is in ${esc(giftFor)}'s Plex.</b>
+        <div class="sub">${d.added} film${d.added === 1 ? '' : 's'}, in their own account,
+          on any device they use. It says you made it.</div>
+        <button class="ghost" data-act="gift">Make another</button></div>`
+      + giftFilms.map(m => filmCard(m, false)).join('');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (e) {
+    alert(e.message); btn.disabled = false;
+    btn.textContent = `Put it in ${giftFor}'s Plex`;
+  }
+}
+
 // Building a list for somebody else: the owner's alone, and only for people
 // who have signed in at least once - a sign-in is what leaves the token that
 // makes the list theirs rather than a shared copy of the owner's.
@@ -1937,7 +2132,9 @@ async function loadMembers() {
   forwho.innerHTML = `<option value="">for me</option>`
     + people.map(p => `<option value="${esc(p.username)}">for ${esc(p.username)}</option>`).join('');
   forwho.hidden = false;
+  document.getElementById('giftbtn').hidden = false;
 }
+document.getElementById('giftbtn').addEventListener('click', showGift);
 
 document.getElementById('add').addEventListener('click', async (ev) => {
   const btn = ev.currentTarget; btn.disabled = true;

@@ -1753,6 +1753,30 @@ def create_app():
         me = (current_user() or {}).get("username")
         return jsonify({"members": [m for m in people if m["username"] != me]})
 
+    @app.route("/members/<username>/picks")
+    def member_picks(username):
+        """Films to open a list for this member with, from what THEY watch.
+
+        Owner tier by placement. Read with their own token and filed under
+        their own account id, so it is genuinely their taste being answered
+        and not the owner's - which is the whole point of making somebody a
+        list rather than handing them one of yours.
+        """
+        db = Database()
+        try:
+            them = plex_auth.member_session(db, username)
+        finally:
+            db.close()
+        if not them:
+            return jsonify({"picks": [], "error": f"{username} has not signed in here yet."}), 409
+        try:
+            picks, reason = suggest.starter_picks(them["id"], limit=8, token=them["token"])
+        except Unauthorized:
+            return jsonify({"picks": [], "error": f"{username}'s sign-in has expired."}), 409
+        except Exception as e:
+            return jsonify({"picks": [], "error": str(e)[:120]}), 200
+        return jsonify({"picks": picks, "reason": reason, "for_user": username})
+
     @app.route("/announce", methods=["POST"])
     def announce():
         """Put a note up, and tell everyone's phone about it.
