@@ -305,9 +305,10 @@ app:
 # Everyone picks their own look on the request page and it stays with their
 # device. Name an account here to dress it in a particular look on every
 # device it signs in from - their own pick, made in the picker, still wins.
-# Looks: plex, blockbuster, netflix, bruce.
-skins:
-  some-plex-username: bruce
+# Looks: plex, blockbuster, netflix, bruce, plus any you have made yourself.
+# The key is somebody's Plex username, exactly as Plex spells it.
+skins: {}
+  # some-plex-username: bruce
 
 # ---- Notifications. Optional. ----
 # Everything this app can send. Turn any of them off, or reword them - {braces}
