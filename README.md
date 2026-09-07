@@ -92,6 +92,12 @@ What they get:
   missing puts itself back on the wanted list.
 - **An owner console** at `/dashboard`: overview, upgrade priority, gaps,
   poster status, wanted, export.
+- **Films you don't have, by genre.** On the gaps tab: pick genres (horror
+  and comedy, say), a rating floor and a vote floor, and TMDb's list of
+  matching films is read with everything Plex already holds taken out. What is
+  left can be put on the wanted list with one click. The rating is TMDb's user
+  score rather than IMDb's; the two run close enough that a floor of six means
+  the same thing on either.
 - **Library maintenance tooling** — a file scanner, an ffprobe quality audit, a
   TMDb gap analysis, a filename auditor and a poster pipeline. This is the
   older half of the project and it assumes the machine running it can see the
@@ -448,6 +454,7 @@ api/
   tmdb_lookup.py      naming a film the library does not have
   secrets_store.py    encryption for stored Plex tokens
 scanner/              the maintenance half: files, quality, gaps, names
+  discover.py         films TMDb rates well, by genre, that Plex lacks
 analyzer/             ffprobe and TMDb helpers
 db/database.py        SQLite schema and queries
 dashboard/

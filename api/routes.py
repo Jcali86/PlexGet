@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 from werkzeug.middleware.proxy_fix import ProxyFix
 from scanner import MediaScanner
 from scanner.gap_analysis import run_full_analysis, run_tv_analysis, run_movie_analysis
+from scanner import discover
 from scanner.quality_auditor import run_quality_audit
 from scanner.reports import generate_upgrade_report, generate_gap_report, generate_poster_report
 from scanner.plex_fixer import run_audit, apply_rename, apply_batch, get_known_issues
@@ -289,6 +290,47 @@ def create_app():
         rows = db.get_gaps(gap_type=gap_type, library=library)
         db.close()
         return jsonify([dict(row) for row in rows])
+
+    @app.route("/discover/genres")
+    def discover_genres():
+        """TMDb's film genres, for the pickers on the gaps page."""
+        return jsonify({"genres": discover.genres(), "configured": discover.configured()})
+
+    @app.route("/discover/missing")
+    def discover_missing():
+        """Well-rated films in the chosen genres that Plex does not have.
+
+        Params: genres (comma-separated TMDb ids, required), match (all|any),
+        min_rating, min_votes, year_from, year_to, sort (rating|popularity|
+        newest), pages (1-25, twenty films a page), refresh (re-read Plex).
+        """
+        if not discover.configured():
+            return jsonify({"error": "no TMDb API key in config.yaml - this needs one"}), 400
+        genre_ids = [g for g in re.split(r"[,\s]+", request.args.get("genres", "")) if g.isdigit()]
+        if not genre_ids:
+            return jsonify({"error": "pick at least one genre",
+                            "example": {"genres": "27,35", "match": "all"}}), 400
+        db = Database()
+        try:
+            result = discover.find_missing(
+                db, genre_ids,
+                match=request.args.get("match", "all"),
+                min_rating=request.args.get("min_rating", 6.0, type=float),
+                min_votes=request.args.get("min_votes", 200, type=int),
+                year_from=request.args.get("year_from", type=int),
+                year_to=request.args.get("year_to", type=int),
+                sort=request.args.get("sort", "rating"),
+                pages=request.args.get("pages", 5, type=int),
+                refresh=request.args.get("refresh") in ("1", "true", "yes"),
+            )
+        except PlexUnavailable as e:
+            # Not knowing what is owned must never read as owning nothing.
+            return plex_trouble(e)
+        except requests.RequestException as e:
+            return jsonify({"error": f"TMDb is unavailable: {str(e)[:120]}"}), 502
+        finally:
+            db.close()
+        return jsonify(result)
 
     @app.route("/analyze/quality", methods=["POST"])
     def analyze_quality():

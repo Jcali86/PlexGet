@@ -438,6 +438,89 @@
     font-size: 11px;
   }
 
+  /* Films you don't have */
+  .discover {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 28px;
+  }
+
+  .discover .genres {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0 14px;
+  }
+
+  .discover .genre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .discover .genre:hover { color: var(--text); }
+  .discover .genre.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .discover .filters { margin-bottom: 0; }
+  .discover .filters input[type=number] { width: 78px; }
+
+  .discover .note {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 12px;
+  }
+
+  .discover-result {
+    display: flex;
+    gap: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .discover-result img {
+    width: 62px;
+    height: 93px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: var(--surface2);
+    flex: none;
+  }
+
+  .discover-result .body { flex: 1; min-width: 0; }
+  .discover-result h4 { margin: 0 0 4px; font-size: 14px; }
+  .discover-result h4 .year { color: var(--text-dim); font-weight: 400; }
+  .discover-result .meta { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .discover-result .meta .score { color: var(--yellow); font-weight: 600; }
+  .discover-result .summary {
+    font-size: 12px;
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .discover-result .actions {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    flex: none;
+  }
+  .discover-result .on-list {
+    font-size: 11px;
+    color: var(--green);
+    font-weight: 600;
+  }
+
   .tmdb-link:hover { text-decoration: underline; }
 
   /* Wanted list */
@@ -833,6 +916,42 @@
 
   <!-- Gaps Tab -->
   <div class="tab" id="tab-gaps">
+    <div class="gap-section">
+      <h3>Films you don't have <span class="count" id="discoverCount">by genre and rating</span></h3>
+      <div class="discover">
+        <div class="genres" id="discoverGenres"><span class="genre">Loading genres&hellip;</span></div>
+        <div class="filters">
+          <label>Match</label>
+          <select id="discoverMatch">
+            <option value="all">All chosen genres</option>
+            <option value="any">Any chosen genre</option>
+          </select>
+          <label>Rating at least</label>
+          <input type="number" id="discoverRating" value="6" min="0" max="10" step="0.1">
+          <label>Votes at least</label>
+          <input type="number" id="discoverVotes" value="200" min="0" step="50">
+          <label>Years</label>
+          <input type="number" id="discoverFrom" placeholder="from" min="1888" max="2100">
+          <input type="number" id="discoverTo" placeholder="to" min="1888" max="2100">
+          <label>Sort</label>
+          <select id="discoverSort">
+            <option value="rating">Best rated</option>
+            <option value="popularity">Most popular</option>
+            <option value="newest">Newest</option>
+          </select>
+          <label>Depth</label>
+          <select id="discoverPages">
+            <option value="2">40 films</option>
+            <option value="5" selected>100 films</option>
+            <option value="10">200 films</option>
+            <option value="25">500 films</option>
+          </select>
+          <button class="download-btn" id="discoverGo" onclick="runDiscover()">Find</button>
+        </div>
+        <div class="note">Ratings are TMDb user scores out of ten. The vote floor keeps out films nobody has seen; lower it for older or foreign titles. Depth is how far into TMDb's list to read before subtracting what Plex has.</div>
+      </div>
+      <div id="discoverResults"></div>
+    </div>
     <div class="filters">
       <label>Library</label>
       <select id="gapLib"><option value="">All</option></select>
@@ -1171,6 +1290,128 @@ function renderGaps(search) {
 
 document.getElementById('gapLib').addEventListener('change', loadGaps);
 document.getElementById('gapSearch').addEventListener('input', e => renderGaps(e.target.value));
+
+// ---- Films you don't have ----
+let discoverFilms = [];
+
+async function loadDiscoverGenres() {
+  const box = document.getElementById('discoverGenres');
+  try {
+    const res = await fetch(API + '/discover/genres');
+    const d = await res.json();
+    box.innerHTML = d.genres.map(g =>
+      `<span class="genre" data-id="${g.id}" onclick="this.classList.toggle('on')">${esc(g.name)}</span>`
+    ).join('');
+    if (!d.configured) {
+      document.getElementById('discoverResults').innerHTML =
+        wantedBanner('error', 'No TMDb key.', 'Add tmdb.api_key to config.yaml - this search reads TMDb.');
+      document.getElementById('discoverGo').disabled = true;
+    }
+  } catch (e) {
+    box.innerHTML = '<span class="genre">Could not load genres</span>';
+  }
+}
+
+function discoverParams() {
+  const chosen = [...document.querySelectorAll('#discoverGenres .genre.on')].map(g => g.dataset.id);
+  const p = new URLSearchParams();
+  p.set('genres', chosen.join(','));
+  p.set('match', document.getElementById('discoverMatch').value);
+  p.set('min_rating', document.getElementById('discoverRating').value || '0');
+  p.set('min_votes', document.getElementById('discoverVotes').value || '0');
+  p.set('sort', document.getElementById('discoverSort').value);
+  p.set('pages', document.getElementById('discoverPages').value);
+  const from = document.getElementById('discoverFrom').value;
+  const to = document.getElementById('discoverTo').value;
+  if (from) p.set('year_from', from);
+  if (to) p.set('year_to', to);
+  return { chosen, params: p };
+}
+
+async function runDiscover() {
+  const box = document.getElementById('discoverResults');
+  const count = document.getElementById('discoverCount');
+  const { chosen, params } = discoverParams();
+  if (!chosen.length) {
+    box.innerHTML = wantedBanner('known', 'Pick a genre first.', 'Two or more with "all" means a film has to carry every one - horror and comedy, not horror or comedy.');
+    return;
+  }
+  const btn = document.getElementById('discoverGo');
+  btn.disabled = true;
+  box.innerHTML = '<div class="loading">Asking TMDb, then checking Plex</div>';
+  try {
+    const res = await fetch(API + '/discover/missing?' + params);
+    const d = await res.json();
+    if (!res.ok) {
+      box.innerHTML = wantedBanner('error', 'Search failed.', esc(d.error || res.statusText));
+      return;
+    }
+    discoverFilms = d.films;
+    count.textContent = `${d.films.length} missing of ${d.considered} checked`;
+    if (!d.films.length) {
+      box.innerHTML = wantedBanner('found', 'Nothing missing.',
+        `Every one of the ${d.considered} films TMDb returned is already in Plex. Try a lower rating floor, more depth, or "any" instead of "all".`);
+      return;
+    }
+    const more = d.pages_available > d.pages_read
+      ? ` TMDb has ${d.total_matching.toLocaleString()} films matching; only the first ${d.considered} were read - raise the depth for more.`
+      : '';
+    box.innerHTML = wantedBanner('added', `${d.films.length} films you don't have`,
+      `${d.owned_of_considered} of the ${d.considered} checked are already in Plex (${d.library_films.toLocaleString()} films there).${more}`)
+      + d.films.map(discoverCard).join('');
+  } catch (e) {
+    box.innerHTML = wantedBanner('error', 'Search failed.', esc(String(e)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function discoverCard(f) {
+  const poster = f.poster ? `<img src="${f.poster}" alt="" loading="lazy">` : '<div style="width:62px;height:93px;flex:none"></div>';
+  const meta = [
+    `<span class="score">★ ${f.rating}</span> (${f.votes.toLocaleString()} votes)`,
+    f.genres.map(esc).join(', '),
+    f.original_title ? esc(f.original_title) : '',
+  ].filter(Boolean).join(' · ');
+  const action = f.wanted_status
+    ? `<span class="on-list">${f.wanted_status === 'wanted' ? 'On wanted list' : esc(f.wanted_status)}</span>`
+    : `<button class="copy-btn" onclick="discoverWant(this, ${f.tmdb_id})">Want it</button>`;
+  return `<div class="discover-result" id="df-${f.tmdb_id}">${poster}<div class="body">
+      <h4>${esc(f.title)} <span class="year">${f.year || ''}</span></h4>
+      <div class="meta">${meta}</div>
+      ${f.overview ? `<div class="summary">${esc(f.overview)}</div>` : ''}
+    </div><div class="actions">
+      <a class="tmdb-link" href="${tmdbUrl(f.tmdb_id, 'movie')}" target="_blank">tmdb:${f.tmdb_id}</a>
+      ${action}
+    </div></div>`;
+}
+
+async function discoverWant(btn, tmdbId) {
+  const film = discoverFilms.find(f => f.tmdb_id === tmdbId);
+  if (!film) return;
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  // The same door the wanted tab uses: Plex is searched once more by title,
+  // and only a miss lands on the list.
+  const query = film.title + (film.year ? ` (${film.year})` : '');
+  try {
+    const res = await fetch(API + '/wanted/search?q=' + encodeURIComponent(query));
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.statusText);
+    const slot = btn.parentElement;
+    if (d.found) {
+      slot.innerHTML = `<a class="tmdb-link" href="${tmdbUrl(tmdbId, 'movie')}" target="_blank">tmdb:${tmdbId}</a><span class="on-list">Plex has it by title</span>`;
+    } else {
+      slot.innerHTML = `<a class="tmdb-link" href="${tmdbUrl(tmdbId, 'movie')}" target="_blank">tmdb:${tmdbId}</a><span class="on-list">${d.added_to_wanted ? 'Added to wanted' : 'Already on the list'}</span>`;
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Want it';
+    alert('Could not add: ' + e.message);
+  }
+}
+
+loadDiscoverGenres();
 
 // ---- Poster Status ----
 let posterData = {};
