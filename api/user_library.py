@@ -12,6 +12,7 @@ moment they add their first film rather than at sign-up.
 from plexapi.server import PlexServer
 
 from config import config
+from scanner.wanted_search import PLEX_TIMEOUT
 
 _servers = {}
 
@@ -33,7 +34,7 @@ def as_user(token):
     if not token:
         raise PermissionError("no Plex token for this session")
     if token not in _servers:
-        _servers[token] = PlexServer(config["plex"]["url"], token)
+        _servers[token] = PlexServer(config["plex"]["url"], token, timeout=PLEX_TIMEOUT)
     return _servers[token]
 
 

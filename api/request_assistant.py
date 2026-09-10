@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from api import ai
 from api import persona
 from config import config
-from scanner.wanted_search import availability, fold, narrow_by_year, parse_query
+from scanner.wanted_search import PLEX_TIMEOUT, availability, fold, narrow_by_year, parse_query
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -388,7 +388,7 @@ _FALLBACK_RULES = [
 def get_plex():
     global _plex
     if _plex is None:
-        _plex = PlexServer(config["plex"]["url"], config["plex"]["token"])
+        _plex = PlexServer(config["plex"]["url"], config["plex"]["token"], timeout=PLEX_TIMEOUT)
     return _plex
 
 

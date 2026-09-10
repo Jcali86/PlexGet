@@ -24,6 +24,11 @@ TRAILING_YEAR = re.compile(r"^\s*(?P<title>.+?)\s+(?P<year>\d{4})\s*$")
 _server = None
 _as_user = {}
 
+# Seconds any one question put to Plex may take. Long enough for a search
+# across a big library, and short enough that a server that has stopped
+# answering does not hold a request for the library's default of thirty.
+PLEX_TIMEOUT = 20
+
 
 class PlexUnavailable(RuntimeError):
     """Plex could not be reached. Callers must treat this as unknown, not missing."""
@@ -44,7 +49,8 @@ def get_server():
     global _server
     if _server is None:
         try:
-            _server = PlexServer(config["plex"]["url"], config["plex"]["token"], timeout=20)
+            _server = PlexServer(config["plex"]["url"], config["plex"]["token"],
+                                 timeout=PLEX_TIMEOUT)
         except Exception as e:
             raise PlexUnavailable(str(e))
     return _server
@@ -61,7 +67,7 @@ def server_for(token=None):
         return get_server()
     if token not in _as_user:
         try:
-            _as_user[token] = PlexServer(config["plex"]["url"], token, timeout=20)
+            _as_user[token] = PlexServer(config["plex"]["url"], token, timeout=PLEX_TIMEOUT)
         except Exception as e:
             # A 401 means the token is finished, not that Plex is poorly.
             if "401" in str(e) or "unauthorized" in str(e).lower():

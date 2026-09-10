@@ -10,6 +10,7 @@ serve a browser page, a home-screen web app, or a native app later.
 """
 
 import secrets
+import threading
 import time
 import uuid
 from urllib.parse import quote
@@ -26,7 +27,19 @@ SESSION_DAYS = 90
 # One client identifier per install, kept for the life of the process.
 CLIENT_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "plex-ops.local"))
 
-_allowed_cache = {"at": 0.0, "users": {}}
+# Seconds to wait on plex.tv, or on the local server, for the roster and for
+# this server's identity. Both answer in well under a second when they answer
+# at all, and the library's default of thirty turned a plex.tv wobble into a
+# half-minute stall on every request in the house.
+ROSTER_TIMEOUT = 10
+# How long a refresh that failed stands before it is tried again. Every
+# household request asks for the roster, and without this each of them paid
+# the timeout in turn.
+ROSTER_RETRY = 60
+
+_allowed_cache = {"at": 0.0, "users": {}, "failed_at": 0.0}
+_allowed_lock = threading.Lock()
+_machine_id = None
 
 
 def _headers(extra=None):
@@ -159,30 +172,37 @@ def plex_identity(token):
     }
 
 
-def allowed_users(max_age=600):
-    """Everyone entitled to use this: the server owner, plus its shared users."""
-    now = time.time()
-    if _allowed_cache["users"] and now - _allowed_cache["at"] < max_age:
-        return _allowed_cache["users"]
+def machine_id():
+    """This server's identifier, asked for once and kept - it never changes.
 
+    None when the server could not be asked, which callers treat as not
+    knowing rather than as an answer.
+    """
+    global _machine_id
+    if _machine_id is None:
+        from plexapi.server import PlexServer
+        try:
+            _machine_id = PlexServer(config["plex"]["url"], config["plex"]["token"],
+                                     timeout=ROSTER_TIMEOUT).machineIdentifier
+        except Exception:
+            return None
+    return _machine_id
+
+
+def _refresh_allowed():
+    """Ask plex.tv who is shared here. Called under the lock, and only then."""
     from plexapi.myplex import MyPlexAccount
-
-    from plexapi.server import PlexServer
 
     people = {}
     try:
-        account = MyPlexAccount(token=config["plex"]["token"])
+        account = MyPlexAccount(token=config["plex"]["token"], timeout=ROSTER_TIMEOUT)
         people[str(account.id)] = {"username": account.username, "role": "owner"}
 
         # Only friends shared on THIS server, not everyone on the owner's
         # account. account.users() spans every server the owner runs and their
         # Plex Home members; admitting all of them would let someone shared on
         # a different box sign in here and spend the shared AI budget.
-        try:
-            this_id = PlexServer(config["plex"]["url"],
-                                 config["plex"]["token"]).machineIdentifier
-        except Exception:
-            this_id = None
+        this_id = machine_id()
 
         for user in account.users():
             if this_id is not None:
@@ -194,10 +214,44 @@ def allowed_users(max_age=600):
                     continue
             people[str(user.id)] = {"username": user.title, "role": "shared"}
     except Exception:
-        # Never fail open: with no list, only the owner's own token works.
+        # Never fail open: with no list, only the owner's own token works. The
+        # failure is remembered so the next request takes what is in hand
+        # rather than paying the same wait again.
+        _allowed_cache["failed_at"] = time.time()
         return _allowed_cache["users"]
-    _allowed_cache.update({"at": now, "users": people})
+    _allowed_cache.update({"at": time.time(), "users": people, "failed_at": 0.0})
     return people
+
+
+def allowed_users(max_age=600, insist=False):
+    """Everyone entitled to use this: the server owner, plus its shared users.
+
+    Refreshed from plex.tv every few minutes, and by one request at a time.
+    The page fires half a dozen requests at once on load, and each of them
+    used to set off a trip of its own to plex.tv; now the first goes and the
+    rest take the roster already in hand, however old. A refresh that fails
+    leaves the last known roster standing and is not tried again for a while,
+    so an outage at plex.tv costs one bounded wait rather than one per request.
+
+    `insist` is for the sign-in itself, which is rare and worth waiting for:
+    it takes no rest after a failure and queues behind a refresh under way,
+    because refusing somebody at the door on a stale roster is worse than
+    keeping them there a few seconds.
+    """
+    now = time.time()
+    if _allowed_cache["users"] and now - _allowed_cache["at"] < max_age:
+        return _allowed_cache["users"]
+    if not insist and now - _allowed_cache["failed_at"] < ROSTER_RETRY:
+        return _allowed_cache["users"]
+    if not _allowed_lock.acquire(blocking=insist):
+        return _allowed_cache["users"]
+    try:
+        # Whoever held the lock may have just finished the same job.
+        if _allowed_cache["users"] and time.time() - _allowed_cache["at"] < max_age:
+            return _allowed_cache["users"]
+        return _refresh_allowed()
+    finally:
+        _allowed_lock.release()
 
 
 def server_access_token(account_token):
@@ -215,10 +269,10 @@ def server_access_token(account_token):
     merely errors falls back to the account token, so a plex.tv wobble does
     not lock the owner out.
     """
+    this_id = machine_id()
+    if this_id is None:
+        return account_token
     try:
-        from plexapi.server import PlexServer
-        this_id = PlexServer(config["plex"]["url"],
-                             config["plex"]["token"]).machineIdentifier
         r = requests.get(
             f"{PLEX_TV}/resources",
             headers=_headers({"X-Plex-Token": account_token}),
@@ -238,7 +292,7 @@ def authorise(identity):
     """Is this Plex user allowed in?"""
     if not identity:
         return None
-    people = allowed_users()
+    people = allowed_users(insist=True)
     match = people.get(identity["id"])
     if not match:
         return None
@@ -377,6 +431,18 @@ def session_user(db, token):
     }
 
 
+# How long a verdict on a token stands. A token that opened the server five
+# minutes ago has not died since, near enough, and asking on every page load
+# meant a wait on Plex in front of a page that had nothing else to wait for.
+# Only good news is kept, so a token that has actually died is caught on the
+# next ask; a server that could not be asked counts as good news for a
+# shorter while, since unreachable is not the same as refused.
+TOKEN_ALIVE_FOR = 300
+TOKEN_UNKNOWN_FOR = 60
+TOKEN_CHECK_TIMEOUT = 4
+_alive = {}
+
+
 def token_alive(plex_token):
     """Is this person's stored Plex token still good?
 
@@ -387,15 +453,27 @@ def token_alive(plex_token):
     """
     if not plex_token:
         return False
+    now = time.time()
+    held = _alive.get(plex_token)
+    if held and now - held[0] < held[1]:
+        return True
+    if len(_alive) > 500:
+        for stale in [t for t, (at, life) in _alive.items() if now - at >= life]:
+            _alive.pop(stale, None)
     try:
         r = requests.get(
             config["plex"]["url"].rstrip("/") + "/library/sections",
             headers={"X-Plex-Token": plex_token, "Accept": "application/json"},
-            timeout=8,
+            timeout=TOKEN_CHECK_TIMEOUT,
         )
     except Exception:
+        _alive[plex_token] = (now, TOKEN_UNKNOWN_FOR)
         return True   # Plex unreachable is not the same as a bad token
-    return r.status_code != 401
+    if r.status_code == 401:
+        _alive.pop(plex_token, None)
+        return False
+    _alive[plex_token] = (now, TOKEN_ALIVE_FOR)
+    return True
 
 
 def token_for(db, username):

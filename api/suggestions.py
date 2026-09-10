@@ -9,6 +9,8 @@ from config import config
 from plexapi.server import PlexServer
 from pydantic import BaseModel, Field
 
+from scanner.wanted_search import PLEX_TIMEOUT
+
 MAX_HISTORY = 40
 MAX_FRANCHISE = 30
 
@@ -34,14 +36,14 @@ def franchise_collections(names):
 
 def _owner_server():
     """Watch history is only readable with the owner's token."""
-    return PlexServer(config["plex"]["url"], config["plex"]["token"])
+    return PlexServer(config["plex"]["url"], config["plex"]["token"], timeout=PLEX_TIMEOUT)
 
 
 def _viewer_server(token=None):
     """What to offer has to come from libraries this person can actually watch."""
     if not token:
         return _owner_server()
-    return PlexServer(config["plex"]["url"], token)
+    return PlexServer(config["plex"]["url"], token, timeout=PLEX_TIMEOUT)
 
 
 def server_account_id(account_id):
@@ -52,7 +54,7 @@ def server_account_id(account_id):
     returns nothing, and every suggestion drawn from history comes back empty.
     """
     try:
-        owner = PlexServer(config["plex"]["url"], config["plex"]["token"]).myPlexAccount()
+        owner = _owner_server().myPlexAccount()
         if str(account_id) == str(getattr(owner, "id", "")):
             return 1
     except Exception:

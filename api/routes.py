@@ -8,7 +8,7 @@ import time
 import requests
 from plexapi.exceptions import Unauthorized
 
-from flask import Flask, Response, jsonify, redirect, request, send_from_directory
+from flask import Flask, Response, g, jsonify, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from scanner import MediaScanner
 from scanner.gap_analysis import run_full_analysis, run_tv_analysis, run_movie_analysis
@@ -899,15 +899,23 @@ def create_app():
     SESSION_COOKIE = "plexops_session"
 
     def current_user():
-        """Whoever is signed in on this request, or None."""
+        """Whoever is signed in on this request, or None.
+
+        Answered once per request. The guard asks, and then the handler asks
+        again, and each ask was a database read and a check of the roster.
+        """
+        if "user" in g:
+            return g.user
+        user = None
         token = request.cookies.get(SESSION_COOKIE)
-        if not token:
-            return None
-        db = Database()
-        try:
-            return plex_auth.session_user(db, token)
-        finally:
-            db.close()
+        if token:
+            db = Database()
+            try:
+                user = plex_auth.session_user(db, token)
+            finally:
+                db.close()
+        g.user = user
+        return user
 
     # Starting a sign-in is the only expensive thing a stranger can ask for:
     # each attempt makes two calls out to plex.tv under this server's own
