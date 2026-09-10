@@ -1297,6 +1297,7 @@ const ACTIONS = {
   look:  (btn) => lookUp(btn.dataset.value),
   test:  (btn) => testPush(btn),
   home:  () => goHome(),
+  retry: () => location.reload(),
   skins: () => document.getElementById('skinpicker').showModal(),
   bell:  () => openBell(),
   tournext: () => nextTourStep(),
@@ -2980,8 +2981,32 @@ async function boot() {
   // Both at once. The persona is wanted before anything is drawn - beginSignIn
   // paints the welcome face and runs from here - and asking for it after the
   // session would put a second round trip in front of the first paint.
-  const [meRes, pRes] = await Promise.all([fetch('/auth/me'), fetch('/persona')]);
-  const d = await meRes.json();
+  // Bounded, because a server that is asleep does not refuse - it says
+  // nothing at all, and a phone will wait a minute or more before calling
+  // that a failure. Twelve seconds is longer than any honest answer takes.
+  const patience = new AbortController();
+  const timer = setTimeout(() => patience.abort(), 12000);
+  let d, pRes;
+  try {
+    let meRes;
+    [meRes, pRes] = await Promise.all([
+      fetch('/auth/me', {signal: patience.signal}),
+      fetch('/persona', {signal: patience.signal}),
+    ]);
+    d = await meRes.json();
+  } catch (e) {
+    // The shell painted from the device, and the server behind it did not
+    // answer - asleep, or the link to it down, or something in front of it
+    // answering with a page of its own. Left alone this was a search box
+    // that could not search, or a welcome with no way in, and not a word
+    // about why.
+    status('warn', "Can't reach PlexGet just now.",
+      'The page opened from your phone, but the server did not answer. ' +
+      'It may be asleep. <button class="ghost" data-act="retry">Try again</button>');
+    return;
+  } finally {
+    clearTimeout(timer);
+  }
   // A server too old to know the route, or an answer that will not parse,
   // leaves the plain defaults standing rather than stopping the page.
   try {

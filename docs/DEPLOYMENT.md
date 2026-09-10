@@ -414,3 +414,10 @@ person actually pressed the bell.
 **The page has not changed after a deploy** — the service worker caches the
 shell. A hard reload, or removing the home-screen app and adding it again, gets
 a fresh copy.
+
+**The phone says the server stopped responding, and the home-screen app opens
+to "Can't reach PlexGet"** — nothing is reaching the app at all: the machine is
+asleep, or whatever fronts it is down. `curl -s localhost:5050/health` on the
+machine itself says which side the trouble is on. An answer there means the
+proxy or the tunnel; no answer means the app, or the machine. A `502` from the
+phone instead of a timeout is the app not running behind a proxy that is.

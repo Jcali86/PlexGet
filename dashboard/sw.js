@@ -2,12 +2,18 @@
 // the app when one is tapped.
 
 // Bump this to force every device to take a fresh copy of the shell.
-const SHELL = 'plexget-shell-v4';
+const SHELL = 'plexget-shell-v5';
 // The manifest is deliberately NOT kept: it carries a one-time sign-in
 // handoff for add-to-home-screen, and a cached copy would bake a dead code
 // into every install.
 const KEEP = ['/request',
               '/icons/apple-touch-icon.png', '/icons/icon-192.png'];
+
+// Milliseconds the server gets before the held shell paints instead. A launch
+// carrying a handoff code is given longer, because painting early forfeits
+// the sign-in it carries until the next launch.
+const PATIENCE = 1200;
+const HANDOFF_PATIENCE = 3000;
 
 self.addEventListener('install', (e) => {
   // A page held on the device paints the moment it is asked for, so a slow
@@ -18,6 +24,20 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
+    // A worker that installed while the server was away holds nothing: the
+    // install fetch failed, quietly, and throwing the previous version's copy
+    // out now would leave the next launch with no shell at all - on a phone,
+    // a white screen for as long as the network is prepared to wait. The old
+    // copy is carried forward instead, and the next visit that reaches the
+    // server replaces it.
+    const shell = await caches.open(SHELL);
+    if (!(await shell.match('/request'))) {
+      for (const name of await caches.keys()) {
+        if (name === SHELL) continue;
+        const kept = await (await caches.open(name)).match('/request');
+        if (kept) { await shell.put('/request', kept); break; }
+      }
+    }
     for (const name of await caches.keys()) {
       if (name !== SHELL) await caches.delete(name);
     }
@@ -40,9 +60,16 @@ self.addEventListener('fetch', (event) => {
   const isShell = url.pathname === '/' || url.pathname === '/request';
   const isAsset = url.pathname.startsWith('/icons/');
   if (!isShell && !isAsset) return;
-  // A launch carrying a handoff code must reach the server - it is trading
-  // the code for a session, and a cached shell would swallow the trade.
-  if (isShell && url.searchParams.has('handoff')) return;
+  // A launch carrying a handoff code is trading the code for a session, so
+  // the server has to be asked - a held shell handed straight back would
+  // swallow the trade. It used to be left to the network entirely, and an
+  // installed app opens on this address every single time, so whenever the
+  // server was asleep the app sat on a white screen for as long as the phone
+  // was prepared to wait. Now it is asked, given longer than usual, and then
+  // the held shell paints anyway: by the second launch the code has been
+  // spent and the server's answer is a redirect home, which is what the held
+  // copy already is.
+  const handoff = isShell && url.searchParams.has('handoff');
 
   event.respondWith((async () => {
     const cache = await caches.open(SHELL);
@@ -56,7 +83,9 @@ self.addEventListener('fetch', (event) => {
     }
 
     const fresh = fetch(req).then((res) => {
-      if (res && res.ok) cache.put(key, res.clone());
+      // A handoff is answered with a redirect, never with the shell, so
+      // there is nothing in it worth keeping.
+      if (res && res.ok && !handoff) cache.put(key, res.clone());
       return res;
     }).catch(() => null);
 
@@ -70,7 +99,8 @@ self.addEventListener('fetch', (event) => {
 
     const winner = await Promise.race([
       fresh,
-      new Promise((resolve) => setTimeout(() => resolve(null), 1200)),
+      new Promise((resolve) => setTimeout(() => resolve(null),
+                                          handoff ? HANDOFF_PATIENCE : PATIENCE)),
     ]);
     return winner || hit;
   })());
