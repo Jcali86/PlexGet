@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from api import ai
 from api import persona
 from config import config
-from scanner.wanted_search import availability, fold, narrow_by_year, parse_query
+from scanner.wanted_search import availability, fold, parse_query
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -907,6 +907,23 @@ def find_matches(filters, limit=MAX_MATCHES, token=None, age=0):
     return [], filters.genres, unavailable
 
 
+def _same_year(matches, year):
+    """The matches from the year that was named, allowing one either side.
+
+    A year given is a year meant. narrow_by_year treats it as a tiebreaker and
+    hands back everything when nothing matches, which answered "Resident Evil
+    2026" with six Resident Evil films from other decades and the words "we
+    have these" - so the one actually wanted was never offered for the wanted
+    list. One year of slack, because Plex and TMDb disagree on a film's year
+    often enough: the regional release against the premiere.
+    """
+    if not year:
+        return matches
+    exact = [m for m in matches if m.get("year") == year]
+    return exact or [m for m in matches
+                     if m.get("year") and abs(m["year"] - year) <= 1]
+
+
 def search_by_title(request_text, token=None):
     """Look the request up as the name of a film or a series. No model involved.
 
@@ -917,9 +934,9 @@ def search_by_title(request_text, token=None):
     title, year = parse_query(request_text)
     if not title:
         return None
-    shows = search_shows(title, token)
+    shows = _same_year(search_shows(title, token), year)
     certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = narrow_by_year(title_lookup(title, token), year)
+    exact = _same_year(title_lookup(title, token), year)
     playable = [m for m in exact if not m["file_missing"]]
     # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
     # and answering a maybe with "yes, we have that" is how someone ends up
@@ -1066,8 +1083,16 @@ def close_matches(request_text, token=None):
     title, year = parse_query(request_text)
     if not title:
         return []
-    films = narrow_by_year(title_lookup(title, token), year)
-    maybe = [m for m in films if not m["file_missing"] and m.get("confidence", 2) == 1]
+    films = title_lookup(title, token)
+    fitting = _same_year(films, year)
+    maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
+    if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
+        # The same name from another year is not the film asked for, but it
+        # is worth a mention: "Resident Evil 2026" is not on the shelf, and
+        # the six that are should be visible without being claimed as it.
+        kept = {m.get("rating_key") for m in fitting}
+        maybe += [m for m in films
+                  if m.get("rating_key") not in kept and not m["file_missing"]]
     maybe += [x for x in search_shows(title, token) if x["confidence"] == 1]
     return maybe
 
