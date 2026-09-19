@@ -217,7 +217,16 @@
   .doorbtn .chev { margin-left: auto; color: var(--accent); font-size: 18px; font-weight: 700; }
   .doorbtn:active { border-color: var(--accent); }
   .minor .opt { margin: 2px 0 0 2px; }
-  .minor .linkbtn { justify-self: end; margin-right: 2px; }
+  .minor .minorlinks { justify-self: end; margin-right: 2px; display: flex; gap: 14px; }
+  .report textarea {
+    width: 100%; box-sizing: border-box; min-height: 110px; resize: vertical;
+    padding: 10px; font: inherit; font-size: 14px; color: var(--text);
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .report .ctx {
+    font-size: 12px; color: var(--dim); margin: 8px 0 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .linkbtn {
     background: none; border: none; padding: 0; cursor: pointer;
     color: var(--accent); font-size: 13px; font-weight: 600;
@@ -764,7 +773,10 @@
       <span class="chev">›</span>
     </button>
     <label class="opt"><input type="checkbox" id="alsomissing"> include ones we haven't got</label>
-    <button class="linkbtn" id="helpbtn" type="button">Help</button>
+    <span class="minorlinks">
+      <button class="linkbtn" id="reportbtn" type="button">Something wrong?</button>
+      <button class="linkbtn" id="helpbtn" type="button">Help</button>
+    </span>
   </div>
 
   <!-- What a new visitor sees at once. The sign-in replaces it in place, so
@@ -860,9 +872,25 @@
   <p><b>About the AI</b> — describing a mood uses a bit of AI to work out what to look for.
      There's a daily allowance so it can't run up a bill. Searching by name is free and
      always works, allowance or not.</p>
+  <p><b>Something not right?</b> — a film it says we have but we don't, a search that
+     makes no sense, anything at all: tell the owner from here rather than by text.
+     Your last search comes with it, so they can see what you saw.</p>
   <div class="row" style="display:flex;gap:8px">
     <button class="ghost" data-act="tour">Show me around</button>
+    <button class="ghost" data-act="report">Tell the owner</button>
     <form method="dialog" style="margin-left:auto"><button class="primary">Got it</button></form>
+  </div>
+</dialog>
+
+<dialog id="report" class="report">
+  <h3>Tell the owner</h3>
+  <p class="sub" style="margin:0 0 12px">What went wrong, or what you expected to see.
+    It lands on their console and their phone, so nobody has to text.</p>
+  <textarea id="reportbody" maxlength="500" placeholder="e.g. Searched for Resident Evil 2026 and it said we have it, but only the old ones came up."></textarea>
+  <div class="ctx" id="reportctx"></div>
+  <div class="row" style="display:flex;gap:8px;margin-top:14px">
+    <button class="primary" id="reportsend" type="button">Send</button>
+    <form method="dialog" style="margin-left:auto"><button class="ghost">Cancel</button></form>
   </div>
 </dialog>
 
@@ -1292,6 +1320,7 @@ function shutCard(btn) {
 const ACTIONS = {
   shut:  (btn) => shutCard(btn),
   announce: () => askAnnouncement(),
+  report: () => openReport(),
   wanted: () => showWanted(),
   ask:   (btn) => ask(btn.dataset.value, btn),
   look:  (btn) => lookUp(btn.dataset.value),
@@ -2222,6 +2251,44 @@ input.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); const q = input.value.trim(); if (q) { input.blur(); find(q); } }
 });
 document.getElementById('helpbtn').addEventListener('click', () => document.getElementById('help').showModal());
+
+// ---- telling the owner ----
+// The whole point of the page is that nobody has to text the owner about
+// films. When the page itself is wrong they were texting anyway, so the
+// complaint goes through the app too - with the search that caused it.
+function openReport() {
+  const help = document.getElementById('help');
+  if (help.open) help.close();
+  const box = document.getElementById('report');
+  const ctx = document.getElementById('reportctx');
+  const last = input.value.trim();
+  ctx.textContent = last ? `Attached: your search "${last}"` : '';
+  ctx.hidden = !last;
+  document.getElementById('reportbody').value = '';
+  box.showModal();
+  document.getElementById('reportbody').focus();
+}
+document.getElementById('reportbtn').addEventListener('click', openReport);
+
+document.getElementById('reportsend').addEventListener('click', async () => {
+  const btn = document.getElementById('reportsend');
+  const body = document.getElementById('reportbody').value.trim();
+  if (!body) { document.getElementById('reportbody').focus(); return; }
+  btn.disabled = true;
+  try {
+    const res = await fetch('/request/message', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body, context: input.value.trim()}),
+    });
+    const d = await res.json();
+    if (!res.ok) { status('bad', 'That did not send', d.error || ''); return; }
+    document.getElementById('report').close();
+    status('good', 'Sent to the owner',
+      d.sent ? "Their phone has been told. You'll hear back the usual way."
+             : "It's on their console for next time they look.");
+  } catch (e) { status('bad', 'That did not send', e.message); }
+  finally { btn.disabled = false; }
+});
 document.getElementById('belltest').addEventListener('click', (ev) => {
   document.getElementById('bellbox').close();
   testPush(ev.currentTarget);

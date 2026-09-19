@@ -1023,6 +1023,23 @@ def create_app():
         _wanted_adds[str(uid)] = fresh
         return True
 
+    # Messages to the owner buzz a phone each, so they get a ceiling too. Not
+    # configurable: ten an hour is more than anyone has to say about a film
+    # page, and fewer than it takes to be a nuisance.
+    _messages_sent = {}
+    MESSAGES_PER_HOUR = 10
+
+    def message_allowed(uid):
+        import time as _t
+        now = _t.time()
+        fresh = [t for t in _messages_sent.get(str(uid), ()) if now - t < 3600]
+        if len(fresh) >= MESSAGES_PER_HOUR:
+            _messages_sent[str(uid)] = fresh
+            return False
+        fresh.append(now)
+        _messages_sent[str(uid)] = fresh
+        return True
+
     POLL_MAX = 900
 
     @app.route("/auth/start", methods=["POST"])
@@ -1845,6 +1862,71 @@ def create_app():
         finally:
             db.close()
         return jsonify({"note": dict(note), "sent": told.get("sent", 0)})
+
+    @app.route("/request/message", methods=["POST"])
+    def request_message():
+        """Somebody in the household telling the owner something is wrong.
+
+        The alternative is a text message, which is what this exists to
+        replace: the note lands on the console with the search that prompted
+        it attached, and the owner's phone is told once.
+        """
+        user = current_user()
+        payload = request.get_json(silent=True) or {}
+        body = " ".join((payload.get("body") or "").split())[:500]
+        context = " ".join((payload.get("context") or "").split())[:200]
+        if not body:
+            return jsonify({"error": "say what went wrong first"}), 400
+        if user and not message_allowed(user["id"]):
+            return jsonify({"error": "That's a lot of messages in one go - give it an hour.",
+                            "rate_limited": True}), 429
+        who = user["username"] if user else "someone"
+        db = Database()
+        try:
+            note = db.post_message(body, who, (user or {}).get("id"), context or None)
+            told = {"sent": 0}
+            try:
+                owner = web_push.owner_id()
+                if owner and str(owner) != str((user or {}).get("id")):
+                    told = web_push.send_event(
+                        db, "message", owner, url="/dashboard",
+                        tag=f"message-{note['id']}", who=who,
+                        text=body if len(body) <= 120 else body[:117] + "...",
+                    )
+            except Exception:
+                # Undelivered is not unsent: the note is on the console
+                # regardless, which is the part that replaces the text message.
+                pass
+        finally:
+            db.close()
+        return jsonify({"message": dict(note), "sent": told.get("sent", 0)})
+
+    @app.route("/messages")
+    def messages_list():
+        """What the household has reported. Owner tier by placement."""
+        unread_only = request.args.get("unread") in ("1", "true", "yes")
+        db = Database()
+        try:
+            rows = [dict(r) for r in db.messages(unread_only=unread_only)]
+            unread = db.count_unread_messages()
+        finally:
+            db.close()
+        return jsonify({"messages": rows, "unread": unread})
+
+    @app.route("/messages/<int:message_id>/read", methods=["POST"])
+    def message_read(message_id):
+        """Mark a message read, or unread again with {"read": false}."""
+        payload = request.get_json(silent=True) or {}
+        read = payload.get("read", True) is not False
+        db = Database()
+        try:
+            row = db.mark_message_read(message_id, read)
+            unread = db.count_unread_messages()
+        finally:
+            db.close()
+        if row is None:
+            return jsonify({"error": f"no message with id {message_id}"}), 404
+        return jsonify({"message": dict(row), "unread": unread})
 
     @app.route("/announce/<int:note_id>/retire", methods=["POST"])
     def announce_retire(note_id):

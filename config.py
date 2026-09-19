@@ -46,7 +46,16 @@ DEFAULTS = {
     # if all you want is the request page.
     "nas": {},
     "app": {},
-    "notifications": {},
+    # The message the household sends the owner from inside the app has a
+    # default wording, so a config.yaml written before it existed still
+    # delivers it. The others are only ever what config.yaml says.
+    "notifications": {
+        "message": {
+            "enabled": True,
+            "title": "Message from {who}",
+            "body": "{text}",
+        },
+    },
     # The optional services. Blank keys are how each of them is turned off, so
     # a config.yaml that says nothing about TMDb gets a TMDb that is switched
     # off rather than a server that will not start. Two of the modules behind

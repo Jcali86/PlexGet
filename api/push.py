@@ -159,6 +159,7 @@ def describe():
         "arrived": "Whoever asked for a film, once it is actually playable in Plex",
         "requested": "You, when somebody asks for something the library does not have",
         "file_missing": "You, when a search turns up a film whose file has vanished",
+        "message": "You, when somebody in the household reports a problem from the app",
         "test": "Only the person who presses the test button",
     }
     out = []
@@ -176,7 +177,7 @@ def describe():
 # Some notifications are the owner's business alone: who is asking for what,
 # and which files have gone astray. Enforced here so a future call site cannot
 # accidentally send them to the household.
-OWNER_ONLY = {"requested", "file_missing"}
+OWNER_ONLY = {"requested", "file_missing", "message"}
 
 
 def owner_id():

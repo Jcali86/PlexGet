@@ -850,6 +850,28 @@
   }
 
   .download-btn:hover { background: var(--accent-dim); }
+
+  /* Messages from the household */
+  nav .badge {
+    display: inline-block; min-width: 18px; padding: 1px 6px; margin-left: 4px;
+    border-radius: 10px; background: var(--red); color: #fff;
+    font-size: 11px; font-weight: 700; text-align: center; vertical-align: 1px;
+  }
+
+  .message {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 12px;
+  }
+  .message.read { border-left-color: var(--border); opacity: .75; }
+  .message .who { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .message .who b { color: var(--text); }
+  .message .body { font-size: 14px; white-space: pre-wrap; }
+  .message .ctx { font-size: 12px; color: var(--accent); margin-top: 8px; }
+  .message .actions { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -865,6 +887,7 @@
   <button data-tab="gaps">Gaps</button>
   <button data-tab="posters">Poster Status</button>
   <button data-tab="wanted">Wanted</button>
+  <button data-tab="messages">Messages <span class="badge" id="messagesBadge" hidden></span></button>
   <button data-tab="export">Export</button>
   <a href="/request" target="_blank" rel="noopener"
      style="margin-left:auto;align-self:center;padding:6px 14px;font-size:13px;color:var(--accent);text-decoration:none">Requests ↗</a>
@@ -988,6 +1011,19 @@
     </div>
     <div id="wantedSearchResult"></div>
     <div id="wantedContent"><div class="loading">Loading wanted list</div></div>
+  </div>
+
+  <!-- Messages Tab -->
+  <div class="tab" id="tab-messages">
+    <div class="filters">
+      <label>Show</label>
+      <select id="messagesFilter">
+        <option value="unread">Unread</option>
+        <option value="all">All</option>
+      </select>
+      <span style="font-size:12px;color:var(--text-dim)">What the household has reported from the request page, with the search that prompted it.</span>
+    </div>
+    <div id="messagesContent"><div class="loading">Loading messages</div></div>
   </div>
 
   <!-- Export Tab -->
@@ -1782,6 +1818,53 @@ loadGaps();
 loadPosters();
 loadExport();
 loadWanted();
+
+// ---- Messages from the household ----
+async function loadMessages() {
+  const el = document.getElementById('messagesContent');
+  const badge = document.getElementById('messagesBadge');
+  const unreadOnly = document.getElementById('messagesFilter').value === 'unread';
+  try {
+    const res = await fetch(API + '/messages' + (unreadOnly ? '?unread=1' : ''));
+    const d = await res.json();
+    badge.textContent = d.unread;
+    badge.hidden = !d.unread;
+    const items = d.messages || [];
+    if (!items.length) {
+      el.innerHTML = `<div class="empty-state">${unreadOnly
+        ? 'Nothing unread. The household reaches this through "Something wrong?" on the request page.'
+        : 'Nobody has said anything yet.'}</div>`;
+      return;
+    }
+    el.innerHTML = items.map(m => `
+      <div class="message ${m.read_at ? 'read' : ''}" id="msg-${m.id}">
+        <div class="who"><b>${esc(m.posted_by || 'someone')}</b><span>${wantedLocalDate(m.posted_at)}</span></div>
+        <div class="body">${esc(m.body)}</div>
+        ${m.context ? `<div class="ctx">They had searched: “${esc(m.context)}”</div>` : ''}
+        <div class="actions">
+          ${m.read_at
+            ? `<button class="copy-btn" onclick="setMessageRead(${m.id}, false)">Mark unread</button>`
+            : `<button class="copy-btn" onclick="setMessageRead(${m.id}, true)">Mark read</button>`}
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state">Could not load messages: ${esc(e.message)}</div>`;
+  }
+}
+
+async function setMessageRead(id, read) {
+  try {
+    const res = await fetch(`${API}/messages/${id}/read`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({read}),
+    });
+    if (!res.ok) { const d = await res.json(); alert(d.error || res.statusText); return; }
+    loadMessages();
+  } catch (e) { alert(e.message); }
+}
+
+document.getElementById('messagesFilter').addEventListener('change', loadMessages);
+loadMessages();
 </script>
 </body>
 </html>

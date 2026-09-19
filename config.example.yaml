@@ -328,6 +328,10 @@ notifications:
     enabled: true
     title: "A file has gone missing"
     body: "{film} is in Plex but the file is gone. It is back on the wanted list."
+  message:            # to you, when somebody reports a problem from inside the app
+    enabled: true
+    title: "Message from {who}"
+    body: "{text}"
   test:               # only ever sent when somebody presses the test button
     enabled: true
     title: "Notifications"

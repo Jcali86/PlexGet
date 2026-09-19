@@ -80,6 +80,9 @@ What they get:
   and never proposing something that would have to be fetched.
 - **Notes from you**, if you post one, and a skin picker for people with
   opinions about how it looks.
+- **A way to tell you something is wrong** without texting. "Something
+  wrong?" on the page takes a sentence, attaches whatever they last searched
+  for, and puts it on your console and your phone.
 
 ### For you
 
@@ -90,6 +93,8 @@ What they get:
 - **A push when somebody asks for something**, and another when a search turns
   up a film Plex lists but can no longer play — a file that has quietly gone
   missing puts itself back on the wanted list.
+- **Messages from the household**, on their own console tab, with the search
+  that prompted each one. A push arrives as each lands.
 - **An owner console** at `/dashboard`: overview, upgrade priority, gaps,
   poster status, wanted, export.
 - **Films you don't have, by genre.** On the gaps tab: pick genres (horror
@@ -384,7 +389,7 @@ rather than instruction are all fixed in code. A persona author can change how
 it sounds, never what it may do.
 
 **What it sends.** The `notifications` block holds every message this app is
-capable of sending — four of them. Reword any of them, or turn them off.
+capable of sending — five of them. Reword any of them, or turn them off.
 Nothing else is ever sent.
 
 **What it may spend.** `app.limits` caps model use per person per hour and per

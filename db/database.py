@@ -115,6 +115,19 @@ class Database:
                 retired_at TIMESTAMP
             );
 
+            -- Notes the other way: a household member telling the owner that
+            -- something is wrong, from inside the app. Kept so the owner reads
+            -- them on the console rather than in a text message.
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                body TEXT NOT NULL,
+                context TEXT,
+                posted_by TEXT,
+                posted_by_id TEXT,
+                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                read_at TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS wanted (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -425,4 +438,44 @@ class Database:
             (announcement_id,),
         )
         self.conn.commit()
+
+    # ---- messages to the owner ---------------------------------------------
+
+    def post_message(self, body, posted_by, posted_by_id=None, context=None):
+        """A household member telling the owner something."""
+        cursor = self.conn.execute(
+            "INSERT INTO messages (body, context, posted_by, posted_by_id) VALUES (?, ?, ?, ?)",
+            (body, context, posted_by, str(posted_by_id) if posted_by_id else None),
+        )
+        self.conn.commit()
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+
+    def messages(self, unread_only=False, limit=200):
+        """What the household has said, newest first."""
+        where = "WHERE read_at IS NULL " if unread_only else ""
+        return self.conn.execute(
+            f"SELECT * FROM messages {where}ORDER BY posted_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def count_unread_messages(self):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE read_at IS NULL"
+        ).fetchone()[0]
+
+    def mark_message_read(self, message_id, read=True):
+        """Rows are kept for history, never deleted; read is the only state."""
+        cursor = self.conn.execute(
+            "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE id = ?" if read
+            else "UPDATE messages SET read_at = NULL WHERE id = ?",
+            (message_id,),
+        )
+        self.conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
 
