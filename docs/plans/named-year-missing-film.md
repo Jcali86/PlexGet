@@ -147,10 +147,16 @@ a feature rather than a fix.
 There are no tests. Exercise these against a real Plex and say in the pull
 request which were done.
 
-- "Resident evil 2026": expect "We don't have ...", the 2026 film first
-  under "Which one do you mean?" with "Not out yet" and "Tell me when it
-  lands", and the 2002 to 2021 films under "We do have these". No model call
-  and no allowance spent (check `ai_limits` counts before and after).
+- "Resident evil 2026": expect "We don't have ...", and first under "Which
+  one do you mean?" the 2026 Resident Evil (Zach Cregger, R, 1h 35m, the
+  poster with the car headlights in the forest). It went to cinemas on 18
+  September 2026 and has no digital or physical date yet, so
+  `availability()` should return `cinema` and the card should read "Chill -
+  it's still in the cinema. Go watch it!" with the "Tell me when it lands"
+  button. If TMDb has since listed a digital date in the past the state is
+  `out` and the button is the plain "Ask for this one"; either is correct.
+  The 2002 to 2021 films go under "We do have these". No model call and no
+  allowance spent (check `ai_limits` counts before and after).
 - "Resident evil" with no year: unchanged, six matches, "We have these".
 - "Resident evil 2002": unchanged, one match, "Yes, we have that".
 - "Taxi (French)": unchanged; the qualifier path is untouched.
