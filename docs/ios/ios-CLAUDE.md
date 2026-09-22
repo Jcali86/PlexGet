@@ -29,7 +29,9 @@ Keychain and `UserDefaults` tables, §5 the concurrency model), 10-decision-reco
   app is one edit there plus `project.yml` (ADR §4 "App Store name"; 04-ios-app.md §3.1).
 - Treat `PlexGetKit/Tests/Fixtures/` as vendored, read-only data refreshed only by `scripts/sync-fixtures.sh
   <path-to-server-repo>`, with the server commit in `Tests/Fixtures/VERSION`. Fixtures are the contract with the
-  server and are never edited by hand (03-server-api.md §6.3).
+  server and are never edited by hand (03-server-api.md §6.3). The directory is declared as a resource of the
+  `PlexGetKit` library target, not the test target, which is what gives `Demo` its `Bundle.module`; the path
+  stays where the ADR §2 puts it and there is never a second copy (07-build-phases.md §5 Phase 0).
 - Keep the phase prompts at `docs/build/phase-N.md` and the deviation log at `docs/build/deviations.md`. Later Mac
   sessions find their instructions there (00-README.md §3).
 
@@ -79,8 +81,14 @@ Keychain and `UserDefaults` tables, §5 the concurrency model), 10-decision-reco
   to the network through `Transport` alone (02-architecture.md §5 item 2; 07-build-phases.md §4.2). Note:
   00-README.md §4 says "inside `ServerClient` and `PlexTV`"; the ADR's protocol boundary puts the session in the app
   target, and 04, 07 and 09 agree, so follow this rule.
-- Never write a string literal for an endpoint path outside `Endpoints.swift`. `scripts/lint.sh` and
-  `scripts/banned-words.sh` grep for the paths of 03-server-api.md §8, so a stray literal fails CI.
+- Never write a string literal for an endpoint path outside `Endpoints.swift`. `scripts/lint.sh` greps for the
+  paths of 03-server-api.md §8, so a stray literal fails CI (`scripts/banned-words.sh` is the word list of §6 only,
+  the listing of 08-app-store-and-release.md §5). The path grep
+  uses the exact literal list of 04-ios-app.md §2.2, where a path that is a suffix of a permitted route carries its
+  opening double quote (`"/push/test"`, `"/export"`, `"/media"`), and runs only over Swift sources under
+  `PlexGetKit/Sources` and `App/`, never over `App/Resources/` or the fixtures; so the `"/api/v1/push/test"` and
+  `"/api/v1/auth/plex"` builders and the setup-page sentence in `Localizable.xcstrings` are not hits. The word list
+  of §6 still runs over `Resources/`, the fixtures and store metadata.
 - Never write `@unchecked Sendable`, `nonisolated(unsafe)`, `DispatchQueue`, `NSLock`, a semaphore or `Thread`.
   Strict concurrency is the point; an escape hatch needs a comment stating why the compiler is wrong, and no such
   case is expected in v1 (02-architecture.md §5 item 3; 04-ios-app.md §10.1).
@@ -97,7 +105,10 @@ Keychain and `UserDefaults` tables, §5 the concurrency model), 10-decision-reco
 - Parse every timestamp with `SQLiteDate` (`YYYY-MM-DD HH:MM:SS` UTC, ISO 8601 `Z`, or a Unix integer) and format in
   the app with the current locale. The server mixes three formats (owner-api.md §4.10).
 - Never open a URL taken from a push payload, an event or a server response; route only by `ref` matching
-  `^(wanted|message|note):[0-9]+$`. `openURL` exists only in `Report` and `Paywall` (09-security.md §2.6).
+  `^(wanted|message|note):[0-9]+$`. `openURL` exists only in `Report`, `Paywall`, `Welcome`, `Bell`, `Pairing`
+  and `Settings`, and its argument is only `AppIdentity.privacyPolicyURL`, `AppIdentity.termsURL`,
+  `AppIdentity.appStoreURL`, `UIApplication.openSettingsURLString` or a `mailto:` to `AppIdentity.supportEmail`
+  (09-security.md §2.6, §11; `scripts/lint.sh` greps for the folders).
 - Never answer a server-trust challenge, add `NSAllowsArbitraryLoads` or `NSExceptionDomains`. ATS is exactly
   `{ NSAllowsLocalNetworking: true }` and certificate validation is the system default (09-security.md §4).
 - Never send plain `http://` to a host that `AddressClass.isPrivate(host:)` rejects, and prefer `https://` when both

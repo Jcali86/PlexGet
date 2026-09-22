@@ -45,10 +45,12 @@ every session).
   docs/build/phase-0.md … phase-9.md   the per-phase prompts (prompts/phase-N.md in this plan)
 ```
 `project.yml` is the only project description; `.xcodeproj` is generated, gitignored and never hand-edited (brief fact
-13). Info.plist keys set from `project.yml`: `NSLocalNetworkUsageDescription`, `NSAllowsLocalNetworking` under
-`NSAppTransportSecurity`, `BGTaskSchedulerPermittedIdentifiers` (`AppIdentity.refreshTaskIdentifier`),
-`UIBackgroundModes` (`remote-notification`, `fetch`), `CFBundleURLTypes` (`AppIdentity.urlScheme`),
-`CFBundleDisplayName` (`AppIdentity.displayName`). Entitlements file: `aps-environment`,
+13). Info.plist keys set from `project.yml`: `NSLocalNetworkUsageDescription` ("Finds your household's server on
+this Wi-Fi using the addresses Plex already knows."), `NSCameraUsageDescription` ("Scans the invite QR code the owner
+shares."; the Pairing scanner, §4.1), `NSAllowsLocalNetworking` under `NSAppTransportSecurity`,
+`BGTaskSchedulerPermittedIdentifiers` (`AppIdentity.refreshTaskIdentifier`), `UIBackgroundModes` (`fetch` only;
+`remote-notification` is not declared because the relay sends alert pushes without `content-available`, 05 §7.4),
+`CFBundleURLTypes` (`AppIdentity.urlScheme`), `CFBundleDisplayName` (`AppIdentity.displayName`). Entitlements file: `aps-environment`,
 `com.apple.developer.associated-domains` (`applinks:AppIdentity.inviteHost`). Both are the human's capabilities work
 in Phase 9; the files exist from Phase 0 so the simulator build is unchanged later.
 
@@ -72,7 +74,7 @@ public protocol SecretStore: Sendable {
 }
 public protocol Entitlements: Sendable {
     var isOwnerActive: Bool { get async }
-    func serverKeyJWS() async -> String?          // the current transaction's jwsRepresentation
+    func serverKeyJWS() async -> String?          // the newest verified transaction's jwsRepresentation, expired or not (§3.3)
 }
 public enum NotificationAuthorisation: Sendable { case notAsked, granted, denied }
 public protocol Notifier: Sendable {
@@ -116,27 +118,39 @@ public actor ServerClient: ServerClientProtocol {
 `Endpoints.swift` is the only file in either product that constructs a `URLRequest`; it holds one static builder per
 route in 03-server-api.md §3 and §4, one per plex.tv call in §2.4 below, and one per relay call in 05-push-relay.md,
 as `enum Endpoints { static func server() -> ServerEndpoint<ServerInfo> … }`. A route in 03-server-api.md §8 has no
-builder, and `scripts/banned-words.sh` also greps for those paths. Every server-family request carries `Accept:
+builder, and `scripts/lint.sh` greps Swift sources (never `App/Resources/` or the fixtures) for these exact literals
+from 03 §8: `/auth/start`, `/auth/poll`,
+`/auth/me`, `/auth/logout`, `handoff=`, `/push/key`, `/push/subscribe`, `/push/unsubscribe`, `"/push/test"`,
+`/wanted/export`, `"/export"`, `/export/download`, `/sonarr/`, `/radarr/`, `/scan/`, `/analyze`, `"/quality"`,
+`"/media"`, `/reports/upgrades`, `/reports/posters`, `/fixer/`, `/posters/`, `"/command"`, `/search/tmdb`, `"/gaps"`,
+`/plex/webhook`, `/setup`, `/sw.js`, `/manifest.webmanifest`, `/dashboard` (never `/`, `/request` or `/health`, which
+are prefixes of permitted routes). Every server-family request carries `Accept:
 application/json`, `Content-Type: application/json; charset=utf-8` when it has a body, `User-Agent`, and
-`Authorization: Bearer` when `tier != .open` (03 §1.2). No `X-Plex-*` header ever goes to a PlexGet server.
+`Authorization: Bearer` when `tier != .open` (03 §1.2). No `X-Plex-*` header ever goes to a PlexGet server. Phase 3
+writes every server, plex.tv and relay-device builder; the two relay server-key builders (`POST`/`DELETE
+/v1/server-keys`, 05 §4.3-§4.4) are Phase 7's, and `EndpointsTests` asserts them absent until then.
 
 `ErrorMapper.map(status:data:route:) -> ServerError?` produces exactly the cases tabled in 02-architecture.md §6.1
 (`401` → `.signInRequired` regardless of `auth_required`, household-api.md §1; `200` with `error` → `.serverSaidNo`
-only for the routes in household-api.md §6.7). `ServerError` is `enum ServerError: Error, Sendable, Equatable`. Note:
-03-server-api.md §6.4 names the `api.v1.internal_error.json` result `.serverError`; the Kit's case is `.serverFault`
-as in 02 §6.1, and the fixture catalogue maps that file to `.serverFault`.
+only for the routes in household-api.md §6.7). `ServerError` is `enum ServerError: Error, Sendable, Equatable`; its
+payloads are value types that are `Equatable`: `.undecodable(route: String, detail: String)` carries
+`String(describing:)` of the `DecodingError`, and `.unreachable(code: URLError.Code, description: String)` carries the
+code and `localizedDescription` rather than the `URLError` itself (02 §6.1 tables the same two cases).
+`api.v1.internal_error.json` maps to `.serverFault` (03 §6.4).
 
 `RelayClient` is a second actor in the module, taking a `Transport` and the relay base URL, with
 `registerDevice(apnsToken:environment:app:) -> DeviceRegistration`, `deleteDevice(handle:secret:)`,
-`issueServerKey(jws:) -> ServerKey` and `deleteServerKey(id:)`, throwing `RelayError` (02 §6.1); shapes per
-05-push-relay.md.
+`issueServerKey(jws:) -> ServerKey` and `deleteServerKey(id:jws:)` (05 §4.4 requires the JWS for the same
+`originalTransactionId`), throwing `RelayError` (02 §6.1); shapes per 05-push-relay.md. `registerDevice` and
+`deleteDevice` are Phase 3; `issueServerKey` and `deleteServerKey` with their builders are Phase 7 (07 §5).
 
 ### 2.3 Models
 
 One `struct` or `enum` per Kit type named in 03-server-api.md §2 and §6.4 (`Film` merges shapes 2a and 2b with every
 shape-specific field optional; `Show`, `FilmGuess`, `ShowGuess`, `WantedRow`, `Persona`, `Theme`, `ServerInfo`,
-`AuthPlexResponse`, `SessionInfo`, `ChangesPage`, `ChangeEvent`, `SearchResult` and the rest of that table's third
-column), each in its own file.
+`AuthPlexResponse`, `SessionInfo`, `ChangesPage`, `ChangeEvent`, `SearchResult`, the wrapper shapes `SessionList`,
+`ThemeList`, `NoteList` and `WantedPage` of 03 §2.13, and the rest of that table's third column), each in its own
+file.
 ```swift
 public enum SearchResult: Decodable, Sendable {      // keyed on "kind" (household-api.md §3.1)
     case title(TitleAnswer), cheeky(CheekyAnswer), mood(MoodAnswer),
@@ -173,13 +187,16 @@ public actor PlexTVClient {
     public init(transport: any Transport, headers: PlexHeaders)
     public func createPin(strong: Bool) async throws -> PlexPin              // POST /api/v2/pins?strong=
     public func linkPin(code: String, accountToken: String) async throws    // PUT /api/v2/pins/link (ADR §4 "Sign-in exchange")
+        // body `code=<code>` as `application/x-www-form-urlencoded`, header `X-Plex-Token: <accountToken>` plus the
+        // usual `X-Plex-*` set; any 2xx with an empty body is success, nothing is decoded (plexapi/myplex.py:1144-1155).
+        // Whether plex.tv requires `X-Plex-Product: Plex SSO` on this call, as plexapi sends, is part of the gate-1 human check.
     public func readPin(id: Int) async throws -> PlexPin                    // GET /api/v2/pins/{id}
     public func user(accountToken: String) async throws -> PlexUser         // GET /api/v2/user
     public func resources(accountToken: String) async throws -> [PlexResource]   // GET /api/v2/resources?includeHttps=1&includeRelay=0
     public nonisolated func authURL(pin: PlexPin, forwardURL: URL) -> URL   // https://app.plex.tv/auth#?clientID=…&code=…&context[device][product]=…&forwardUrl=…
 }
 ```
-All five calls send `Accept: application/json` and decode JSON (ADR §5 item 22; brief fact 4). Errors are
+The other four calls send `Accept: application/json` and decode JSON (ADR §5 item 22; brief fact 4). Errors are
 `PlexTVError` (02 §6.1). Whether `strong: true` pins link (ADR §6 item 1) is a Phase 1 human gate; the Welcome store
 passes `strong: true` for the browser pin and reads `SignInMachine.handoffPinStrength` for the second pin so the
 gate's answer is one constant.
@@ -193,7 +210,7 @@ public enum SignInState: Sendable, Equatable {
     case pinIssued(PlexPin)
     case waitingForPlex(PlexPin, nextPollAt: Date)
     case awaitingServer(accountToken: String)                 // Pairing runs
-    case awaitingConfirmation(ServerCandidate)                // un-invited server (ADR §4 "LAN probe and trust")
+    case awaitingConfirmation(ServerCandidate)                // un-invited server (ADR §4 "LAN probe and trust") or a tapped invite link
     case exchanging(ServerCandidate)
     case signedIn(AuthPlexResponse)
     case denied(SignInDenial)                                 // .notShared, .invitePending, .nativeSignInOff, .setupMode(URL), .updateNeeded(min: String)
@@ -202,7 +219,7 @@ public enum SignInState: Sendable, Equatable {
 }
 public enum SignInEvent: Sendable {
     case start, pinCreated(PlexPin), tick(Date), pinRead(PlexPin), pinExpired
-    case serverFound(ServerCandidate, invited: Bool), noServerFound, confirmed, cancelled
+    case serverFound(ServerCandidate, source: ServerCandidate.Source), noServerFound, confirmed, cancelled
     case exchangeSucceeded(AuthPlexResponse), exchangeFailed(ServerError), plexTVFailed(PlexTVError)
 }
 public enum SignInEffect: Sendable, Equatable {
@@ -220,8 +237,10 @@ public struct SignInMachine: Sendable {
 Transitions: `idle --start--> pinIssued` (effect `.createBrowserPin`), `pinIssued --pinCreated--> waitingForPlex`
 (`.openAuthURL`), `waitingForPlex --tick--> waitingForPlex` (`.pollPin` when `now >= nextPollAt`),
 `--pinRead(authToken != nil)--> awaitingServer` (`.readUser` then `.runPairing`), `--pinExpired--> pinIssued` (new
-pin, no message), `awaitingServer --serverFound(invited: true)--> exchanging` (`.linkAndExchange`),
-`--serverFound(invited: false)--> awaitingConfirmation` (`.askConfirmation`), `awaitingConfirmation --confirmed-->
+pin, no message), `awaitingServer --serverFound(source: .qr)--> exchanging` (`.linkAndExchange`; a QR scanned in the
+app is the one source that skips confirmation), `--serverFound(source: .invite | .plexLocal | .typed)-->
+awaitingConfirmation` (`.askConfirmation`; a tapped link is a phishing surface, so it confirms like a probe),
+`awaitingConfirmation --confirmed-->
 exchanging`, `exchanging --exchangeSucceeded--> signedIn`, `--exchangeFailed(.notShared | .invitePending)--> denied`,
 `--exchangeFailed(.rateLimited(retryAfter)) --> rateLimited(until: now + min(retryAfter, 120))` (auth-and-tiers.md
 §1.6 cap, as the page does), `rateLimited --tick(past until)--> awaitingServer` (retry the exchange without a new
@@ -236,14 +255,19 @@ public enum InviteParser {
     public static func parse(_ url: URL) throws(InviteError) -> Invite   // https://<AppIdentity.inviteHost>/join#v=1&m=&l=&r=&n=; same fragment from a QR
 }
 public enum AddressClass {
-    public static func isPrivate(host: String) -> Bool   // RFC 1918, 169.254/16, 127/8, ::1, fc00::/7, fe80::/10; literal IPs only
+    public static func isPrivate(host: String) -> Bool   // RFC 1918, 169.254/16, 127/8, ::1, fc00::/7, fe80::/10; plus hostnames ending `.local` (09 §4)
 }
 public enum URLRanker {
     public static func rank(_ urls: [URL]) -> [URL]      // https first; then http to a private host; http to anything else is dropped
 }
 public struct ServerCandidate: Sendable, Equatable {
-    public enum Source: Sendable { case invite, plexLocal, typed, stored }
+    public enum Source: Sendable, Equatable { case qr, invite, plexLocal, typed, stored }   // qr: scanned in the app; invite: a tapped link
     public let url: URL; public let source: Source; public let info: ServerInfo
+}
+public enum InviteRefusal: Sendable, Equatable { case notVisible, alreadyPaired }
+public extension Invite {
+    func refusal(visible: [PlexResource], storedMachineIDs: Set<String>) -> InviteRefusal?
+        // .notVisible when no resource's clientIdentifier == machineID; .alreadyPaired when machineID is stored; else nil
 }
 public struct Prober: Sendable {
     public init(transport: any Transport, port: Int = 5050, timeout: TimeInterval = 1.5)
@@ -283,7 +307,9 @@ public enum Changes {
 }
 ```
 The app decides which tab `.wanted` opens (WantedList for a member, Console/Requests for the owner; ADR §2, design-A
-§5.2) in `Router`, not here.
+§5.2) in `Router`, not here. `Destination`, `LocalNotification` and `NotificationAuthorisation` (§2.1) are declared
+in `Protocols/Notifier.swift` from Phase 0, because `Notifier` names them and the package must build before
+`Changes/` exists (07 §5 Phase 0); `Changes/` produces them and never redeclares them.
 
 ### 2.8 Themes
 ```swift
@@ -305,6 +331,7 @@ public extension Look { init(theme: Theme) }                     // id "c-" + sl
 public enum LookResolver {
     public static func select(chosen: String?, assigned: String?, custom: [Look]) -> Look
         // chosen wins when it exists; else assigned when it exists; else BuiltInLooks.plex
+        // `assigned` (user.skin) is a bare slug: it matches a built-in id or a custom look whose id is "c-" + slug
 }
 ```
 The four built-in values are copied digit for digit from `dashboard/request.html:37-79` (persona-themes-limits.md §4.1
@@ -325,6 +352,14 @@ public actor DemoServerClient: ServerClientProtocol {
 }
 public struct FixtureBundle: Sendable { public static func bundled() throws -> FixtureBundle }   // Bundle.module
 ```
+(unverified: `Bundle.module` exists only in a target that declares `resources`, and SwiftPM is believed to refuse a
+resource path outside the target's directory; the ADR §2 fixes the vendored copy under `PlexGetKit/Tests/Fixtures/`,
+outside `Sources/PlexGetKit/`, so 07 §5 Phase 0 gives the library target `path: "."`, `sources:
+["Sources/PlexGetKit"]` and `resources: [.copy("Tests/Fixtures")]`, and the files are read with `subdirectory:
+"Fixtures"`. Gate: Phase 0 `swift build` must give the `PlexGetKit` library a `Bundle.module` that holds
+`Fixtures/VERSION`, or the layout is amended before `Demo/` is written; the builder never keeps a second copy of
+the fixtures and never reads them from the file system.)
+
 Fixtures are the same files the contract test decodes (03 §6.3), so demo data and the shapes cannot drift. Titles are
 public domain (03 §6.2). Demo role is `owner` so the reviewer sees the Console; `role: .shared` exists for the UI
 tests of member-only behaviour.
@@ -336,10 +371,10 @@ tests of member-only behaviour.
 | `FixturesTests` | Every file under `Tests/Fixtures/` decodes with its catalogued type and every catalogued name exists (03 §6.3); the decoded `Persona` exposes no `voice` or `examples`; no decoded `Film` exposes `missing_files` |
 | `ErrorMapperTests` | Each row of 02 §6.1 from a literal body; `401` without `auth_required` still maps; `200` with `error` maps only for the listed routes; unknown `4xx` maps to `.badRequest`/`.notFound`/`.conflict` by status |
 | `ServerClientTests` | Header set per request (03 §1.2); bearer absent on open routes; local URLs tried before remote; `.unreachable` on the last URL only; a `.wrongServer` answer drops that URL; decode failure is `.undecodable(route:)` |
-| `EndpointsTests` | Every route in 03 §3-§4 has one builder with the right method, path, tier and timeout; no builder exists for any path in 03 §8 |
+| `EndpointsTests` | Every route in 03 §3-§4 has one builder with the right method, path, tier and timeout; no builder exists for any path in 03 §8 (relay server-key builders from Phase 7) |
 | `PlexTVTests` | Header set including `X-Plex-Platform-Version`; `Accept: application/json`; `authURL` shape; JSON decoding of pins, user and resources from literal bodies |
-| `SignInMachineTests` | Every transition in §2.5 with a manual clock; the 2.5 s poll cadence; the 120 s countdown cap; `pinExpired` issues a new pin without leaving the screen; `cancelled` from every state returns to `idle` |
-| `PairingTests` | Invite parsing (valid, wrong `v`, missing `m`, QR text form); `isPrivate` on a literal table of hosts; `rank` drops public plain HTTP; `probeLocal` calls only `local == true` addresses and accepts only a matching machine id, with a fake transport recording every URL |
+| `SignInMachineTests` | Every transition in §2.5 with a manual clock; the 2.5 s poll cadence; the 120 s countdown cap; `pinExpired` issues a new pin without leaving the screen; `cancelled` from every state returns to `idle`; `testTappedInviteRequiresConfirmation` (`source: .invite` reaches `awaitingConfirmation`, only `.qr` reaches `exchanging` directly) |
+| `PairingTests` | Invite parsing (valid, wrong `v`, missing `m`, QR text form); `isPrivate` on a literal table of hosts including a `.local` name; `rank` drops public plain HTTP; `probeLocal` calls only `local == true` addresses and accepts only a matching machine id, with a fake transport recording every URL; `testInviteForUnknownOrPairedServerIsRefused` (`Invite.refusal` answers `.notVisible` and `.alreadyPaired`) |
 | `ChangesTests` | Routing of each `ref` form; `test` events skipped; the ring de-duplicates and evicts at 200; cursor never goes backwards |
 | `ThemesTests` | The four palettes equal the literal table; `Look(theme:)` maps all twelve keys; `LookResolver` precedence (persona-themes-limits.md §4.2) |
 | `DemoTests` | Every endpoint builder gets an answer from `DemoServerClient`; a wanted add then a list read shows the row; it never throws for any builder |
@@ -353,7 +388,8 @@ One `enum AppIdentity` with static constants and nothing else; renaming the app 
 `plexProduct` (= `displayName`, sent as `X-Plex-Product`), `urlScheme` (the `forwardUrl` scheme; callback path
 `plex-auth-done`), `pushTopic` (= `bundleIdentifier`), `inviteHost` (`push.<developer-domain>`), `relayBaseURL`,
 `refreshTaskIdentifier` (`<bundleIdentifier>.refresh`), `keychainService` (= `bundleIdentifier`), `supportEmail`,
-`privacyPolicyURL`, `termsURL`, `productIDs` (`["owner.yearly", "owner.monthly"]`), `subscriptionGroup` (`"Owner"`),
+`privacyPolicyURL`, `termsURL`, `appStoreURL` (the App Store page, opened by Welcome's "Get the update" and named in
+09 §11's `openURL` allow-list), `productIDs` (`["owner.yearly", "owner.monthly"]`), `subscriptionGroup` (`"Owner"`),
 `probePort` default (`5050`). URL literals are built with `URL(string:)` inside a closure that calls
 `preconditionFailure` on `nil`; this is the only permitted `preconditionFailure` in the app and the only place a
 literal URL exists. The in-app header uses the server's `app_name`, never `displayName` (design-A §9).
@@ -373,10 +409,20 @@ missing.
 expiresAt: Date?; var inGrace: Bool; var productID: String? }`. Functions: `loadProducts() async throws -> [Product]`
 (both ids, yearly first), `purchase(_ product: Product) async throws -> PurchaseOutcome` (`.purchased`, `.pending`,
 `.cancelled`), `restore() async` (`AppStore.sync()`), `startListening()` (one `Task` over `Transaction.updates` for
-the app's lifetime), `refreshEntitlement() async` (`Transaction.currentEntitlements` plus
-`Product.SubscriptionInfo.Status`; grace and billing retry count as active), `serverKeyJWS() async -> String?`. Only
-`VerificationResult.verified` transactions count; every verified transaction is finished. After any change to active
-the owner's app runs 02 §2.14 steps 3-4 through `RelayClient.issueServerKey` and `Endpoints.ownerRelay`.
+the app's lifetime), `refreshEntitlement() async` (`active` is true when a verified transaction is in
+`Transaction.currentEntitlements` or the product's `Product.SubscriptionInfo.Status` has `state == .subscribed` or
+`.inGracePeriod`; `.inBillingRetryPeriod`, `.expired` and `.revoked` are not active, per Apple's `RenewalState`
+documentation as read for this plan on 2026-09-22, which matches 01 §2.3's `expires_at` plus 16 days; `inGrace` is
+`state == .inGracePeriod`; a `.inBillingRetryPeriod` state shows the Paywall with the sentence "Your subscription
+couldn't be renewed. Update your payment details in Settings > Apple Account."), `serverKeyJWS() async -> String?`
+(returns the `jwsRepresentation` of the newest `VerificationResult.verified` transaction among
+`Transaction.latest(for:)` over `AppIdentity.productIDs`, whether or not it is expired, so the relay deletion of
+05 §4.4 stays possible after a lapse or refund; nil only when no transaction has ever existed). Only
+`VerificationResult.verified` transactions count; every verified transaction is finished. After a purchase or
+restore that makes `active` true the owner's app runs 02 §2.14 steps 3-4 through `RelayClient.issueServerKey` and
+`Endpoints.ownerRelay`, sending `rotate: true` only in the three cases of 02 §2.14 step 5 and holding an
+un-forwarded key as `relay.server-key.pending.<machine_id>` until the server answers `200`; a renewal re-posts the
+JWS without `rotate` (05 §4.3).
 `Products.storekit` lists both products with the 7-day introductory offer on `owner.yearly` for `xcodebuild test`
 (Phase 7 gate). Demo mode never touches `Store` (§7).
 
@@ -385,10 +431,17 @@ the owner's app runs 02 §2.14 steps 3-4 through `RelayClient.issueServerKey` an
 `final class PushBridge: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate`, installed with
 `@UIApplicationDelegateAdaptor`; every method hops to `@MainActor`. `didRegisterForRemoteNotifications` hex-encodes
 the token and runs 02 §2.12 steps 2-3 (`RelayClient.registerDevice`, then `Endpoints.pushDevices`); the `environment`
-is `sandbox` for a debug or TestFlight build and `production` otherwise (unverified: TestFlight builds use the sandbox
-APNs environment; the Phase 6 sandbox push confirms it). `willPresent` returns `[.banner, .list, .sound]`.
-`didReceive` reads `ev`, `ref`, `srv` from `userInfo`, records `ChangeRouting.pushKey` in the `SeenRing`, and calls
-`Router.open(destination)`. `didFailToRegister` logs and leaves `push.delivery` handling to `Background`.
+is `sandbox` only when the build's `aps-environment` entitlement is `development` (a development-signed build run from
+Xcode on a device) and `production` otherwise, TestFlight, Ad Hoc and App Store builds included (05 §7.3, gate 5).
+`PushBridge` decides by reading `Bundle.main.path(forResource: "embedded", ofType: "mobileprovision")`, taking the
+bytes between `<plist` and `</plist>`, decoding them with `PropertyListSerialization` and reading `Entitlements` →
+`aps-environment`; a missing profile (App Store builds strip it) means `production`; on the simulator no relay
+registration is attempted (unverified: the embedded-profile layout is from memory; the Phase 6 device step records
+which value the TestFlight device registered with, and the ADR §6 item 9 "sandbox push to a TestFlight build" is
+satisfied by a push reaching that build whichever host carried it). `willPresent` returns `[.banner, .list, .sound]`.
+`didReceive` reads `ev`, `ref`, `srv` from `userInfo`; when `srv` is not a stored server it routes nothing and
+records nothing (02 §2.12 step 10; `PushBridgeTests.testPushForUnpairedServerIgnored`, 09 §11); otherwise it
+records `ChangeRouting.pushKey` in the `SeenRing` and calls `Router.open(destination)`. `didFailToRegister` logs and leaves `push.delivery` handling to `Background`.
 `requestPermission()` is called once by `SessionStore` after the first successful sign-in with the sentence
 "Notifications are how it tells you when something you asked for has arrived." shown first (ADR §4 "Notification
 permission"); the prompt time goes in `notifications.askedAt`.
@@ -397,7 +450,10 @@ permission"); the prompt time goes in `notifications.askedAt`.
 
 `enum Background` registers `AppIdentity.refreshTaskIdentifier` in `AppMain.init` (before the scene exists), schedules
 with `earliestBeginDate = now + 15 minutes` after every run and every foreground, and runs
-`ChangesFetcher.run(client:notifier:defaults:)` which is 02 §2.13 steps 2-5. The same fetcher runs on every
+`ChangesFetcher.run(client:notifier:defaults:)` which is 02 §2.13 steps 2-5. `submit` is wrapped in `do/catch`;
+`BGTaskScheduler.Error.unavailable` (simulator, or Background App Refresh off) is logged once at `.info` and ignored,
+never retried in a loop, and the foreground fetch still runs; `AppTests` asserts `Background.schedule()` does not
+throw on the simulator. The same fetcher runs on every
 `scenePhase == .active` transition. When `server.<id>.delivery` is `relay` the task stays registered and the fetcher
 still posts nothing already in the `SeenRing`. `Task.detached` is permitted only inside `Background.run(task:)` and
 its expiration handler cancels that task (02 §5 item 7).
@@ -408,9 +464,15 @@ its expiration handler cancels that task (02 §5 item 7).
 `client: any ServerClientProtocol`, `server: ServerInfo?`, `user: SessionUser?` (id, username, role, defaultPlaylist,
 skin, email, thumb), `persona: Persona?`, `themes: [Theme]`, `look: Look`, `delivery: PushDelivery`, and performs
 launch (read `server.current`, load caches from 02 §4.3, verify the stored URL set, `GET /api/v1/auth/session`, `GET
-/persona`, `GET /themes`), sign-out (02 §2.16) and the `.signInRequired` policy of 02 §6.2. `@MainActor @Observable
+/persona`, `GET /themes`), sign-out (02 §2.16) and the `.signInRequired` policy of 02 §6.2. Its `Notifier` is
+`PendingNotifier` (Phase 5, answers `.notAsked` and does nothing) until Phase 6 replaces it with
+`UserNotificationsNotifier`. `@MainActor @Observable
 final class Router` holds `selectedTab`, a `NavigationPath` per tab, a `presentedSheet`, and `open(_ destination:
-Destination)`; it also receives the `plex-auth-done` callback and universal links (`/join`) from `onOpenURL`.
+Destination)`. The `plex-auth-done` callback arrives in the `ASWebAuthenticationSession` completion handler owned by
+the Welcome store (which then issues `SignInEvent.tick` to poll at once); `onOpenURL` on the root view receives only
+universal links (`/join`, handed to Pairing as `source: .invite`) and a `plex-auth-done` URL opened from outside the
+session, which is treated the same way as the completion handler. `URLSessionTransport`'s `URLSession` is configured
+with the shared 50 MB `URLCache` of 02 §4.3, so artwork responses are cached by URL under the bearer-carrying request.
 
 ### 3.7 Navigation shape
 
@@ -453,8 +515,11 @@ only the deviations. `UserDefaults` keys named below that 02 §4.2 does not list
 `home.<id>.nudgedOn`, `home.<id>.shut.<card>`, `help.tourSeen`, `requests.filter`, `discover.filters`,
 `console.firstOpenAt`) are this document's additions to that table, declared in the same `DefaultsKeys.swift`, none
 secret. Copy in quotation marks is the base en-GB string; server-provided strings are shown verbatim and are never
-localised. Every artwork path renders through `client.artworkURL(path:width:height:)` (03 §4.15) with `AsyncImage`
-over the shared `URLCache`; TMDb `poster` values are absolute and load directly.
+localised. Every artwork path renders through `ArtworkImage(path:width:height:)` in `Shared/`, a view whose loader
+fetches `client.artworkURL(path:width:height:)` (03 §4.15) through `Transport` with the bearer header (`GET
+/wanted/thumb` is household tier, 03 §1.3; `URLSessionTransport`'s `URLSession` carries the shared 50 MB `URLCache`,
+§3.6, so responses are cached by URL); `AsyncImage` is used only for absolute TMDb `poster` URLs and the plex.tv
+avatar. A session token never appears in a query string (§10.2 lint).
 
 ### 4.1 Household screens
 
@@ -472,14 +537,22 @@ empty state; offline keeps "Try the demo" enabled and disables the other two doo
 **Pairing** (`App/Pairing/`). Purpose: find the server when the probe found nothing or the person tapped "I have an
 invite": a QR scanner (VisionKit `DataScannerViewController`, `.barcode(symbologies: [.qr])`), "Paste the link", "Type
 an address", and the confirmation card ("Connect to <server_name> at <address>?" with `app_name`) for a server not
-reached through an invite (ADR §4 "LAN probe and trust"). Calls: `GET /api/v1/server` via `Prober.verify` and
-`Prober.probeLocal`. State: reads the plex.tv resources held by the Welcome store; writes `server.<id>.urls.local`,
-`.urls.remote`, `.invited`, `.confirmed`, `.name`, `.homeNetwork` (default on for owners and when the first probe
-succeeded, off otherwise). Errors: `.wrongServer` drops the URL and says "That address answers for a different
-server"; an invite with a wrong `v` says "That invite is from a newer version"; a typed `http://` address to a public
+reached through an invite (ADR §4 "LAN probe and trust") and for a tapped invite link, which shows "Someone sent you
+a link to <server_name> at <address>. Connect?" (§2.5: only a QR scanned in the app skips the card). The scanner
+needs `NSCameraUsageDescription` (§1); `DataScannerViewController.isSupported` is false on the simulator, so the
+scanner door shows "Paste the link" there and the UI tests never open it. Calls: `GET /api/v1/server` via
+`Prober.verify` and `Prober.probeLocal`. State: reads the plex.tv resources held by the Welcome store; writes
+`server.<id>.urls.local`, `.urls.remote`, `.invited`, `.confirmed`, `.name`, `.homeNetwork` (default on for owners
+and when the first probe succeeded, off otherwise). Errors: `.wrongServer` drops the URL and says "That address
+answers for a different server"; an invite with a wrong `v` says "That invite is from a newer version"; an invite
+whose `m` is not in the signed-in account's resources (`Invite.refusal` → `.notVisible`, §2.6) is refused before any
+request with "That invite is for a server your Plex account cannot see"; an invite for an `m` already stored
+(`.alreadyPaired`) is refused with "You are already connected to this server"; a typed `http://` address to a public
 host is refused before any request with "Use https:// for an address outside your home". States: loading shows
 "Looking for your server at home…" for at most 1.5 s per address; empty (nothing found) and offline both show the
-three doors with the copy from 02 §6.4.
+three doors with the copy from 02 §6.4; when the probe ran and every address failed, the empty state adds the line
+"If you said no to Local Network access, turn it on in Settings > Privacy & Security > Local Network" with a button
+that opens `UIApplication.openSettingsURLString` (Pairing joins the `openURL` allow-list of 09 §11).
 
 **Home** (`App/Home/`). Purpose: the signed-in front page: search field ("A film, a series, or the mood you're in"),
 the persona line "Hi, I'm <name> — <greeting>" with the `greeting` face, the doors "Build a playlist", "My playlists",
@@ -629,8 +702,9 @@ share link and a QR (`CIFilter.qrCodeGenerator()`; unverified: from memory, Core
 state (delivery, expiry) with "Unlink and delete my relay data", the remote-reach guide (the copy from
 06-install-and-setup.md pointing at the setup page), and `min_app_version`. Calls: `GET /api/v1/owner/status`, `GET
 /api/v1/server`, `DELETE /api/v1/owner/relay` (03 §3.14, §3.1, §3.13); relay `DELETE /v1/server-keys/<id>` and `DELETE
-/v1/devices/<handle>` (05-push-relay.md). State: reads Keychain `relay.server-key-id.<id>`, `relay.handle`; the delete
-clears them. Errors: 02 §6.4 Console/Server rows. States: empty `urls.remote` shows "No outside address yet" with the
+/v1/devices/<handle>` (05-push-relay.md). "Unlink and delete my relay data" is enabled whenever `serverKeyJWS()` is
+non-nil, including after a lapse or refund (§3.3), because 05 §4.4 needs that JWS. State: reads Keychain
+`relay.server-key-id.<id>`, `relay.handle`; the delete clears them. Errors: 02 §6.4 Console/Server rows. States: empty `urls.remote` shows "No outside address yet" with the
 guide; offline keeps the pairing card and invite from cache.
 
 **Sessions** (`Console/Sessions/`). Purpose: every session row with `username`, device name, platform, created, last
@@ -760,6 +834,7 @@ callbacks hop to `MainActor`; `Store` listens once. Additionally:
 | `os.Logger` not `print` | CI grep for `print(` |
 | No `URLSession` outside `URLSessionTransport` | CI grep |
 | No `URLRequest(` outside `Endpoints.swift` | CI grep |
+| No token in a query string (§4 artwork) | `grep -rn "token=" App PlexGetKit` must be empty |
 | XcodeGen only; `.xcodeproj` gitignored | `.gitignore`; CI regenerates |
 | Swift 6 strict, iOS 17 | `project.yml`, `Package.swift` |
 | Every string localised (§9) | Review; the UI tests' banned-word walk also fails on an untranslated key name |
@@ -798,20 +873,32 @@ touches the network, the Keychain, StoreKit or notifications.
 | `testConsoleRequestsTriage` | Requests shows fixture rows; swiping Acquired moves a row to the acquired filter |
 | `testConsoleInboxMarksRead` | Inbox shows the fixture message; Mark read clears the unread badge |
 | `testMemberRoleHidesConsole` | With `--demo-role shared`: no Console tab; no "Make someone a playlist" door; no "for whom" picker |
-| `testDynamicTypeAccessibility3` | With `-UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityL`: Home, Results and WantedList render without a truncated headline (`label.isHittable` for each heading identifier) |
+| `testDynamicTypeAccessibility3` | With `-UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXL` (`.accessibility3` is `accessibilityExtraLarge`): Home, Results and WantedList render without a truncated headline (`label.isHittable` for each heading identifier) |
 | `testNoBannedWordsInAccessibilityTree` | Walks every screen above and asserts no label contains a word from §10.3 |
-| `testLocalNetworkUsageDescriptionPresent` | `Bundle.main.infoDictionary` carries `NSLocalNetworkUsageDescription` and `BGTaskSchedulerPermittedIdentifiers` contains `AppIdentity.refreshTaskIdentifier` (Phase 4 gate, ADR §6 item 6) |
 
-Phase 4 runs the first seven plus the last three; Phase 5 adds the household rest; Phase 7 adds the Console tests. The
-human device steps per phase (a real Plex sign-in, a sandbox push, a forced `BGAppRefreshTask`, a sandbox purchase)
-are in 07-build-phases.md and are not UI tests (ADR §6 item 9).
+`InfoPlistTests.testLocalNetworkUsageDescriptionPresent` is an `AppTests` unit test (hosted by the App target, so
+`Bundle.main` is the app; in `AppUITests` it would read the test runner's Info.plist), not a UI test: it asserts
+`Bundle.main.infoDictionary` carries `NSLocalNetworkUsageDescription`, `NSCameraUsageDescription` and a
+`BGTaskSchedulerPermittedIdentifiers` entry equal to `AppIdentity.refreshTaskIdentifier` (Phase 4 gate, ADR §6 item
+6).
+
+Phase 4 runs `testWelcomeShowsThreeDoors`, `testHomeGreetingAndReels`, `testSearchTitleRendersFilmCards`,
+`testSearchCheekyShowsBrushOff`, `testSearchTitleMissingShowsGuesses`, `testSelectionBarAddsToPlaylist`,
+`testMemberRoleHidesConsole`, `testDynamicTypeAccessibility3` (Home and Results only in that phase),
+`testNoBannedWordsInAccessibilityTree` and the `AppTests` case above; Phase 5 adds `testDetailSheet` (Detail is a
+Phase 5 screen, 07 §5), `testPlaylistsListAndItems`, `testWantedListSections`, `testBellShowsNotes`,
+`testLooksPickerSwitchesPalette`, `testReportSendsToOwner`, `testSettingsSessionsAndHomeNetwork` and extends the two
+walks to the new screens; Phase 7 adds `testConsoleOpenInDemo`, `testConsoleRequestsTriage` and
+`testConsoleInboxMarksRead`. The human device steps per phase (a real Plex sign-in, a sandbox push, a forced
+`BGAppRefreshTask`, a sandbox purchase) are in 07-build-phases.md and are not UI tests (ADR §6 item 9).
 
 ## 12. GAP index for this document
 
 1. GAP: `--demo-role shared` and `DemoServerClient(role:)` are this document's additions for the member-role UI test;
    no server or fixture change; the Phase 3 prompt names them so the builder invents no second mechanism.
-2. GAP: 03-server-api.md §6.4 has no `api.v1.push.devices.delete.json`, `api.v1.auth.session.delete.json` or
-   `api.v1.auth.sessions.delete.json` (all `204`, body `null`); Phase 1 adds them so the catalogue covers every route.
+2. Closed: 03-server-api.md §6.4 now lists `api.v1.push.devices.delete.json`, `api.v1.auth.session.delete.json` and
+   `api.v1.auth.sessions.delete.json` (all `204`, body `null`) among its 77 rows; Phase 1 records the two session
+   files and Phase 2 the device file.
 3. GAP: `GET /reports/gaps` has a fixture and a Kit type (`GapReport`) in 03 §6.4 but no Console screen in the ADR's
    list consumes it; the Kit decodes it for the contract test and no screen calls it in v1.
 

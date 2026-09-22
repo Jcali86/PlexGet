@@ -111,7 +111,9 @@ means this repository; "Relay" means `push-relay`. Every server call carries `Ac
 6. `Pairing` finds the server (§2.3 or §2.4); the app reads `GET <server>/api/v1/server`, pins
    `plex_machine_id`, and checks `setup`, `native_signin` and `min_app_version` first (§6.3).
 7. `PlexTV` mints a second, fresh pin and links it to the account with `PUT https://plex.tv/api/v2/pins/link`
-   (`code`, `X-Plex-Token`; verified: `plexapi/myplex.py:122, 1144-1155`). Gate (10-decision-record.md
+   (body `code=<pin code>` form-encoded with `Content-Type: application/x-www-form-urlencoded`, headers
+   `X-Plex-Token: <account token>`, `X-Plex-Product: Plex SSO` and the per-install `X-Plex-Client-Identifier`;
+   verified: `plexapi/myplex.py:122, 1144-1155` sends exactly this). Gate (10-decision-record.md
    §6.1): whether a strong pin links, and whether a linked pin's token is readable more than once, is
    confirmed by a human step in Phase 1 before this step is relied on.
 8. `SignIn` enters `exchanging`; app posts `POST /api/v1/auth/plex` with
@@ -120,8 +122,12 @@ means this repository; "Relay" means `push-relay`. Every server call carries `Ac
 9. Server applies the exchange limiter: 12 per `device.id` per 10 minutes, 40 overall per 10 minutes, 6 per
    Plex account per hour once identity is known; `pin_allowed()`'s caller-address rule (`api/routes.py:980-1002`)
    is not applied here (10-decision-record.md §5 item 5).
-10. Server refuses a pin older than `PIN_LIFE` by creation age, as `pin_known()` does (`api/plex_auth.py:114-122`,
-    auth-and-tiers.md §1.3), then reads it as `check_pin()` does (`:140-145`) but with the app's `client_id`.
+10. Server reads the pin with `read_pin(pin_id, client_id)`: `GET https://plex.tv/api/v2/pins/<id>` with
+    `X-Plex-Client-Identifier: <client_id>` and the server's usual headers (`api/plex_auth.py:32-39`, as
+    `check_pin()` does at `:140-145`). It answers `401 pin_invalid` when plex.tv answers non-2xx or the pin's
+    `expiresIn` is not positive, and `409 pin_not_linked` when `authToken` is absent (03-server-api.md §3.2).
+    `pin_known()` and the `auth_pins` table are not consulted; they hold only pins the web flow minted
+    (`remember_pins()` is called from `/auth/start` alone, `api/routes.py:1074`).
 11. Server runs the unchanged chain: `plex_identity` (`api/plex_auth.py:148-159`) → `401 plex_token_invalid`;
     `authorise` against `allowed_users()` (`:162-200`, `:237-245`) → `403 not_shared`; `server_access_token`
     (`:203-234`) → `403 invite_pending` when `None`.
@@ -135,7 +141,9 @@ means this repository; "Relay" means `push-relay`. Every server call carries `Ac
 
 GAP: `POST /api/v1/auth/plex` needs error codes for a pin past `PIN_LIFE` and for a pin with no `authToken`
 yet; neither is in design-A's list (`bad_request`, `plex_token_invalid`, `not_shared`, `invite_pending`,
-`plex_tv_unreachable`). 03-server-api.md names them (`pin_expired`, `pin_unclaimed`, both `401`); Phase 1 tests them.
+`plex_tv_unreachable`). 03-server-api.md §3.2 names them: `401 pin_invalid` (plex.tv answered non-2xx for the
+pin, or the pin has expired) and `409 pin_not_linked` (the pin exists but carries no `authToken` yet); Phase 1
+tests both.
 
 ### 2.2 Owner sign-in
 
@@ -162,9 +170,13 @@ yet; neither is in design-A's list (`bad_request`, `plex_token_invalid`, `not_sh
    trust (10-decision-record.md §5 item 4). HTTPS entries in the answer's `urls.remote` rank above plain HTTP.
 5. Before the first exchange with a server not reached through an invite, the app shows `server_name`,
    `app_name` and the address and asks for confirmation; only then does §2.1 step 8 run.
-6. On later launches the app probes local URLs first (1.5 s) and falls back to remote URLs; a URL that stops
-   answering with the pinned machine id is dropped, never trusted; `urls` from every successful
-   `GET /api/v1/server` replaces the stored sets, so an owner who changes tunnel re-invites nobody.
+6. On later launches the app tries the stored local URLs (1.5 s each) then the stored remote URLs with no
+   probe. The plex.tv probe runs only when the Home-network toggle is on and no stored URL answered. A probed
+   address that is not already in `server.<id>.urls.local` is a candidate only: the confirmation card of step 5
+   is shown again before any request carrying the bearer, and the address joins the stored set only on
+   confirmation. `urls` from a `GET /api/v1/server` answer replaces the stored sets only when that answer was
+   received over a URL already in the stored set (so an owner who changes tunnel re-invites nobody); a URL that
+   stops answering with the pinned machine id is dropped, never trusted.
 
 ### 2.4 Invite and QR pairing
 
@@ -174,8 +186,15 @@ yet; neither is in design-A's list (`bad_request`, `plex_token_invalid`, `not_sh
 2. Member taps the link (universal link via Associated Domains and the relay's AASA file) or scans the QR
    from Welcome's "I have an invite" (VisionKit `DataScannerViewController`, no dependency). Without the app
    installed, `GET /join` sends the person to the App Store.
-3. `Pairing` parses the fragment, rejects `v` other than 1, records `m`, `l`, `r`, `n` as the pinned id, the
-   local set, the remote set and the display name, and marks the server as invited (no confirmation step).
+3. `Pairing` parses the fragment, rejects `v` other than 1, refuses an invite whose `m` is not among the
+   `clientIdentifier`s of the signed-in account's `GET /api/v2/resources` once §2.1 step 5 has run ("That
+   invite is for a server your Plex account cannot see yet; accept the Plex share first"), and refuses an
+   invite whose `m` is already stored with `confirmed` or `invited` set ("You are already connected to this
+   server"; changing addresses is Settings' "Type an address", which confirms). Otherwise it records `m`, `l`,
+   `r`, `n` as the pinned id, the local set, the remote set and the display name. A QR scanned in person marks
+   the server invited (no confirmation step); a tapped universal link shows the confirmation card of §2.3
+   step 5 with the wording "Someone sent you a link to <server_name> at <address>. Connect?" before any
+   exchange.
 4. App requests `GET /api/v1/server` on the best-ranked URL and requires `plex_machine_id == m`; a mismatch
    drops that URL and tries the next. Then §2.1 from step 1, with step 6 already satisfied.
 
@@ -290,7 +309,8 @@ ADR says `wanted.tmdb_id` is "set from did-you-mean and discover guesses" but no
    receiving when the owner subscribes later. APNs token changes repeat steps 2-3.
 5. A server event occurs (§2.7 to §2.11); `send_event()`/`broadcast()` writes the `events` row, delivers
    web push as today, then for each `native_devices` row of the recipient calls `relay.send(handle, event,
-   title, body, ref)`.
+   title, body, collapse_id, ref, srv, actor)` (05-push-relay.md §8; `actor` is the `plex_user_id` that caused
+   the event, budgeted at 60 relay sends an hour, 09-security.md §2.2).
 6. `api/relay.py` posts `POST /v1/push` with `Authorization: Bearer <server_key>` and
    `{handle, event, title, body, collapse_id, data: {ref, srv}}`; `collapse_id` reuses the per-row `tag`
    (`arrived-<id>`, `request-<id>`, `message-<id>`, `note-<id>`, push-and-notifications.md §2.3).
@@ -304,7 +324,8 @@ ADR says `wanted.tmdb_id` is "set from did-you-mean and discover guesses" but no
 9. Server: `unregistered` → delete the `native_devices` row; `expired` → mark `data/relay.json` inactive →
    `push.delivery: "polling"`; `rate_limited` → log and continue.
 10. `PushBridge` receives the notification; on tap it routes `wanted:<id>` → WantedList (owner: Requests),
-    `message:<id>` → Inbox, `note:<id>` → Bell; `Changes` records `(srv, ev, ref)` for de-duplication.
+    `message:<id>` → Inbox, `note:<id>` → Bell; `Changes` records `(srv, ev, ref)` for de-duplication. A push
+    whose `srv` differs from `server.current` is shown as received but is not routed and is not recorded.
 
 ### 2.13 Polling fallback via `/api/v1/changes`
 
@@ -335,8 +356,12 @@ ADR says `wanted.tmdb_id` is "set from did-you-mean and discover guesses" but no
 4. App posts `POST /api/v1/owner/relay {"server_key", "relay_url", "expires_at"}`; the server writes
    `data/relay.json` (0600) and answers `{"delivery": "relay"}`; `GET /api/v1/server` now reports
    `push.delivery: "relay"` and every registered handle starts receiving on the next event.
-5. `Transaction.updates` keeps listening for the app's lifetime; each renewal re-posts the JWS (the second
-   entitlement path) and re-posts the key to the server.
+5. `Transaction.updates` keeps listening for the app's lifetime; each renewal re-posts the JWS without
+   `rotate` (the second entitlement path: it extends `expires_at` and issues no key, 05-push-relay.md §4.3).
+   A new key (`rotate: true`) is requested only when `GET /api/v1/server` reports `polling` after the server
+   marked the key dead, when no `relay.server-key-id.<machine_id>` exists, or after "Delete my relay data";
+   the returned key is held in the Keychain as `relay.server-key.pending.<machine_id>` until
+   `POST /api/v1/owner/relay` answers `200`, retried on every launch and foreground.
 6. Independently, Apple posts App Store Server Notifications V2 to `POST /v1/apple/notifications`; the relay
    verifies with Apple's App Store Server Library and updates `server_keys.expires_at` (renewal, expiry,
    refund, grace). Gate (10-decision-record.md §6.4): the library's package name and field names are read
@@ -364,9 +389,10 @@ GAP: the ADR's `POST /v1/server-keys` response `{server_key, expires_at}` carrie
 1. Settings → "Sign out": the app calls `DELETE /api/v1/push/devices/<device_id>` then
    `DELETE /api/v1/auth/session`; the server sets `sessions.revoked_at` on the bearer's row and answers `204`.
 2. The app wipes that server's Keychain items (§4.1), caches (§4.3) and `UserDefaults` block. It keeps the
-   plex.tv account token, the client identifier, the device id and the relay handle only when the person
-   chose "keep me signed in to Plex"; otherwise it wipes those too and calls `DELETE /v1/devices/<handle>`
-   with the device secret.
+   plex.tv account token, the client identifier and the device id only when the person chose "keep me signed
+   in to Plex"; otherwise it wipes those too. The relay registration is always ended: the app calls
+   `DELETE /v1/devices/<handle>` with the device secret, clears `relay.handle` and `relay.device-secret`, and
+   registers afresh (new handle) after the next sign-in, so a server the person left holds a dead handle.
 3. Settings → Sessions lists `GET /api/v1/auth/sessions` (own rows; the owner sees every row with `username`),
    each with `device_name`, `platform`, `created_at`, `last_seen`, `current`; revoking another device calls
    `DELETE /api/v1/auth/sessions/<id>`; "sign out everywhere" calls `DELETE /api/v1/auth/sessions`.
@@ -398,13 +424,15 @@ All on the server unless marked relay. Types are SQLite's; `TIMESTAMP` values ar
 |---|---|---|
 | `device_id` | `TEXT UNIQUE` | The app's per-install UUID; `NULL` for web rows; upsert key for the exchange |
 | `device_name` | `TEXT` | e.g. "Jules's iPhone"; shown in Sessions |
-| `platform` | `TEXT` | `"iOS 18.6"` or `"web"` |
+| `platform` | `TEXT` | the `device.os` string, e.g. `"iOS 18.6"`; `NULL` for `web` rows (03-server-api.md §3.5) |
 | `app_version` | `TEXT` | `"1.0 (42)"` |
 | `kind` | `TEXT NOT NULL DEFAULT 'web'` | `web` (fixed 90 days from `created_at`) or `ios` (valid while `last_seen` is within 180 days) |
 | `revoked_at` | `TIMESTAMP` | Set by the `DELETE /api/v1/auth/session[s]` routes; a set value fails lookup with `session_revoked` |
+| `token_hashed` | `INTEGER NOT NULL DEFAULT 0` | `1` for rows written after Phase 1, whose `token` is `sha256(token)`; `0` for legacy raw rows |
 
-`token` now holds `sha256(token)` for new rows; `session_user()` looks up the hash first and the raw value
-second for older rows. The purge in `start_session()` (`api/plex_auth.py:329-332`) applies each kind's rule.
+`token` now holds `sha256(token)` for new rows; `session_user()` looks up `sha256(presented)` among rows with
+`token_hashed = 1`, then the raw value among rows with `token_hashed = 0` only, so a stored digest never
+authenticates as a bearer (09-security.md §3). The purge in `start_session()` (`api/plex_auth.py:329-332`) applies each kind's rule.
 
 ### 3.2 `native_devices` (new)
 
@@ -451,7 +479,7 @@ Written inside `send_event()` and `broadcast()` before any delivery; rows older 
 |---|---|---|
 | `data/relay.json` | `PLEXGET_DATA`, mode 0600 | `{"server_key", "relay_url", "expires_at", "active": bool}` |
 | `data/client_id` | `PLEXGET_DATA` | The per-install `X-Plex-Client-Identifier`; the old `uuid5` is kept where `data/` already exists (gate, 10-decision-record.md §6.3) |
-| `config.yaml` keys | `app.urls: {local: [], remote: []}`, `app.loopback_owner`, `app.settle_every_minutes`, `plex.webhook_key`, `notifications.announcement: {enabled, title, body}` | Read by `config.py`; environment `PLEXGET_CONFIG`, `PLEXGET_DATA`, `PLEXGET_LOOPBACK_OWNER`, `PLEXGET_SETTLE_MINUTES` override |
+| `config.yaml` keys | `app.urls: {local: [], remote: []}`, `app.loopback_owner`, `app.settle_every_minutes`, `app.native_signin` (default `true`), `app.min_app_version` (default `"1.0.0"`), `plex.webhook_key`, `notifications.announcement: {enabled, title, body}` | Read by `config.py`; environment `PLEXGET_CONFIG`, `PLEXGET_DATA`, `PLEXGET_LOOPBACK_OWNER`, `PLEXGET_SETTLE_MINUTES` override |
 | `tests/fixtures/api/*.json` | this repository | One file per `/api/v1` and household route response, written by pytest, vendored by the iOS repository |
 
 ### 3.6 Relay tables (`push-relay`, SQLite)
@@ -476,10 +504,11 @@ Service `AppIdentity.keychainService` (the bundle identifier); every item
 | `plex.client-identifier` | install | UUID sent as `X-Plex-Client-Identifier` | first launch | never (a new one would change the plex.tv device) |
 | `plex.account-token` | install | plex.tv account token | §2.1 step 5 | sign-out without "keep me signed in to Plex"; plex.tv `401` |
 | `device.id` | install | UUID sent as `device.id` | first launch | never |
-| `relay.handle` | install | relay handle | §2.12 step 2 | device delete |
-| `relay.device-secret` | install | relay device secret | §2.12 step 2 | device delete |
+| `relay.handle` | install | relay handle | §2.12 step 2 | sign-out (§2.16 step 2); device delete |
+| `relay.device-secret` | install | relay device secret | §2.12 step 2 | sign-out (§2.16 step 2); device delete |
 | `session.<machine_id>` | server | bearer session token | §2.1 step 13 | sign-out; `401` |
 | `relay.server-key-id.<machine_id>` | server, owner | the `id` from `POST /v1/server-keys` | §2.14 step 3 | "delete my relay data" |
+| `relay.server-key.pending.<machine_id>` | server, owner | an issued server key not yet acknowledged by the server | §2.14 step 5 | on `200` from `POST /api/v1/owner/relay` |
 
 Nothing else is a secret. The Kit reads and writes these only through `SecretStore`; `Demo` never touches them.
 
@@ -491,7 +520,7 @@ Nothing else is a secret. The Kit reads and writes these only through `SecretSto
 | `server.<machine_id>.name` | String | `server_name` for the confirmation and Settings |
 | `server.<machine_id>.urls.local` | [String] | Ranked local candidates (§2.3) |
 | `server.<machine_id>.urls.remote` | [String] | Ranked remote candidates |
-| `server.<machine_id>.invited` | Bool | Reached through an invite, so no confirmation step |
+| `server.<machine_id>.invited` | Bool | Reached through a scanned QR, so no confirmation step; a tapped link still confirms (§2.4 step 3) |
 | `server.<machine_id>.confirmed` | Bool | The confirmation in §2.3 step 5 was given |
 | `server.<machine_id>.homeNetwork` | Bool | The Home-network toggle; default per 10-decision-record.md §4 |
 | `server.<machine_id>.delivery` | String | Last `push.delivery` seen (`relay`/`polling`) |
@@ -500,7 +529,9 @@ Nothing else is a secret. The Kit reads and writes these only through `SecretSto
 | `bell.<machine_id>.seenNotes` | [Int] | Announcement ids read on this device |
 | `notifications.askedAt` | Date | When the in-context permission prompt was shown |
 | `signIn.lastSilentExchangeAt` | Date | Enforces once per five minutes per device |
-| `look.selected` | String | Slug of the chosen look (built-in or custom) |
+| `look.selected` | String | The `Look.id` of the chosen look (`plex`, `blockbuster`, `netflix`, `bruce`, or `c-<slug>` for a custom look; 04-ios-app.md §2.8) |
+| `server.<machine_id>.email` | String | `user.email` from the §2.1 exchange, shown in Settings; wiped on sign-out (03-server-api.md §3.3) |
+| `server.<machine_id>.thumb` | String | `user.thumb` from the exchange, the avatar URL shown in Settings; wiped on sign-out |
 | `demo.active` | Bool | Demo mode survives relaunch until "Leave the demo" |
 
 Every key is declared once in `App/Settings/DefaultsKeys.swift`. `UserDefaults` is a required-reason API;
@@ -520,7 +551,8 @@ Every key is declared once in `App/Settings/DefaultsKeys.swift`. `UserDefaults` 
 Artwork (`/wanted/thumb`, `/themes/art/*`, `/icons/*`, TMDb `poster` URLs) goes through one shared
 `URLCache` (50 MB disk) honouring the server's `Cache-Control` (`max-age=86400` on thumbs, `600` on art).
 Caches hold no secret and no `missing_files`, are deleted on sign-out, and nothing is written under
-`Documents`. The vendored fixtures are bundle resources of the Kit's test target and `Demo`, not caches.
+`Documents`. The vendored fixtures are a bundle resource of the `PlexGetKit` library target (read by `Demo` and
+the tests through its `Bundle.module`, 07-build-phases.md §5 Phase 0), not caches.
 
 ## 5. Concurrency model
 
@@ -530,7 +562,10 @@ Caches hold no secret and no `missing_files`, are deleted on sign-out, and nothi
 2. **`Transport` is the only I/O seam.** `protocol Transport: Sendable { func send(_ request: URLRequest)
    async throws -> (Data, HTTPURLResponse) }`. The app target's implementation wraps one `URLSession`
    (`waitsForConnectivity` false; timeouts 60 s for search routes, 15 s otherwise, 1.5 s for probes); tests
-   inject fakes. No `URLSession` exists anywhere else; `PlexTV` takes a `Transport` too.
+   inject fakes. No `URLSession` exists anywhere else; `PlexTV` takes a `Transport` too. The configuration
+   sets `httpShouldSetCookies = false`, `httpCookieAcceptPolicy = .never`, `httpCookieStorage = nil` and
+   `urlCredentialStorage = nil`, so no cookie is ever stored or sent and no credential is ever cached;
+   `AppTests.URLSessionTransportTests.testNoCookiesNoCredentials` asserts the configuration.
 3. **Stores are MainActor.** Each feature folder has one `@MainActor @Observable final class <Feature>Store`.
    Views read stores; stores call the actor; results land on the main thread without `DispatchQueue.main`.
    `DispatchQueue`, `@unchecked Sendable`, `nonisolated(unsafe)` and `Task.detached` are forbidden, except
@@ -573,8 +608,8 @@ Caches hold no secret and no `missing_files`, are deleted on sign-out, and nothi
 | `.conflict(message)` | `409` | Gifting a playlist; the sixth push device |
 | `.plexTVUnreachable(message)` | `502` | Exchange and `/wanted/thumb` |
 | `.serverFault` | `500` from the JSON handler | Never shown raw |
-| `.undecodable(route, underlying)` | `DecodingError` | Gate (10-decision-record.md §6.8): fixed by a server test and a fixture, never by a lenient guess |
-| `.unreachable(URLError)` | transport | Offline, timeout, TLS failure |
+| `.undecodable(route: String, detail: String)` | `DecodingError` | `detail` is `String(describing:)` of the error, so the case is `Equatable` (04-ios-app.md §2.2). Gate (10-decision-record.md §6.8): fixed by a server test and a fixture, never by a lenient guess |
+| `.unreachable(code: URLError.Code, description: String)` | transport | Offline, timeout, TLS failure; the code and `localizedDescription`, not the `URLError` itself |
 | `.wrongServer(expected, got)` | `plex_machine_id` mismatch | From `Pairing`; the URL is dropped |
 
 `PlexTVError` (`.pinExpired`, `.unauthorised`, `.rateLimited(retryAfter)`, `.unreachable`) comes from
@@ -585,7 +620,7 @@ relay calls in `PushBridge` and `Store`.
 
 | Error | Default action |
 |---|---|
-| `.signInRequired` | `session_expired`/`plex_token_dead` and more than five minutes since the last attempt: silent re-exchange (§2.1 steps 7-13), retry once; otherwise, or on `session_revoked`, clear the session item and present Welcome with "Sign in again to carry on" |
+| `.signInRequired` | `session_expired`/`plex_token_dead`, more than five minutes since the last attempt, and the current base URL is `https://`: silent re-exchange (§2.1 steps 7-13), retry once. When the current base URL is plain `http://`, or on `session_revoked`, or otherwise: clear the session item and present Welcome with "Sign in again to carry on"; the person taps Sign in and sees the home-network privacy copy (09-security.md §2.3) |
 | `.ownerOnly` | Leave the Console; show Home with "That part is the owner's" |
 | `.rateLimited` | Inline notice with the server's `message` and, when present, `hint`; disable the control until `retryAfter` or 60 s |
 | `.plexUnavailable` | Inline "Plex is unavailable" with the server's clause; keep cached content visible; Retry |
@@ -646,7 +681,7 @@ relay calls in `PushBridge` and `Store`.
 | Notification catalogue editing | `config.yaml` `notifications.*` | `PUT /api/v1/owner/notifications` is cut; the Console shows `GET /notifications` read-only |
 | The setup page `/setup` | `api/setup.py` | The owner's browser on the server's LAN, once |
 | The loopback owner door | `api/routes.py:1263-1265` | Off in the image; a phone never qualifies |
-| Owner-api.md class C: `/scan/*`, `/analyze*`, `/quality`, `/media`, `/reports/upgrades`, `/reports/posters`, `/fixer/*`, `/posters/*`, `/command`, `/search/tmdb`, `/gaps`, `/reports/gaps` | `api/routes.py:194-547` | Filesystem, ffprobe and Posteria tooling; not a phone's job |
+| Owner-api.md class C: `/scan/*`, `/analyze*`, `/quality`, `/media`, `/reports/upgrades`, `/reports/posters`, `/fixer/*`, `/posters/*`, `/command`, `/search/tmdb`, `/gaps` | `api/routes.py:194-547` | Filesystem, ffprobe and Posteria tooling; not a phone's job. `GET /reports/gaps` is not in this class, but no v1 screen calls it either: the Kit decodes `reports.gaps.tv.json` for the contract test only (03-server-api.md §4.23; 04-ios-app.md §12 GAP 3) |
 | Never called for App Review reasons: `/wanted/export`, `/export`, `/export/download`, `/sonarr/*`, `/radarr/*` | `api/routes.py:524-558, 613-623` | Guideline 5.2.3 (10-decision-record.md §6.10); the CI banned-word grep covers the app's copy |
 | `/plex/webhook` | `api/routes.py:669-695` | Machine-to-machine from Plex, keyed by `plex.webhook_key` |
 | Cookie `Secure` flag and `X-Forwarded-Proto` through Funnel | `api/routes.py:119, 1152` | Gate (10-decision-record.md §6.2) for the web page; the app sends no cookie. Note: `ProxyFix` defaults `x_for=1`, so deployment-and-security.md §4.2 is right and auth-and-tiers.md §0 is not (10-decision-record.md §5 item 24) |

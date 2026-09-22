@@ -51,8 +51,11 @@ its own tests prove it (07-build-phases.md §5 Phase 1).
 3. `api/plex_auth.py`, sessions: in `ensure_table()` add the columns `device_id TEXT UNIQUE`, `device_name TEXT`,
    `platform TEXT`, `app_version TEXT`, `kind TEXT NOT NULL DEFAULT 'web'`, `revoked_at TIMESTAMP` with the
    `PRAGMA table_info` then `ALTER TABLE ADD COLUMN` pattern of `api/plex_auth.py:315-319` (`ALTER TABLE` cannot
-   add `UNIQUE`; create a unique index on `device_id` instead). `start_session()` stores `sha256(token)` hex (64
-   characters) and returns the raw token; `session_user()` looks up the hash first and the raw value second.
+   add `UNIQUE`; create a unique index on `device_id` instead). Add a column `token_hashed INTEGER NOT NULL
+   DEFAULT 0`; `start_session()` stores `sha256(token)` hex (64 characters), sets `token_hashed = 1` and returns
+   the raw token; `session_user()` first looks up `WHERE token = sha256(presented) AND token_hashed = 1`, and
+   only if nothing matches looks up `WHERE token = presented AND token_hashed = 0` (legacy rows). A presented
+   value that equals a stored hash must never authenticate.
    Validity: `web` rows keep 90 days from `created_at` (`SESSION_DAYS`, unchanged); `ios` rows are valid while
    `last_seen` is within 180 days; a row with `revoked_at` set is invalid. Compute expiry in Python from a
    module-level `now()` that tests monkeypatch, not from SQL `datetime('now')`, so the frozen-clock tests can
@@ -62,37 +65,49 @@ its own tests prove it (07-build-phases.md §5 Phase 1).
    second. Add `/api/v1/server` and `/api/v1/auth/plex` to the open set, give the household tier the `/api/v1/`
    prefix, and let `/api/v1/owner/` fall through to the owner tier. The guard's `401` body on `/api/v1` paths and
    on any request carrying a bearer becomes `{"error", "code", "auth_required": true}` with `code` one of
-   `session_revoked`, `session_expired`, `plex_token_dead` (09-security.md §3 GAP; 02 §2.16); add those three
-   codes to 03-server-api.md §1.4 in this pull request. Add the JSON handler of 03 §3.15 for unhandled exceptions
+   `session_revoked`, `session_expired`, `plex_token_dead`, with the `error` strings of 03-server-api.md §1.4a
+   verbatim (09-security.md §3; 02 §2.16). Add the JSON handler of 03 §3.15 for unhandled exceptions
    on `/api/v1` paths and bearer requests (`500 {"error": "something went wrong on the server", "code":
    "internal"}`; the exception logged, never sent). Add an `after_request` hook that removes the key
    `missing_files` at every depth from any JSON response to a session whose role is not `owner` (03 §7 row 1).
+   `current_user()`, `guard()` and `plex_trouble()` are closures inside `create_app()` (`api/routes.py:110`,
+   943, 1156, 1236), so a separate blueprint module cannot call them: `guard()` stores the resolved user dict (or
+   `None`) on `flask.g.user` and the presented bearer on `flask.g.bearer` before returning, and `plex_trouble()`
+   is hoisted to a module-level function in `api/routes.py`.
 5. Create `api/native.py`: `Blueprint("native", __name__, url_prefix="/api/v1")`, registered in `create_app()`.
-   Implement `GET /api/v1/server` (03 §3.1; in this phase `push.delivery` is always `"polling"`, `setup` is
+   `api/native.py` reads the caller from `flask.g.user` and never re-resolves it; the exchange limiter dicts of
+   step 6 live at module level in `api/native.py`. Implement `GET /api/v1/server` (03 §3.1; in this phase `push.delivery` is always `"polling"`, `setup` is
    `false`, `urls` reads `app.urls` with `{"local": [], "remote": []}` as the default, `native_signin` reads
-   `app.native_signin` default `true`, `min_app_version` reads `app.min_app_version` default `"1.0.0"`;
-   `Cache-Control: no-store`), `GET`/`DELETE /api/v1/auth/session` (§3.3-§3.4), `GET /api/v1/auth/sessions`
+   `app.native_signin` default `true`, `min_app_version` reads `app.min_app_version` default `"1.0.0"` (both read with a default in this phase;
+   Phase 2 adds them to `DEFAULTS` and `config.example.yaml`); `Cache-Control: no-store`), `GET`/`DELETE
+   /api/v1/auth/session` (§3.3-§3.4; the delete sets `revoked_at` on the bearer's row, so its next request is
+   `401 session_revoked`), `GET /api/v1/auth/sessions`
    (§3.5; `username` only for the owner; revoked rows omitted), `DELETE /api/v1/auth/sessions/<int:id>` (§3.6;
    `404 not_found` for another person's row unless the caller is the owner), `DELETE /api/v1/auth/sessions`
    (§3.7). Every timestamp in these bodies is ISO 8601 with `Z` (03 §1.6).
-6. `POST /api/v1/auth/plex` (03 §3.2, in that order): validate `device` (`id` required, ≤64); the limiter keyed
-   on `device.id` (12 per 600 s) and overall (40 per 600 s), in-process, without `pin_allowed()`'s caller-address
-   rule; with `pin`, read `GET https://plex.tv/api/v2/pins/<id>` with `X-Plex-Client-Identifier: <client_id>`
+6. `POST /api/v1/auth/plex` (03 §3.2, in that order): validate `device` (`id` required, ≤64) and, with `pin`,
+   that `pin.id` is a positive integer and `pin.client_id` matches `^[A-Za-z0-9-]{8,64}$` (it becomes an outbound
+   header), else `400 bad_request` before plex.tv is contacted; the limiter keyed on `device.id` (12 per 600 s) and
+   overall (40 per 600 s), in-process, without `pin_allowed()`'s caller-address rule; then the replay check: a
+   table `exchanged_pins (pin_id INTEGER PRIMARY KEY, at REAL)` in `api/plex_auth.py`'s `ensure_table()`, purged of
+   rows older than `PIN_LIFE` on insert, refuses a `pin.id` already present with `401 pin_invalid` before plex.tv
+   is contacted, and a successful `start_session()` inserts the pin id (03 §3.2; 09 §5); with `pin`, read `GET https://plex.tv/api/v2/pins/<id>` with `X-Plex-Client-Identifier: <client_id>`
    and the server's usual headers (`api/plex_auth.py:32-39`) through one new function, named `read_pin(pin_id,
    client_id)` here so later phases can monkeypatch it by that name; refuse a pin whose `expiresIn` is not
-   positive with `401 pin_invalid` and one without `authToken` with `409 pin_not_linked`. Note:
-   07-build-phases.md's test list names `pin_expired` and `pin_unclaimed` and 02 §2.1's GAP says 03 defines them;
-   03 §3.2 defines `pin_invalid` and `pin_not_linked` instead, and 03 is the contract, so use 03's codes and cover
-   both cases under them. If the pin JSON carries a creation time (unverified; 10-decision-record.md §5 item 2),
+   positive with `401 pin_invalid` and one without `authToken` with `409 pin_not_linked` (the codes of 03 §3.2;
+   an expired pin and a plex.tv non-2xx are two cases under `pin_invalid`). If the pin JSON carries a creation time (unverified; 10-decision-record.md §5 item 2),
    also refuse a pin older than `PIN_LIFE`. With `plex_token`, accept it only when `app.testing` or
    `request.is_secure` is true, else `400 pin_required`. Then `plex_identity` (`401 plex_token_invalid`), the
    per-account limiter (6 per 3600 s), `authorise` against `allowed_users()` (`403 not_shared`),
    `server_access_token` (`403 invite_pending` on `None`), then `start_session()` with the device columns and
    `kind = "ios"`, upserting on `device_id`. Answer the §3.2 body; every `429` carries `code: "rate_limited"`,
    `rate_limited: true` and `retry_after`.
-7. Extend `tests/conftest.py`: monkeypatch `plex_auth.plex_identity`, `plex_auth.server_access_token`,
-   `plex_auth.allowed_users`, `plex_auth.read_pin` and the Plex search functions the household routes call
-   (`api.routes` import site) with fixed public-domain data; add fixtures `shared_session` and `owner_session`
+7. Extend `tests/conftest.py` with the seam table of 03 §6.2, by import site: monkeypatch `plex_auth.plex_identity`,
+   `plex_auth.server_access_token`, `plex_auth.allowed_users`, `plex_auth.read_pin`; `PlexServer` where each module
+   imports it (`api.user_library`, `api.suggestions`, `api.request_assistant`, `scanner.wanted_search`,
+   `api.plex_auth`) with one `FakePlexServer` in `tests/fake_plex.py` and the module caches reset per test; the
+   `api.tmdb_lookup` functions, `api.ai.provider` and `api.limits` as that table says, all with fixed
+   public-domain data; add fixtures `shared_session` and `owner_session`
    that run the exchange and return the bearer; a `frozen_clock` fixture over the `now()` of step 3.
 8. Write the test files of 07-build-phases.md §5 Phase 1: `tests/test_bearer.py`, `test_server_info.py`,
    `test_auth_plex.py`, `test_sessions.py`, `test_errors.py`, `test_missing_files.py`, `test_cookie_flow.py`,
@@ -100,25 +115,39 @@ its own tests prove it (07-build-phases.md §5 Phase 1).
    `test_bearer.py` and `test_errors.py`, those for `test_exchange.py` into `test_auth_plex.py`, and those for
    `test_strip.py` into `test_missing_files.py`, keeping every test function name verbatim (`test_sessions.py`
    keeps its own). Defer `test_loopback_door_off_by_config`, `test_webhook_key` and `test_push_test_limiter` to
-   Phase 2 and say so in the pull request.
+   Phase 2 and say so in the pull request. Every test that expects `401` or `403` from the guard sends its
+   request with `environ_base={"REMOTE_ADDR": "203.0.113.5"}` so the loopback door (`api/routes.py:1263-1265`,
+   which admits Flask's test client arriving from `127.0.0.1` without `X-Forwarded-For`) does not admit it; add a
+   `client_outside` fixture in `tests/conftest.py` that wraps `app.test_client()` with that `environ_base`. Add
+   `test_hash_is_not_a_valid_bearer` to `tests/test_bearer.py`: presenting the stored 64-hex `sessions.token`
+   value as the bearer is `401`. `test_pin_exchanged_once` (09 §11, in `test_auth_plex.py`): a second exchange
+   naming the same pin id, with any `device.id`, is `401 pin_invalid` and writes no session row.
 9. Record fixtures: every file of 03-server-api.md §6.4 that needs no Phase 2 column, plus the three `204` files
    of 04-ios-app.md §12 GAP 2 (`api.v1.push.devices.delete.json` waits for Phase 2; add
    `api.v1.auth.session.delete.json` and `api.v1.auth.sessions.delete.json` now, body `null`). Leave for Phase 2:
    `api.v1.server.setup.json`, `api.v1.push.*`, `api.v1.changes.*`, `api.v1.owner.*`, `notifications.json`,
-   `wanted.recheck.json`. Record `request.wanted.*`, `wanted.*`, `wanted.search.json` now; Phase 2 re-records
+   `wanted.recheck.json`. Record `request.wanted.*`, `wanted.all.json`, `wanted.status.json`,
+   `wanted.settle.json`, `wanted.search.json` now; Phase 2 re-records
    them when `tmdb_id` lands. Delete `tests/fixtures/api/.gitkeep`. Run `venv/bin/pytest -q` twice and confirm
    `git diff --exit-code -- tests/fixtures/api` is clean after the second run.
-10. Update 03-server-api.md in this pull request for the `401` codes (step 4) and any shape the tests proved
-    differs from the document; a difference the cited code cannot settle is a deviation note.
+10. Update 03-server-api.md in this pull request for any shape the tests proved differs from the document (the
+    `401` codes are already in §1.4a; the tests confirm the strings); a difference the cited code cannot settle is
+    a deviation note.
 11. HUMAN (10-decision-record.md §6 item 1): with a real Plex account and the headers of 03-server-api.md §3.2,
-    mint a strong pin, link it with `PUT https://plex.tv/api/v2/pins/link`, read `GET /api/v2/pins/{id}` twice,
-    and record whether a strong pin links, whether a short pin links, and whether `authToken` is present on the
-    second read. Wait for the result. If only short pins link, change nothing server-side (the server reads
-    whatever pin it is handed) and record that Phase 3 sets `SignInMachine.handoffPinStrength = false`. If a
-    claimed pin cannot be re-read at all, write the deviation note and stop.
+    mint a strong pin, link it with `PUT https://plex.tv/api/v2/pins/link`, read `GET /api/v2/pins/{id}` twice:
+    once with the app's headers, once with only `Accept: application/json`, `X-Plex-Product: Plex-Ops` and the
+    app's `X-Plex-Client-Identifier` (the server's exchange headers, `api/plex_auth.py:32-39`, which is how the
+    server re-reads the pin in production); record whether `authToken` is present on each read, whether a strong
+    pin links and whether a short pin links. Wait for the result. If only short pins link, change nothing
+    server-side (the server reads whatever pin it is handed) and record that Phase 3 sets
+    `SignInMachine.handoffPinStrength = false`. If a claimed pin cannot be re-read at all, write the deviation
+    note and stop. Also write the three answers as three lines (`strong_pin_links: yes|no`, `short_pin_links:
+    yes|no`, `authToken_on_second_read: yes|no`) to `docs/build/gates.md` in this repository under a heading
+    `## Gate 1 (Phase 1)` and commit it on the phase branch; Phase 3 reads that file, not the pull request.
 12. HUMAN (10-decision-record.md §6 item 7): with the owner's token, print `account.users()`
     (`api/plex_auth.py:162-200`) for a managed Plex Home user and record whether that user appears with a server
-    entry. Wait for the result and paste it under `## Human steps`.
+    entry. Wait for the result and paste it under `## Human steps`; also write it as one line
+    (`managed_user_has_server_entry: yes|no`) to `docs/build/gates.md` under `## Gate 7 (Phase 1)` and commit it.
 
 ## Gate
 

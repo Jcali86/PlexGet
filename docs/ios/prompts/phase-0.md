@@ -23,9 +23,11 @@ Read each file in full, in this order, before any other tool call. Paths are rel
 1. `docs/ios/00-README.md` §3-§5 (running the builder, the deviation note, the fill-in values)
 2. `docs/ios/10-decision-record.md` §2 (every name), §5 item 16 (simulator destination), §7 (phase list)
 3. `docs/ios/07-build-phases.md` §1, §2, §4 (the three CI workflows, verbatim), §5 "Phase 0, Scaffold"
-4. `docs/ios/04-ios-app.md` §1 (layout, Info.plist keys), §2.1 (the four protocols), §3.1 (`AppIdentity`), §10.2
+4. `docs/ios/04-ios-app.md` §1 (layout, Info.plist keys), §2.1 (the four protocols), §2.2 (the endpoint-path
+   literal list `lint.sh` greps for), §2.9 (the `Bundle.module` gate), §3.1 (`AppIdentity`), §10.2, §10.3
 5. `docs/ios/03-server-api.md` §6.1-§6.2 (the fixture envelope and the `record` writer)
-6. `docs/ios/05-push-relay.md` §2 (relay stack and layout), §12 (test harness)
+6. `docs/ios/05-push-relay.md` §2 (relay stack and layout), §9 (`relay/wsgi.py`), §12 (test harness)
+6a. `docs/ios/08-app-store-and-release.md` §5 (the `scripts/banned-words.sh` listing, copied verbatim)
 7. `docs/ios/ios-CLAUDE.md` and `docs/ios/relay-CLAUDE.md` (copied verbatim as `CLAUDE.md` in this phase)
 8. `config.py` lines 15-30 and 110-130; `api/routes.py` lines 125-135; `CONTRIBUTING.md` (house style)
 
@@ -41,7 +43,8 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
 ## Constraints
 
 - Forbidden in this phase (07-build-phases.md §5 Phase 0): any feature code (no `/api/v1` route, no Kit module
-  beyond the four protocols, no screen); any dependency in `Package.swift` or `project.yml`; hand-editing or
+  beyond the four protocols, no screen); any package-level `.package(` dependency in `Package.swift` (the test
+  target's `dependencies: ["PlexGetKit"]` is not one) or a second `packages` entry in `project.yml`; hand-editing or
   committing a `.pbxproj`; any change to `config.py` beyond the one line, or under `api/`; `print(`; a string
   outside `Localizable.xcstrings`.
 - `project.yml` is the only project description; `.xcodeproj` is generated and gitignored (ios-CLAUDE.md §1).
@@ -55,7 +58,7 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
 
 1. In this repository: `git checkout -b phase-0-scaffold main`. Confirm `config.yaml` is absent from the
    checkout; if present, do not delete it, note it, and make sure no test reads it.
-2. Edit `config.py` line 22 to `CONFIG_PATH = Path(os.environ.get("PLEXGET_CONFIG") or ROOT / "config.yaml")`,
+2. Edit `config.py` line 21 (`CONFIG_PATH = ROOT / "config.yaml"`) to `CONFIG_PATH = Path(os.environ.get("PLEXGET_CONFIG") or ROOT / "config.yaml")`,
    adding `import os` beside `import sys`. Nothing else in the file changes.
 3. Create `requirements-dev.txt` containing the current `pytest==8.<x>` pin (record the exact version you
    install) and `pytest.ini` with `[pytest]`, `testpaths = tests`, `addopts = -p no:cacheprovider`.
@@ -77,14 +80,27 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
    cite `docs/plan/<file>` when read from that repository). Create `.gitignore` with `*.xcodeproj`, `build/`,
    `DerivedData/`, `.build/`.
 7. Create `PlexGetKit/Package.swift`: `swift-tools-version: 6.0`, `swiftLanguageModes: [.v6]`, `platforms:
-   [.iOS(.v17)]`, targets `PlexGetKit` and `PlexGetKitTests` with `resources: [.copy("../Fixtures")]`, no
-   `dependencies`. If SwiftPM refuses a resource path outside the target directory (unverified), set the test
-   target's `path` to `Tests` with `sources: ["PlexGetKitTests"]`, `resources: [.copy("Fixtures")]`, and say so
-   under `## Changed`. Create
+   [.iOS(.v17)]`; no package-level `.package(` dependency. The vendored fixtures live at
+   `PlexGetKit/Tests/Fixtures/` (10-decision-record.md §2 fixes that path) and must be a resource of the
+   `PlexGetKit` library target, not of the test target, so that `Bundle.module` exists in the library, where
+   Phase 3's `Demo/` reads them, and the tests read the same files through the library's bundle. Layout, as
+   07-build-phases.md §5 Phase 0 gives it (unverified: SwiftPM is believed to refuse a resource path outside the
+   target directory, which is why the target's `path` is the package root): library target `PlexGetKit` with
+   `path: "."`, `sources: ["Sources/PlexGetKit"]`, `exclude: ["Tests/PlexGetKitTests"]`,
+   `resources: [.copy("Tests/Fixtures")]`; test target `PlexGetKitTests` with `path: "Tests/PlexGetKitTests"`,
+   `dependencies: ["PlexGetKit"]` and no resources. `.copy` keeps the directory, so the files sit under
+   `Fixtures/` inside the bundle and are read with `subdirectory: "Fixtures"`. If `swift build` refuses this
+   layout, try `exclude` without `sources` or the reverse and record under `## Changed` the layout it accepted; if
+   no layout gives the library target a `Bundle.module` holding `Fixtures/VERSION`, write the deviation note and
+   stop, and never keep a second copy of the fixtures or read them from the file system. Create
    `PlexGetKit/Sources/PlexGetKit/Protocols/` with `Transport.swift`, `SecretStore.swift`, `Entitlements.swift`,
    `Notifier.swift` holding exactly the declarations of 04-ios-app.md §2.1 with doc comments and
-   `FoundationNetworking` behind `#if canImport(FoundationNetworking)`; `Tests/PlexGetKitTests/SmokeTests.swift`
-   with one passing swift-testing test; and `Tests/Fixtures/VERSION` containing the single line `unset`.
+   `FoundationNetworking` behind `#if canImport(FoundationNetworking)`; `Notifier.swift` also declares
+   `NotificationAuthorisation` (04 §2.1) and `LocalNotification` plus `Destination` (04 §2.7, verbatim) so the
+   package compiles, and Phase 3 moves none of them; `Tests/PlexGetKitTests/SmokeTests.swift` with one passing
+   swift-testing test that, with `@testable import PlexGetKit`, asserts
+   `Bundle.module.url(forResource: "VERSION", withExtension: nil, subdirectory: "Fixtures")` is not nil (the
+   Phase 0 gate of 04-ios-app.md §2.9); and `Tests/Fixtures/VERSION` containing the single line `unset`.
 8. Create `project.yml`: targets `App` (iOS application, `deploymentTarget` 17.0), `AppTests` (unit test bundle),
    `AppUITests` (UI test bundle); `packages: PlexGetKit: path: PlexGetKit`; settings `SWIFT_VERSION: 6.0`,
    `SWIFT_STRICT_CONCURRENCY: complete`, `OTHER_SWIFT_FLAGS: -warnings-as-errors`, `PRODUCT_BUNDLE_IDENTIFIER`
@@ -99,21 +115,37 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
    `App/Resources/PrivacyInfo.xcprivacy` (`NSPrivacyTracking: false`, empty arrays elsewhere),
    `AppTests/SmokeTests.swift` and `AppUITests/SmokeUITests.swift` (one passing XCTest each; the UI test launches
    with `--demo --uitest`).
-10. Create `scripts/lint.sh` (the greps of 07-build-phases.md §4.2, exit 1 on any hit), `scripts/banned-words.sh`
-    (case-insensitive grep for the words of 04-ios-app.md §10.3 and the path literals of 03-server-api.md §8 over
-    the given paths, default `App PlexGetKit`), `scripts/sync-fixtures.sh` (copies `<arg>/tests/fixtures/api/*.json`
-    into `PlexGetKit/Tests/Fixtures/` and writes `git -C <arg> rev-parse HEAD` to `VERSION`); `chmod +x` all three.
+10. Create `scripts/lint.sh` (the greps of 07-build-phases.md §4.2, exit 1 on any hit, including the endpoint-path
+    grep: over `PlexGetKit/Sources` and `App/**/*.swift` only, never `App/Resources/` or the fixtures, the exact
+    literal list of 04-ios-app.md §2.2, where a path that is a suffix of a permitted route carries its opening
+    double quote, such as `"/push/test"`, so `"/api/v1/push/test"` is not a hit), `scripts/banned-words.sh`
+    (the listing of 08-app-store-and-release.md §5 verbatim: the words of 04-ios-app.md §10.3 over the given
+    paths, default `App PlexGetKit` plus `store` only when that directory exists, so the default never names a
+    path that is absent before Phase 9; a named path that does not exist is exit `2`), `scripts/sync-fixtures.sh` (copies `<arg>/tests/fixtures/api/*.json`
+    into `PlexGetKit/Tests/Fixtures/` and writes `git -C <arg> rev-parse HEAD` to `VERSION` there);
+    `chmod +x` all three.
 11. Create `.github/workflows/kit.yml` and `app.yml` exactly as 07-build-phases.md §4.2 and §4.3; leave
     `Xcode_16.2.app` as the placeholder until the Mac step records the runner's version, then pin it.
 12. In `../<AppName>-relay`: `git checkout -b phase-0-scaffold`. Copy `docs/ios/relay-CLAUDE.md` to `CLAUDE.md`
-    verbatim and `docs/ios/*.md` to `docs/plan/`. Create `relay/__init__.py` (`create_app(config) -> Flask`),
-    `relay/config.py` (reads the environment; only `RELAY_DB` is required in this phase), `relay/routes.py`
+    verbatim and `docs/ios/*.md` to `docs/plan/`. Create `relay/__init__.py` (`create_app(config) -> Flask` and
+    nothing else), `relay/config.py` (a `Config` dataclass and `Config.from_env()`, which reads the environment;
+    only `RELAY_DB` is required in this phase; tests build a `Config` directly and never call `from_env()`),
+    `relay/wsgi.py` (`app = create_app(Config.from_env())`, the `waitress-serve` target of 05 §9), `relay/routes.py`
     (`GET /v1/health` → `200 {"status": "ok"}`), `tests/conftest.py` (`RELAY_DB=:memory:`, the `socket.socket`
     monkeypatch), `tests/test_health.py`, `pytest.ini`, `requirements.txt` (`Flask` and `waitress` pinned),
     `requirements-dev.txt` (`pytest` 8.x), `.github/workflows/ci.yml` (07 §4.1 with `python-version: "3.12"` and
     only the pytest step), `.gitignore` with `*.p8`, `.env`, `venv/`, `.pytest_cache/`, `*.db`.
     `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt -r requirements-dev.txt`.
-13. Run every Linux gate command below in each repository. Commit in small steps. Push all three branches.
+13. Swift toolchain: run `swift --version`. If it prints nothing or a version below 6.0, either run every Kit
+    command through Docker (present on the remote environment), as `docker run --rm -v
+    "$PWD/PlexGetKit:/src" -w /src swift:6.0-noble sh -c 'swift build -Xswiftc -warnings-as-errors && swift
+    test'` (07-build-phases.md §2; unverified image tag), or install the Swift 6.0 toolchain per 07 §2 (the
+    swift.org Linux tarball for this machine's Ubuntu release; read swift.org/install/linux for the current file
+    name and the apt packages it lists; unverified URL: record the one used), add its `usr/bin` to `PATH` for
+    this session and record the version. Paste the `swift --version` output either way. If neither is possible
+    in this environment, list every `swift` gate line under `## Not run here` and rely on `kit.yml` (07 §4.2) as
+    the Kit gate; do not skip the rest of the phase. Then run every Linux gate command below in each repository.
+    Commit in small steps. Push all three branches.
 14. HUMAN: run the Mac gate commands in `<AppName>-ios` (Xcode 16, `xcodegen`), paste the output into that pull
     request, record the versions, pin the Xcode path in `app.yml`, add the `mac-ci` label. Wait for green.
 
@@ -121,9 +153,10 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
 
 ```
 # this repository, Linux
-python3 --version && venv/bin/pytest --version && swift --version
+python3 --version && venv/bin/pytest --version
 venv/bin/pytest -q                        # pass: "N passed", exit 0
-# <AppName>-ios, Linux
+# <AppName>-ios, Linux (each swift line through the step 13 Docker wrapper when there is no local toolchain)
+swift --version                           # pass: 6.0 or later
 cd PlexGetKit && swift build -Xswiftc -warnings-as-errors && swift test   # pass: "Test run with N tests passed"
 cd .. && scripts/lint.sh && scripts/banned-words.sh                     # pass: no output, exit 0
 # <AppName>-relay, Linux
@@ -153,8 +186,9 @@ gate printed. Then stop and wait for the owner; do not start Phase 1.
 - Do not write any `/api/v1` route, Kit module, screen or relay endpoint other than `GET /v1/health`; a later
   phase owns each of those.
 - Do not commit `config.yaml`, a real Plex token, or the temporary file `conftest.py` writes.
-- Do not add `dependencies` to `Package.swift` or a second `packages` entry in `project.yml`, whatever a build
-  error suggests; a dependency is a deviation note, not a fix.
+- Do not add a package-level `.package(` dependency to `Package.swift` or a second `packages` entry in
+  `project.yml`, whatever a build error suggests; a dependency is a deviation note, not a fix (the test target's
+  local `dependencies: ["PlexGetKit"]` is required, not a dependency in this sense).
 - Do not create or commit an `.xcodeproj`; if `xcodegen generate` fails, fix `project.yml`.
 - Do not change `config.py` beyond the `CONFIG_PATH` line, and do not touch `api/`, `db/` or `scanner/`.
 - Do not put "Plex" in `APP_NAME` or `CFBundleDisplayName`, or a URL or product string outside `AppIdentity`.

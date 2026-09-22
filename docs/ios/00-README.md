@@ -57,11 +57,14 @@ marked `GAP:` in the document that needs it, and the builder adds it server-side
 
 ## 3. How the owner runs the builder
 
-1. **Machine.** Phases 0, 1, 2, 3 and 8 are Linux phases and run anywhere Claude Code runs, including the
-   remote environment. Phases 4, 5, 7 and 9 need a Mac with Xcode 16 because the app target cannot be built on
-   Linux (constraints brief, fact 13). Phase 6 is split: the relay on Linux, `PushBridge` and `Background` on a
-   Mac. Phase 0 is Linux with one Mac step, the simulator build. The machine for each phase is stated in
-   10-decision-record.md §7 and repeated at the top of each prompt.
+1. **Machine.** Phases 1, 2 and 8 run on any Linux machine with Python 3.11 and (for Phase 8) Docker Engine 24
+   with buildx. Phases 0 and 3 additionally need a Swift 6.0 or later toolchain on the Linux machine; the remote
+   Claude Code environment does not ship one, so the Phase 0 prompt installs or wraps it (07-build-phases.md §2;
+   prompts/phase-0.md step 13) and, where installation is impossible, the Kit gate commands go under `## Not run
+   here` and `kit.yml` on the Linux runner is the gate (07 §4.2). Phases 4, 5, 7 and 9 need a Mac with Xcode 16
+   because the app target cannot be built on Linux (constraints brief, fact 13). Phase 6 is split: the relay on
+   Linux, `PushBridge` and `Background` on a Mac. Phase 0 is Linux with one Mac step, the simulator build. The
+   machine for each phase is stated in 10-decision-record.md §7 and repeated at the top of each prompt.
 2. **One phase per session.** Start a fresh Claude Code session in the repository the phase names, paste the
    whole of `prompts/phase-N.md` as the first message, and nothing else. The prompt carries its own context;
    the repository's `CLAUDE.md` carries the standing rules. Phase 0 copies `prompts/` into `<AppName>-ios` as
@@ -90,7 +93,7 @@ is bound by in each repository. Server-side rules are in 03-server-api.md and 07
 | All | Small diffs, one thing each; pytest for every server change | `CONTRIBUTING.md:81`; constraints brief, fact 17 |
 | iOS | No third-party Swift dependencies; Swift 6 strict; iOS 17 minimum; XcodeGen from `project.yml`, never hand-edit `.pbxproj` | constraints brief, facts 11-13 |
 | iOS | Tokens only in the Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`; never in `UserDefaults` or logs | constraints brief, fact 15 |
-| iOS | No force unwraps, no `try!`, `os.Logger` not `print`, `URLRequest` built only in `Endpoints.swift`, `URLSession` only inside `ServerClient` and `PlexTV`; all copy in `Localizable.xcstrings` | 10-decision-record.md §2; constraints brief, "A CLAUDE.md" |
+| iOS | No force unwraps, no `try!`, `os.Logger` not `print`, `URLRequest` built only in `Endpoints.swift`, `URLSession` only in `App/Session/URLSessionTransport.swift`, the app target's `Transport` (the Kit reaches the network through `Transport` alone); all copy in `Localizable.xcstrings` | 10-decision-record.md §2; constraints brief, "A CLAUDE.md" |
 | iOS | `PlexGetKit` never imports `Security`, `StoreKit`, `UserNotifications`, `UIKit` or `CryptoKit`; platform code lives behind `SecretStore`, `Entitlements`, `Transport`, `Notifier` | 10-decision-record.md §2 |
 | iOS | Persona: render `name`, `greeting`, `brush_offs`, `images`, `brush_off_moods`; never carry `voice` or `examples` | 10-decision-record.md §4, persona row |
 | Relay | Never log a push body; never accept or store a Plex token, a session token or a server address; the `.p8` key is never in the repository | 10-decision-record.md §2, cloud paragraph |
@@ -119,8 +122,10 @@ the owner says otherwise; changing a default after Phase 0 is a deviation for th
 
 Two further values are inputs rather than decisions and are needed by the same phases: `<org>` for the GHCR
 image (Phase 8) and `<developer-domain>` for `push.<developer-domain>`, the invite universal link and the
-apple-app-site-association file (Phase 6). The owner writes all five values into the Phase 0 prompt's
-fill-in block before pasting it.
+apple-app-site-association file (Phase 6). The Phase 0 prompt's fill-in block (prompts/phase-0.md) takes
+`APP_NAME`, `BUNDLE_ID`, `ORG`, `DEVELOPER_DOMAIN`, `PRICE_YEARLY`, `PRICE_MONTHLY` and the
+`SUPPORT_EMAIL`/`PRIVACY_URL`/`TERMS_URL` placeholders; the owner fills it before pasting. The Team ID is not a
+fill-in value: it is a relay secret set in Phase 6 (08-app-store-and-release.md §1 row 1).
 
 ## 6. Human-only steps
 
@@ -131,9 +136,10 @@ Background Modes); the APNs key and its upload to the relay's secret store; the 
 introductory offer; the Billing Grace Period set to 16 days so it matches the relay (10-decision-record.md §2);
 the App Store Server Notifications V2 URL; the privacy policy URL; the demo Plex server and reviewer account;
 screenshots and review notes; TestFlight with two households; the App Store name. Also human: the per-phase
-device steps (a Plex sign-in on a device in Phase 4, a sandbox push to a TestFlight build and a forced
-`BGAppRefreshTask` in Phase 6, a sandbox purchase in Phase 7) and the two checks with real accounts in
-10-decision-record.md §6 items 1, 2 and 7 (pin linking, Funnel on a Personal plan, Plex Home users).
+device steps (a Plex sign-in on a device in Phase 4, a push through the deployed relay to a TestFlight build
+(production APNs environment, 05-push-relay.md §7.3) and a forced `BGAppRefreshTask` in Phase 6, a sandbox
+purchase in Phase 7) and the two checks with real accounts in 10-decision-record.md §6 items 1, 2 and 7 (pin
+linking, Funnel on a Personal plan, Plex Home users).
 
 ## 7. Glossary
 
@@ -144,7 +150,7 @@ device steps (a Plex sign-in on a device in Phase 4, a sandbox push to a TestFli
 | owner | The plex.tv account holding `plex.token` in `config.yaml` (`api/plex_auth.py:174-175`). The only role that can open the Console and the only buyer |
 | Console | The owner's tab in the app: Requests, Inbox, Announce, Discover, Overview, Notifications, Server, Sessions, Paywall. Opens only with an active entitlement |
 | relay | `push-relay`, the developer's one cloud service on `push.<developer-domain>`. Holds the APNs key; turns `{handle, event, title, body, collapse_id, data}` from a server into an APNs push; never sees a Plex token, a session token or a server address |
-| handle | The opaque value `POST /v1/devices` returns for an APNs token, stored by the server in `native_devices` and readable by the owner. Distinct from the device secret, which only the phone presents |
+| handle | The opaque value `POST /v1/devices` returns for an APNs token, stored by the server in `native_devices.relay_handle` and never returned in any server response (05-push-relay.md §3.1; 03 §7). Distinct from the device secret, which only the phone presents |
 | server key | The credential `POST /v1/server-keys` issues against a verified StoreKit 2 transaction, bound to `originalTransactionId`; the server sends it as a bearer on `POST /v1/push`. Written to `data/relay.json`. Honoured until `expires_at` plus 16 days |
 | pin hand-off | The default sign-in exchange: the app mints a pin under its own client identifier, links it to the signed-in account with `PUT https://plex.tv/api/v2/pins/link`, and sends `{"pin": {"id", "client_id"}}` to `POST /api/v1/auth/plex`; the server reads the pin as `check_pin()` does and discards the account token. Gated by 10-decision-record.md §6 item 1 |
 | invite | The universal link `https://push.<developer-domain>/join#…` (also a QR code) carrying the server's machine identifier, local and remote URLs and name in the fragment, which never reaches the relay's web server |

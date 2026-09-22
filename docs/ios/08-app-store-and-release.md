@@ -21,20 +21,20 @@ puts in the Phase 0 prompt. Nothing in this table is done by the builder.
 |---|---|---|---|---|
 | 1 | Enrol in the Apple Developer Program as an individual or organisation; wait for approval | developer.apple.com/programs | Team ID (10 characters). Goes to `RELAY_TEAM_ID` and `APNS_TEAM_ID` (05-push-relay.md §9) and to the AASA `appID` (05 §4.8) | Phase 0 (signing on the macOS runner), Phase 6 |
 | 2 | Decide the App Store name (not "PlexGet", 10-decision-record.md §4 "App Store name") and the bundle identifier (reverse-DNS, for example `<tld>.<developer-domain>.<appname>`; cannot be changed after the first upload (unverified)) | none yet; the owner writes both into the Phase 0 prompt | `AppIdentity.displayName`, `AppIdentity.bundleIdentifier` (04-ios-app.md §3.1); `APNS_TOPIC`, `APPLE_BUNDLE_ID` on the relay | Phase 0 |
-| 3 | Register the App ID with capabilities Push Notifications and Associated Domains | Certificates, Identifiers & Profiles → Identifiers | The App ID. Background Modes is not a portal capability; it is the `UIBackgroundModes` Info.plist key (`remote-notification`, `fetch`) that `project.yml` already sets (04-ios-app.md §1) (unverified that no portal action is needed) | Phase 0 (the entitlements file exists from Phase 0) |
+| 3 | Register the App ID with capabilities Push Notifications and Associated Domains | Certificates, Identifiers & Profiles → Identifiers | The App ID. Background Modes is not a portal capability; it is the `UIBackgroundModes` Info.plist key (`fetch` only; `remote-notification` is not needed for alert pushes, §2.1) that `project.yml` already sets (04-ios-app.md §1) (unverified that no portal action is needed) | Phase 0 (the entitlements file exists from Phase 0) |
 | 4 | Create the App Store Connect app record: platform iOS, name from step 2, primary language English (UK), bundle ID from step 3, SKU (any stable string, for example the bundle ID) | App Store Connect → Apps → + | The App Apple ID (numeric). Goes to `APPLE_APP_APPLE_ID` on the relay (05 §5.1) | Phase 6 |
-| 5 | Create an APNs authentication key: Keys → +, tick Apple Push Notifications service (APNs), download the `.p8` once (it cannot be downloaded again (verified: the portal says so at download time; re-check)), note the Key ID | Certificates, Identifiers & Profiles → Keys | The `.p8` file contents go to the relay's secret store as `APNS_KEY_P8` or a mounted file at `APNS_KEY_PATH`; the Key ID to `APNS_KEY_ID` (05 §9). The key never touches this repository, the server image, `config.yaml` or an owner's machine (constraints brief fact 2). One key serves sandbox and production (unverified) | Phase 6 |
+| 5 | Create an APNs authentication key: Keys → +, tick Apple Push Notifications service (APNs), download the `.p8` once (it cannot be downloaded again (unverified: from memory; the portal's own warning at download time is the check)), note the Key ID | Certificates, Identifiers & Profiles → Keys | The `.p8` file contents go to the relay's secret store as `APNS_KEY_P8` or a mounted file at `APNS_KEY_PATH`; the Key ID to `APNS_KEY_ID` (05 §9). The key never touches this repository, the server image, `config.yaml` or an owner's machine (constraints brief fact 2). One key serves sandbox and production (unverified) | Phase 6 |
 | 6 | Sign the Paid Applications agreement and complete Tax and Banking; until this is active, products cannot be sold and may not load in the sandbox (unverified) | App Store Connect → Business (Agreements, Tax, and Banking) | Nothing for the builder; without it Phase 7's sandbox purchase cannot pass | Phase 7 |
-| 7 | Create the subscription group `Owner` and, in it, `owner.yearly` (Product ID exactly `owner.yearly`, duration 1 year) and `owner.monthly` (`owner.monthly`, 1 month); set the yearly as the higher rank; localise both in English (UK); set prices (**owner confirms**, 10-decision-record.md §4); Family Sharing off for both | App Store Connect → the app → Subscriptions | Product IDs match `AppIdentity.productIDs` and `RELAY_PRODUCT_IDS=owner.yearly,owner.monthly` (05 §9); the group name matches `AppIdentity.subscriptionGroup` | Phase 7 |
+| 7 | Create the subscription group `Owner` and, in it, `owner.yearly` (Product ID exactly `owner.yearly`, duration 1 year) and `owner.monthly` (`owner.monthly`, 1 month); place `owner.yearly` and `owner.monthly` at the same subscription level, since they buy the same service (unverified: the owner reads the level help text in App Store Connect; if they differ, a switch between them is an upgrade or downgrade rather than a crossgrade); localise both in English (UK); set prices (**owner confirms**, 10-decision-record.md §4); Family Sharing off for both | App Store Connect → the app → Subscriptions | Product IDs match `AppIdentity.productIDs` and `RELAY_PRODUCT_IDS=owner.yearly,owner.monthly` (05 §9); the group name matches `AppIdentity.subscriptionGroup`. Each subscription needs a localised display name and description, a Review Information screenshot of the Paywall showing that product (taken on the owner's device from the Phase 7 build, since demo mode never shows the Paywall, 04 §7) and a review note; the group needs a localised display name; the status column must read "Ready to Submit" (unverified: the owner re-checks the Subscriptions page's status column before submission) | Phase 7 |
 | 8 | Add an introductory offer to `owner.yearly` only: type Free, duration 7 days, all countries. Each subscription may carry its own offer and a customer is eligible for one per group (10-decision-record.md §5 item 11); `owner.monthly` gets none | The `owner.yearly` product page → Introductory Offers | The `.storekit` configuration in `App/Store/Products.storekit` mirrors it exactly so the Phase 7 tests match the store | Phase 7 |
 | 9 | Set the Billing Grace Period to 16 days (the options are 3, 16 or 28, 10-decision-record.md §5 item 20), for all renewals | App Store Connect → the app → Subscriptions → Billing Grace Period (app-level setting) | Must equal `RELAY_GRACE_DAYS=16` (05 §9); if the owner ever changes one, the other changes in the same day | Phase 7 |
-| 10 | Enter the App Store Server Notifications V2 URL for production and for sandbox: `https://push.<developer-domain>/v1/apple/notifications` in both fields; choose Version 2 | App Store Connect → the app → App Information → App Store Server Notifications | The relay must already answer `GET /v1/health` at that host, or Apple's test notification (the "Send test notification" button (unverified)) fails | Phase 6 (deploy) then Phase 7 |
+| 10 | Enter the App Store Server Notifications V2 URL for production and for sandbox: `https://push.<developer-domain>/v1/apple/notifications` in both fields; choose Version 2 | App Store Connect → the app → App Information → App Store Server Notifications | The relay must already answer `GET /v1/health` at that host, or Apple's test notification fails; a TEST notification is requested with the App Store Server API `POST https://api.storekit.apple.com/inApps/v1/notifications/test` (sandbox: `api.storekit-sandbox.apple.com`), authorised by a JWT signed with an In-App Purchase key created under App Store Connect → Users and Access → Integrations → In-App Purchase (not the APNs key); the builder adds `scripts/request-test-notification.py` to `<AppName>-relay` using the App Store Server Library's `AppStoreServerAPIClient.request_test_notification()` and `get_test_notification_status()`, with the key path, key id and issuer id taken from environment variables and never committed (verified: Apple "Enabling App Store Server Notifications" and "Request a Test Notification", 2026-09-22). GAP: 05-push-relay.md and 07 §5 do not list this script; it is a Phase 6 relay deliverable | Phase 6 (deploy) then Phase 7 |
 | 11 | Apply to the App Store Small Business Program if eligible (15 % commission from the first year; the net after UK VAT is nearer £17-18 on £24.99, 10-decision-record.md §4) | developer.apple.com/app-store/small-business-program | None for the builder | Before launch |
 | 12 | Publish a privacy policy page and a terms-of-use page at stable URLs on `<developer-domain>` (the content is drafted by the builder in Phase 9 from §4 and 09-security.md; the owner publishes it). Apple's standard EULA may be used for terms by linking `https://www.apple.com/legal/internet-services/itunes/dev/stdeula/` (unverified) | The owner's web host; App Store Connect → App Information (privacy policy URL) and → the version page (EULA) | `AppIdentity.privacyPolicyURL`, `AppIdentity.termsURL`; both appear on the Paywall (04 §6 Paywall) and in the metadata (guideline 3.1.2) | Phase 7 (Paywall), Phase 9 |
 | 13 | Fill in the App Privacy questionnaire from §4.1 | App Store Connect → the app → App Privacy | Must agree with `PrivacyInfo.xcprivacy` (§4.2); a mismatch is a review finding | Phase 9 |
-| 14 | Set the age rating (no objectionable content; the app shows film titles and artwork the owner's Plex holds; answer the questionnaire honestly, expect 4+ or 12+ (unverified)) | The version page → Age Rating | None | Phase 9 |
+| 14 | Set the age rating (no objectionable content; the app shows film titles and artwork the owner's Plex holds; answer the questionnaire honestly, the tiers are 4+, 9+, 13+, 16+ and 18+ (12+ and 17+ were retired in 2025); expect 4+ or 13+ depending on the answers about user-generated messages (verified: Apple Developer News, July 2025)) | The version page → Age Rating | None | Phase 9 |
 | 15 | Prepare the demo Plex server and the reviewer Plex account (§3) | The owner's hardware and plex.tv | The address, invite link and credentials for §3.2 | Phase 9 |
-| 16 | Upload the Phase 9 build, add screenshots (§3.4), the description, keywords, subtitle and review notes (§3.2); run TestFlight (§7); submit | App Store Connect → TestFlight, then the version page | The submission | Phase 9 |
+| 16 | Upload the Phase 9 build, add screenshots (§3.4), the description, keywords, subtitle and review notes (§3.2); run TestFlight (§7); on the version page, under In-App Purchases and Subscriptions, add `owner.yearly` and `owner.monthly` so they are reviewed with this version (the first subscriptions of an app can only be submitted with a version) (unverified: re-check the version page); submit | App Store Connect → TestFlight, then the version page | The submission | Phase 9 |
 
 Values the builder needs before Phase 6 and cannot invent: Team ID, bundle identifier, App Apple ID, `<developer-domain>`,
 the `.p8` key and its Key ID (set as relay secrets by the owner, never pasted into a prompt), and the prices (shown only
@@ -52,7 +52,7 @@ numbering is re-checked by the owner on submission day (10-decision-record.md §
 | 2.1 App Completeness | Demo mode is on the Welcome screen with no account (04 §7), the demo server is reachable over HTTPS during review (§3) and the reviewer account is in the notes (§2.2). |
 | 2.1 (crashes, placeholders) | No placeholder text ships: the Phase 9 banned-word review treats a placeholder as a blocker (01 §2.6), and TestFlight's 14 days show no reproducible crash (01 §7). |
 | 2.3 Accurate Metadata | Screenshots come from demo mode on the submitted build (§3.4), the description says the app needs the owner's own server, and no feature is described that the build lacks. |
-| 2.5.4 Background modes | Only `remote-notification` and `fetch` are declared, for push arrival and `BGAppRefreshTask` polling of `GET /api/v1/changes`, both used as designed (design-A §9). |
+| 2.5.4 Background modes | Only `fetch` is declared, for `BGAppRefreshTask` polling of `GET /api/v1/changes`; alert pushes need no background mode and `remote-notification` is not declared because the relay never sends `content-available` (05 §7.4). |
 | 3.1.1 In-App Purchase | The Console unlocks only through StoreKit 2 `Transaction.currentEntitlements`; there is no code, link, or mention of the free web dashboard anywhere in the app (10-decision-record.md §4 "What is paid"). |
 | 3.1.2 Subscriptions | The Paywall states the trial length, the price billed afterwards, the period, the auto-renewal terms and links to the privacy policy and terms (04 §6 Paywall); the same links are in the metadata; the ongoing value is the relay-delivered push and the Console. |
 | 4.2 Minimum Functionality | It is a native SwiftUI app with native navigation, offline demo, push, background refresh and StoreKit; nothing is a wrapped web page (design-A §9). |
@@ -95,7 +95,8 @@ HOW TO TRY IT AGAINST A LIVE SERVER
 1. Welcome screen -> "Sign in with Plex". Plex username: <reviewer username>  Password: <password>
    (two-factor authentication is off on this account).
 2. The app will not find the server on your network. Tap "I have an invite" and enter this address:
-   https://<demo host>   (or open https://push.<developer-domain>/join#<invite fragment> on the device).
+   https://<demo host>   (or paste this link into the Notes app and tap it there, which opens the app
+   directly: https://push.<developer-domain>/join#<invite fragment>).
 3. Home appears. Search for "Charade" to see results and add it to the list. The wish list, Bell,
    Playlists and Settings are all live against the demo server.
 4. This account is the demo server's owner, so the Console tab appears with the subscription screen.
@@ -112,7 +113,7 @@ CONTACT
 <supportEmail>. The demo server is monitored and will stay up throughout review.
 ```
 
-The builder writes this text into `store/review-notes.md` in `<AppName>-ios` with the placeholders left as
+The builder writes this text into `docs/release/review-notes.md` in `<AppName>-ios` (07 §5 Phase 9) with the placeholders left as
 `<...>`; the owner fills them at submission. The file is covered by the banned-word gate (§5).
 
 ## 3. The demo server
@@ -143,7 +144,10 @@ Remote Access, because artwork is proxied through `/wanted/thumb` (owner-api.md 
 6. Confirm from a phone off the LAN that "I have an invite" with the typed HTTPS address reaches Home, that
    `GET /api/v1/server` reports `native_signin: true` and `setup: false`, and that a sandbox purchase on the demo
    owner's device writes `data/relay.json` (Phase 7 gate).
-7. Record the address, the invite link from the Console's Server screen, and the credentials in the review notes.
+7. Record the address, the invite link from the Console's Server screen, and the credentials in the review notes;
+   the notes tell the reviewer to paste the link into the Notes app and tap it there, because a universal link typed
+   or pasted into Safari's address bar loads the `/join` page (05 §4.8) instead of opening the app (unverified: from
+   memory of universal-link routing).
 
 ### 3.3 Reachable during review
 
@@ -247,9 +251,12 @@ Required-reason API rules for the builder, so the manifest stays this short:
 | Disk space | No | Never queried |
 | Active keyboards | No | Never queried |
 
-Verification: after `xcodebuild archive` the builder or owner generates the archive's privacy report in Xcode's
-Organizer (unverified: the "Generate Privacy Report" action) and checks that its API list equals the manifest's;
-a difference is a Phase 9 blocker. `PlexGetKit` has no manifest of its own because it is a local package compiled into
+Verification: (1) the grep of prompts/phase-9.md step 3 over `App/` and `PlexGetKit/` for the required-reason API
+symbols is the pre-upload check; (2) after the first TestFlight upload the owner waits for App Store Connect's
+processing email and confirms it carries no ITMS-91053 (Missing API declaration) or ITMS-91056 (Invalid privacy
+manifest) warning; either warning is a Phase 9 blocker that comes back to the builder as one row naming the category.
+The Organizer's "Generate Privacy Report" only aggregates bundled manifests and is used to confirm the manifest was
+bundled, not that it is complete (verified: Apple "Privacy manifest files", 2026-09-22). `PlexGetKit` has no manifest of its own because it is a local package compiled into
 the app and imports only Foundation (04 §2).
 
 ## 5. Banned words and the CI grep gate
@@ -272,14 +279,18 @@ button, TestFlight's Install, the iOS Settings "Offload App" text, and the Store
 needed" screen says "Get the update on the App Store" (02 §6.3). No exception is coded into the gate; the gate has no
 allowlist.
 
-`scripts/banned-words.sh` in `<AppName>-ios` (04 §1), run by `kit.yml`, `app.yml` and the Phase 9 review:
+`scripts/banned-words.sh` in `<AppName>-ios` (04 §1), run by `kit.yml`, `app.yml` (default paths) and the Phase 9
+review (`scripts/banned-words.sh App PlexGetKit docs/release store`):
 
 ```sh
 #!/bin/sh
 # Fails when a review-facing word appears anywhere it could ship. No allowlist by design.
 set -eu
 cd "$(dirname "$0")/.."
-paths="App PlexGetKit store"
+# arguments override the default paths; the server repository passes tests/fixtures/api and dashboard/setup.html.
+# The default adds store/ only once Phase 9 has created it, so kit.yml and app.yml pass from Phase 0 on.
+if [ $# -gt 0 ]; then paths="$*"; else paths="App PlexGetKit"; test -d store && paths="$paths store"; fi
+for p in $paths; do test -e "$p" || { echo "banned-words: no such path: $p" >&2; exit 2; }; done
 exclude='--exclude-dir=.git --exclude-dir=.build --exclude-dir=docs --exclude=banned-words.sh --exclude=CLAUDE.md'
 fail=0
 for w in download torrent usenet nzb magnet indexer tracker sonarr radarr "release group"; do
@@ -289,7 +300,12 @@ if grep -rIinwE $exclude -- 'seed(s|ed|ing)?' $paths; then fail=1; fi
 exit $fail
 ```
 
-It also runs in this repository's CI over `tests/fixtures/api/` (03 §6.2), because the fixtures are the demo data.
+Arguments override the default path list, which is how the server repository runs it over `tests/fixtures/api`,
+`dashboard/setup.html` and `docs/DEPLOYMENT.md` (07 §4.1, Phase 1, 2 and 8 gates); a named path that does not exist
+is exit `2`, never a vacuous pass, which is why the default list adds `store` only when the directory exists (it
+appears in Phase 9; the workflows call the script with no arguments from Phase 0). `--exclude-dir=docs` skips `docs/` only during recursion; a `docs/release` path given as an
+argument is searched (checked with GNU grep 3.11). It also runs in this repository's CI over `tests/fixtures/api/`
+(03 §6.2), because the fixtures are the demo data.
 `Localizable.xcstrings` is inside `App/Resources/`, so every translation is covered (04 §9). The UI test
 `testNoBannedWordsInAccessibilityTree` (04 §11) is the runtime half: it walks every demo screen and fails on a label
 containing any word above, which catches text assembled at run time. Names inside code (`PlexGetKit`, `X-Plex-Product`)
@@ -304,8 +320,8 @@ are not user-facing and are not in scope; `docs/` and `CLAUDE.md` are excluded b
    permitted (unverified); otherwise the subtitle describes the job ("Ask for films, hear when they arrive").
 3. The icon contains no Plex chevron, no Plex wordmark and no imitation of Plex's amber-on-black scheme (unverified as
    a brand rule; avoided regardless), no Apple product imagery (5.2.5), no film-studio marks and no text. One
-   1024×1024 PNG without alpha in `Assets.xcassets` (verified: Xcode rejects alpha in the App Store icon at upload;
-   re-check on the first upload).
+   1024×1024 PNG without alpha in `Assets.xcassets` (unverified: from memory that App Store Connect rejects an icon with an
+   alpha channel; the first upload is the check).
 4. The description carries the line "Not affiliated with Plex, Inc. Plex is a trademark of Plex, Inc." (unverified
    wording; the owner adapts to the brand guidelines' own required form if one exists) and says the app needs the
    companion server the owner runs at home, with a link to `docs/DEPLOYMENT.md`.
@@ -319,8 +335,8 @@ the same notes as §2.2 (unverified: Beta App Review's exact requirements; give 
 
 | Item | Rule |
 |---|---|
-| Builds | The Phase 7 gate build first, then the Phase 9 candidate; each is the exact archive that will be submitted, with `aps-environment` `development` in TestFlight (sandbox APNs; 04 §3.4 marks this unverified and the Phase 6 sandbox push confirms it) |
-| Purchases | TestFlight uses the sandbox environment: the trial and renewals run on the compressed sandbox clock and charge nothing (unverified: sandbox renewal timings). The relay must have the sandbox verifier enabled (05 §5.1) or server-key issuance fails for testers |
+| Builds | The Phase 7 gate build first, then the Phase 9 candidate; each is the exact archive that will be submitted; a TestFlight build is distribution-signed and Xcode sets `aps-environment` to `production`, so its pushes go through `api.push.apple.com` (05 §7.3; verified: Apple "Sending notification requests to APNs", 2026-09-22). Only a development-signed Debug build run from Xcode uses the sandbox host. The Phase 6 device step is therefore a push through the production host to the TestFlight build; a development-signed Xcode run on the device is the only way to exercise the sandbox host, and the owner does both and records in the PR the relay `environment` each device registered with |
+| Purchases | TestFlight uses the sandbox environment: the trial and renewals run on the compressed sandbox clock and charge nothing (unverified: sandbox renewal timings). The relay must have the sandbox verifier enabled and `RELAY_ALLOW_SANDBOX_KEYS=1` (05 §5.1, §9) during the TestFlight period or server-key issuance fails for testers; the owner may set it to `0` after launch |
 | Households | Each owner installs the Phase 8 image from a clean machine following `docs/DEPLOYMENT.md` only, with no help from the developer until they report being stuck; that is the abandonment measurement |
 | What to observe, owner | The furthest step reached of: Docker installed; container answers `/health` not in setup; setup saved; `app.urls.remote` set and self-check passed; first member signed in; trial started; first arrival delivered (01 §7 "Owner abandonment"). Abandonment at "remote address" by more than one owner reopens the tunnel decision (10-decision-record.md §6 item 11) |
 | What to observe, member | The step of 01 §6.1 they stopped at, if any (steps 3, 5, 6, 7); the Local Network prompt's timing and wording; whether the probe found the server at home without typing |
@@ -335,17 +351,18 @@ the same notes as §2.2 (unverified: Beta App Review's exact requirements; give 
 | Value | Rule |
 |---|---|
 | `MARKETING_VERSION` → `CFBundleShortVersionString` | Always three components `MAJOR.MINOR.PATCH`, starting `1.0.0`, because the server's `min_app_version` is compared numerically against it (03 §1.8). Set in `project.yml`; changed only by a PR titled "Release x.y.z" |
-| `CURRENT_PROJECT_VERSION` → `CFBundleVersion` | An integer that strictly increases across every upload of the app, whatever the marketing version. CI sets it on the command line (`xcodebuild … CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER`); `project.yml` holds `1` for local builds. Never reused, never decreased (verified: App Store Connect refuses a duplicate build number for a version; re-check on upload) |
-| The `device.app` string and `User-Agent` | `"<CFBundleShortVersionString> (<CFBundleVersion>)"`, for example `"1.0.0 (42)"` (03 §1 `User-Agent`; §3 `device.app`) |
+| `CURRENT_PROJECT_VERSION` → `CFBundleVersion` | An integer that strictly increases across every upload of the app, whatever the marketing version. CI sets it on the command line (`xcodebuild … CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER`); `project.yml` holds `1` for local builds. Never reused, never decreased (unverified: from memory; the upload is the check) |
+| The `device.app` string | `"<CFBundleShortVersionString> (<CFBundleVersion>)"`, for example `"1.0.0 (42)"` (03 §3 `device.app`; 05 §4.1 `app`); the `User-Agent` header is 03 §1.2's `<AppIdentity.product>/<version> (<build>; iOS <version>)` |
 | Git tag in `<AppName>-ios` | `v1.0.0` on the commit that was archived; the tag message holds the build number and the server commit hash in `PlexGetKit/Tests/Fixtures/VERSION` (03 §6.3) |
 | Server image tags | Independent: `ghcr.io/<org>/plexget:<tag>` from this repository's tags (06-install-and-setup.md); `BUILD` (`api/routes.py:80`) is shown, never compared (03 §1.8) |
 | Relay version | The git sha in `GET /v1/health` (05 §4.7) |
 | Raising `min_app_version` | Only when a response shape changed so that older apps cannot decode it; the server release note says which version and why; the app shows "update needed" (02 §6.3) |
 | What's New text | Written by the owner, kept in `store/metadata/en-GB/release_notes.txt` so §5's gate covers it |
 
-GAP: 04-ios-app.md §1 does not list a `store/` directory; Phase 9 adds `store/review-notes.md` and
+GAP: 04-ios-app.md §1 does not list a `store/` directory; Phase 9 adds
 `store/metadata/en-GB/{name,subtitle,description,keywords,release_notes}.txt` to `<AppName>-ios` so the metadata is
-versioned and grep-gated. No server or fixture change.
+versioned and grep-gated; the review notes live at `docs/release/review-notes.md` (07 §5 Phase 9). No server or
+fixture change.
 
 ## 9. What to do on rejection
 
@@ -370,6 +387,6 @@ responses below are pasted with the placeholders filled and nothing invented.
 | 2.5.4 "Background mode not used" | Fetch was doubted | Reply describing `BGAppRefreshTask` polling `GET /api/v1/changes` when the owner has no subscription; attach a recording of the forced refresh producing a local notification |
 | "Guideline numbering or text differs from this table" | Apple revised the guidelines | The owner re-reads the cited section on the day, and the plan's wording follows Apple's, not this table (10-decision-record.md §5 item 15) |
 
-After approval: the owner enables the App Store Server Notifications test if not already done, watches the relay's
+After approval: the owner runs `scripts/request-test-notification.py` against production once (§1 row 10), watches the relay's
 `apple_notifications` table for the first production notification, and only then announces the app to the two
 TestFlight households as released.

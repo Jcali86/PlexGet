@@ -17,7 +17,7 @@ A server is identified by its Plex `machineIdentifier` (`plex_machine_id` in §3
 | Order of attempts on each launch and after any transport failure | local URLs (1.5 s timeout each), then remote URLs |
 | Plain `http://` permitted to | RFC 1918 addresses (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16`, loopback, `.local` hostnames; never to any other address (brief fact 10) |
 | Preference when both answer | `https://` over `http://` even at home |
-| Refresh of the set | `urls.local` and `urls.remote` from every successful `GET /api/v1/server` replace the stored lists; an invite or a typed address is merged in |
+| Refresh of the set | `urls.local` and `urls.remote` from a `GET /api/v1/server` answer replace the stored lists only when the answer came over a URL already in the stored lists (or the confirmed or invited URL that began the session). A probed address not yet stored, a typed address, and an invite's `l`/`r` for a machine id the app already has stored are candidates that require the confirmation card (02 §2.3 step 5) before any bearer request; they are merged only on confirmation. The route is open and its `urls` field is whatever the answering host says, so an unconfirmed answer never redirects a bearer |
 | Drop rule | a URL whose `GET /api/v1/server` answers with a `plex_machine_id` different from the pinned one is removed from the set, never trusted |
 | Where a URL may come from | an invite universal link, the plex.tv `connections[].local` probe, a typed address, the `urls` field |
 | Port default | 5050 (`config.py:69`); a typed address may carry another port |
@@ -26,7 +26,7 @@ A server is identified by its Plex `machineIdentifier` (`plex_machine_id` in §3
 
 | Header | Value | Reason |
 |---|---|---|
-| `Authorization` | `Bearer <session token>` on every household and owner route; absent on open routes | `current_user()` (`api/routes.py:943-951`) reads the bearer first, then the cookie (ADR §2; auth-and-tiers.md §6.1) |
+| `Authorization` | `Bearer <session token>` on every household and owner route; absent on open routes | after Phase 1, `current_user()` (`api/routes.py:943-951`, today cookie-only) reads the bearer first, then the cookie (ADR §2; auth-and-tiers.md §6.1) |
 | `Accept` | `application/json`, exactly; never `text/html`, never `*/*` | the guard answers an unsigned `GET` whose `Accept` contains `text/html` with `302` to `/request` (`api/routes.py:1269-1272`; owner-api.md §4.7) |
 | `Content-Type` | `application/json; charset=utf-8` on every request with a body | every route reads `request.get_json()` |
 | `User-Agent` | `<AppIdentity.product>/<CFBundleShortVersionString> (<build>; iOS <version>)` | log hygiene; not read by the server |
@@ -42,7 +42,7 @@ The Kit's `Endpoints.swift` is the only place a `URLRequest` is built (ADR §2);
 | Tier | Rule | Refusal the app can receive |
 |---|---|---|
 | Open | `OPEN_PATHS = {"/", "/request", "/health", "/manifest.webmanifest", "/persona", "/themes", "/sw.js"}` and `OPEN_PREFIXES = ("/auth/", "/icons/", "/themes/art/")` (`api/routes.py:1229-1231`), plus `GET /api/v1/server` and `POST /api/v1/auth/plex` (new; §3) | none |
-| Household | `HOUSEHOLD_PATHS = {"/wanted/thumb"}`, `HOUSEHOLD_PREFIXES = ("/request/", "/push/")` (`api/routes.py:1232-1233`), plus every other `/api/v1/*` route | `401 {"error": "sign in with Plex to use this", "auth_required": true}` (`api/routes.py:1246-1247`) |
+| Household | `HOUSEHOLD_PATHS = {"/wanted/thumb"}`, `HOUSEHOLD_PREFIXES = ("/request/", "/push/")` (`api/routes.py:1232-1233`), plus every other `/api/v1/*` route | `401 {"error": "sign in with Plex to use this", "auth_required": true}` (`api/routes.py:1246-1247`); after Phase 1 the body on `/api/v1` paths and bearer requests also carries `code` (§1.4a) |
 | Owner | everything else, including `/api/v1/owner/*`; passes when the session's role is `"owner"` (`api/routes.py:1261`) | `403 {"error": "that part is the owner's"}` (`api/routes.py:1273`) |
 
 Roles on the wire are exactly `"owner"` and `"shared"` (`api/plex_auth.py:175, 195`). The role is re-derived from the live roster on every request (10-minute cache, `api/plex_auth.py:343-377`), so a withdrawn Plex share turns every call into `401` within 600 s (auth-and-tiers.md §2.3). The loopback door (`api/routes.py:1263-1265`) never applies to a phone and is off in the shipped image (ADR §4 "Bind address").
@@ -54,6 +54,7 @@ Every handled error is a JSON object with `error: str` and optional extras (owne
 | Extra | Type | Where |
 |---|---|---|
 | `code` | str | every `/api/v1` error; a stable machine key listed per endpoint in §3 |
+| `code` on `401` | str | on `/api/v1` paths and on any request carrying a bearer (Phase 1): `session_revoked` (row has `revoked_at`; the app never re-exchanges), `session_expired` (row past its life or absent, or no bearer sent), `plex_token_dead` (today's `expired_session()`, `api/routes.py:1168-1184`); body `{"error", "code", "auth_required": true}`; the three codes and their `error` strings are in §1.4a |
 | `auth_required` | bool | some `401`s (`api/routes.py:1179-1184, 1246-1247`); several `401`s lack it (household-api.md §1) |
 | `rate_limited` | bool | `429`s from household routes and `200`s from `/request/nudges` (household-api.md §4) |
 | `retry_after` | int seconds | `/api/v1/auth/plex` `429`; `/auth/start` `429` (`api/routes.py:1050-1055`) |
@@ -65,15 +66,33 @@ One error mapper in `ServerAPI` (ADR §2) turns status codes into Kit errors, re
 
 | Status | Kit error | Rule |
 |---|---|---|
-| `401` | `.signInRequired` | always, whether or not `auth_required` is present; the app clears the session token only and re-exchanges (§3.2), at most once per five minutes per device (ADR §5 item 5) |
-| `403` | `.ownerOnly` | includes `{"error": "owner only"}` from `/notifications` (`api/routes.py:903-904`) and the `for_user` refusal on `/request/playlist` |
+| `401` | `.signInRequired(code:)` | always, whether or not `auth_required` is present. The body on `/api/v1` paths and on any request carrying a bearer is `{"error": str, "code": str, "auth_required": true}` with `code` one of `session_revoked` (the row has `revoked_at`: the app clears the session item and shows Welcome, never re-exchanges), `session_expired` (row absent, past its life, or no bearer sent) or `plex_token_dead` (today's `expired_session()`, `api/routes.py:1168-1184`); for the last two the app clears the session token only and re-exchanges silently (§3.2), at most once per five minutes per device (ADR §5 item 5). A `401` from a legacy route without `code` is treated as `session_expired`. Codes and strings: §1.4a |
+| `403` with `code: not_shared` | `.notShared` | exchange only (§3.2) |
+| `403` with `code: invite_pending` | `.invitePending` | exchange only (§3.2) |
+| any other `403` | `.ownerOnly` | includes `{"error": "owner only"}` from `/notifications` (`api/routes.py:903-904`) and the `for_user` refusal on `/request/playlist` |
 | `429` with `rate_limited: true` or `code: "rate_limited"` | `.rateLimited(message, hint?, retryAfter?)` | |
-| `400`, `404`, `409` | `.serverSaidNo(message)` | the message is shown verbatim; it is written for people |
-| `502` | `.upstreamUnavailable(message)` | plex.tv or TMDb unreachable |
+| `400` | `.badRequest(message)` | the message is shown verbatim; it is written for people |
+| `404` | `.notFound(message)` | as above |
+| `409` | `.conflict(message)` | as above; also `code: device_limit` (§3.8) and `pin_not_linked` (§3.2) |
+| `502` | `.plexTVUnreachable(message)` | plex.tv or TMDb unreachable |
 | `503` | `.plexUnavailable(message)` | `plex_trouble()` (`api/routes.py:1156-1166`) |
-| `500` | `.serverError` | JSON on `/api/v1` and bearer requests (§3.15); Flask's HTML page elsewhere (owner-api.md §1.4) |
+| `500` | `.serverFault` | JSON on `/api/v1` and bearer requests (§3.15); Flask's HTML page elsewhere (owner-api.md §1.4) |
 | `200` with an `error` key and an empty payload | `.serverSaidNo(message)` | the routes in §1.5 only |
 | `204` | success, no body | the `DELETE` routes in §3 |
+
+Case names are 02 §6.1's verbatim; that table and this one describe one mapper.
+
+### 1.4a The `401` codes
+
+Set by the guard (Phase 1) on `/api/v1` paths and on any request carrying `Authorization: Bearer`:
+
+| `code` | `error` | When | App |
+|---|---|---|---|
+| `session_revoked` | `"This device was signed out."` | the bearer names a row with `revoked_at` set (§3.4, §3.6, §3.7) | clear the session item; show Welcome; never re-exchange |
+| `session_expired` | `"sign in with Plex to use this"` | no bearer, no row for the bearer, or an `ios` row whose `last_seen` is older than 180 days | silent re-exchange (§3.2), at most once per five minutes per device |
+| `plex_token_dead` | `"Your Plex sign-in has expired. Sign in again to carry on."` | today's `expired_session()` (`api/routes.py:1168-1184`): the per-server Plex token no longer works | silent re-exchange as above |
+
+Phase 1 tests one case per code (`tests/test_bearer.py`; 09 §11).
 
 ### 1.5 The `200`-with-`error` legacy cases
 
@@ -116,6 +135,7 @@ Three formats occur and one `SQLiteDate` decoder in `Models` handles all three (
 | `POST /request/wanted` | `429 {"error": "That's a lot of requests in one go - give it an hour.", "rate_limited": true}` | `app.limits.wanted_per_hour` 40 per user (`api/routes.py:1015-1030`) | in-process memory |
 | `POST /request/message` | `429 {"error": "That's a lot of messages in one go - give it an hour.", "rate_limited": true}` | `MESSAGES_PER_HOUR = 10` per user (`api/routes.py:1028-1041`) | in-process memory |
 | `POST /api/v1/push/devices` | `409 {"error", "code": "device_limit", "limit": 5}` | five `native_devices` rows per user (ADR §2) | table |
+| `POST /api/v1/push/test` (and `POST /push/test`) | `429 {"error": "That's a lot of test pushes - give it an hour.", "code": "rate_limited", "rate_limited": true}` | 5 per `plex_user_id` per 3600 s (09 §6; Phase 2) | in-process memory |
 
 No route sets a `Retry-After` header and none reports remaining allowance (household-api.md §4). The app shows the `error` text and, where `retry_after` is present, a countdown. A limited person can still name a film or a person (the free path of `/request/search`) and can still add to the wanted list.
 
@@ -136,7 +156,7 @@ No route sets a `Retry-After` header and none reports remaining allowance (house
 
 | Routes | Client timeout | Why |
 |---|---|---|
-| `GET /api/v1/server` during the pairing probe | 1.5 s | design-A §4.1 |
+| `GET /api/v1/server` during the pairing probe | 1.5 s | design-A §4.1; the route never waits on Plex: it serves the cached `server_name` and `plex_machine_id` (§3.1) |
 | `POST /request/search`, `POST /request/playlist/auto`, `GET /request/nudges` | 60 s | up to one model call (`ai.timeout` 15 s) plus TMDb lookups at 12 s each; tens of seconds are normal (household-api.md §3.1) |
 | `GET|POST /wanted/recheck`, `POST /wanted/settle`, `GET /discover/missing`, `GET /members/<u>/picks` | 60 s | one Plex search per section per row, or a cold owned-index rebuild (owner-api.md §2) |
 | everything else | 15 s | |
@@ -206,10 +226,10 @@ The Kit has one `Film` type whose shape-2a-only fields (`duration_ms`, `librarie
 | `libraries` | [str] | |
 | `confidence` | int | |
 | `kind` | str | always `"show"` |
-| `held_seasons` | [int] | filled on the title path (`api/request_assistant.py:947-948`); `[]` from `_show_dict` |
-| `content_rating` | str\|null | only from `_show_dict`; absent from `search_shows` |
-| `all_seasons` | [int] | from TMDb; `[]` when TMDb is unconfigured or errors |
-| `missing_seasons` | [int] | `all_seasons` minus `held_seasons`; on the TV-mood path this equals `all_seasons` because `held_seasons` is empty |
+| `held_seasons` | [int] | present only on `shows` of the title path (`api/request_assistant.py:947-948`) and as `[]` from `_show_dict` (TV-mood path); absent from `search_shows` output, from shows inside `close` (`close_matches()`, `api/request_assistant.py:1081-1097`) and from `wanted.recheck.json` show hits; Kit field optional |
+| `content_rating` | str\|null | only from `_show_dict`; absent from `search_shows` and from shows inside `close`; Kit field optional |
+| `all_seasons` | [int] | from TMDb; present only on `result["shows"]` after `add_season_detail` (`api/routes.py:1339-1354`), `[]` when TMDb is unconfigured or errors; absent inside `close` and on `wanted.recheck.json` show hits; Kit field optional |
+| `missing_seasons` | [int] | `all_seasons` minus `held_seasons`; same presence rule as `all_seasons`; on the TV-mood path this equals `all_seasons` because `held_seasons` is empty |
 
 ### 2.4 TMDb film guess (`FilmGuess`, shape 2d)
 
@@ -316,7 +336,11 @@ Uniqueness is `(kind, lower(title), year, season)` (`db/database.py:166-171`).
 
 `GET /persona` (`api/routes.py:829-857`; persona-themes-limits.md §1.3): `name` str (never empty, ≤40), `greeting` str (never empty, ≤200), `brush_offs` [str] (1 to 40), `images` {mood: str} (values are `/icons/<file>` paths; may be `{}`), `brush_off_moods` [str] (0 to 8), `smart_mode` bool. `voice` and `examples` are never on the wire (ADR §4 "Persona"; §7 of this document).
 
-### 2.13 Theme (`Theme`)
+### 2.13 Wrapper shapes
+
+Four bodies are objects wrapping a list; each has its own Kit type, named in §6.4: `SessionList` `{"sessions": [Session]}` (§3.5), `ThemeList` `{"themes": [Theme]}` (§4.1, §4.27), `NoteList` `{"notes": [Note]}` (§4.13), `WantedPage` `{"items": [WantedRow], "counts": {"wanted": int, "acquired": int, "dismissed": int}}` (§4.16). `GET /libraries` (§4.24) is a bare array and decodes as `[Library]`.
+
+### 2.14 Theme (`Theme`)
 
 `api/themes.py:62-80`: `slug` str (`^[a-z0-9][a-z0-9-]{0,30}$`), `name` str, `colors` object with exactly twelve `#rrggbb` keys: the six chosen `bg`, `surface`, `border`, `text`, `accent`, `red` and the six derived `surface2`, `dim`, `accent_dark`, `on_accent`, `top`, `green`; `wallpaper` str (`/themes/art/<slug>.png` or `""`). The four built-in palettes are not served by any endpoint; the Kit's `Themes` module carries them from `request.html:37-79` (ADR §2).
 
@@ -336,8 +360,8 @@ Response `200` (`ServerInfo`):
 | `build` | str | `BUILD` (`api/routes.py:80`) |
 | `features` | [str] | `FEATURES` (`api/routes.py:81-88`) |
 | `app_name` | str | `app.name` (default `"Plex Requests"`, `api/user_library.py:19-20`) |
-| `server_name` | str\|null | the Plex server's friendly name, read live as `server_access_token()` reads `machineIdentifier` (`api/plex_auth.py:203-234`); `null` when Plex is unreachable or in setup mode |
-| `plex_machine_id` | str\|null | `PlexServer(...).machineIdentifier`; `null` as above. Not secret: every shared user sees it in their own `/api/v2/resources` (auth-and-tiers.md §1.5) |
+| `server_name` | str\|null | `PlexServer(config['plex']['url'], config['plex']['token'], timeout=3).friendlyName`, read at most once per 600 s and kept in a module-level cache in `api/native.py` (same pattern as `_allowed_cache`, `api/plex_auth.py:29`); the cached pair is served while fresh and the route never blocks on Plex (plexapi's default connect timeout is 30 s, `venv/lib/python3.11/site-packages/plexapi/__init__.py:20`, longer than the 1.5 s probe of §1.9); `null` only when no read has ever succeeded or in setup mode |
+| `plex_machine_id` | str\|null | `.machineIdentifier` from the same cached read; `null` as above. Not secret: every shared user sees it in their own `/api/v2/resources` (auth-and-tiers.md §1.5) |
 | `urls` | object | `{"local": [str], "remote": [str]}` from config `app.urls`; both lists may be empty |
 | `push` | object | `{"delivery": "relay" \| "polling"}`; `"relay"` when `data/relay.json` exists, is unexpired and has not been marked inactive by a relay `401`/`403` (design-A §2.2) |
 | `setup` | bool | `true` only in setup mode |
@@ -368,11 +392,11 @@ Request JSON:
 
 | Field | Type | Required | Limits |
 |---|---|---|---|
-| `pin` | object | one of `pin` or `plex_token` | `{"id": int, "client_id": str}`; `client_id` is the app's per-install identifier (UUID string, ≤64 chars) that created the pin |
-| `plex_token` | str | one of `pin` or `plex_token` | accepted only when `app.testing` is true or `request.is_secure` is true; otherwise `400 pin_required`. The app sends it only in the gate-1 fallback (ADR §6 item 1) and only to a typed HTTPS address |
+| `pin` | object | one of `pin` or `plex_token` | `{"id": int, "client_id": str}`; `client_id` is the app's per-install identifier that created the pin and is copied into the outbound `X-Plex-Client-Identifier` header, so it must match `^[A-Za-z0-9-]{8,64}$` and `pin.id` must be a positive integer; anything else is `400 bad_request` before plex.tv is contacted |
+| `plex_token` | str | one of `pin` or `plex_token` | accepted only when `app.testing` is true or `request.is_secure` is true; otherwise `400 pin_required`. The app sends it only in the gate-1 fallback (ADR §6 item 1) and only to a typed HTTPS address. `is_secure` follows one hop of `X-Forwarded-Proto` (`ProxyFix(x_proto=1)`, `api/routes.py:119`, no trusted-proxy list) and is spoofable by a direct client, so this check is a guard against accidental misuse, not a boundary; the app's rule (send `plex_token` only to a typed `https://` address) is the control |
 | `device` | object | yes | `id` str (UUID, ≤64, stable per install), `name` str (≤80, `UIDevice.current.name`), `model` str (≤40, e.g. `iPhone16,1`), `os` str (≤40, e.g. `iOS 18.6`), `app` str (≤40, e.g. `1.0 (42)`) |
 
-Server-side order (ADR §4; design-A §3.1 step 7): limiter on `device.id` and overall; with `pin`, read `GET https://plex.tv/api/v2/pins/<id>` sending `X-Plex-Client-Identifier: <client_id>` and the server's usual headers (`api/plex_auth.py:32-39, 140-145`), refusing a pin whose `expiresIn` is not positive or which has no `authToken`; `plex_identity(token)` (`api/plex_auth.py:148-159`); the per-account limiter; `authorise(identity)` against `allowed_users()` (`api/plex_auth.py:162-200, 237-245`); `server_access_token(token)` (`api/plex_auth.py:203-234`); `start_session()` with the device columns, the per-server token encrypted as today (`api/plex_auth.py:323-340`), the session token stored as `sha256(token)`. The plex.tv account token is discarded. One session row per `device.id` (upsert), so a re-exchange never accumulates rows.
+Server-side order (ADR §4; design-A §3.1 step 7): limiter on `device.id` and overall; with `pin`, read `GET https://plex.tv/api/v2/pins/<id>` sending `X-Plex-Client-Identifier: <client_id>` and the server's usual headers (`api/plex_auth.py:32-39, 140-145`), refusing a pin whose `expiresIn` is not positive or which has no `authToken`; `plex_identity(token)` (`api/plex_auth.py:148-159`); the per-account limiter; `authorise(identity)` against `allowed_users()` (`api/plex_auth.py:162-200, 237-245`); `server_access_token(token)` (`api/plex_auth.py:203-234`); `start_session()` with the device columns, the per-server token encrypted as today (`api/plex_auth.py:323-340`), the session token stored as `sha256(token)`. The plex.tv account token is discarded. One session row per `device.id` (upsert), so a re-exchange never accumulates rows. A pin id is exchangeable once: after a successful `start_session()` the server inserts `pin.id` into a table `exchanged_pins (pin_id INTEGER PRIMARY KEY, at REAL)` purged of rows older than `PIN_LIFE`; a later exchange naming a pin id in that table is refused `401 pin_invalid` before plex.tv is contacted, so a LAN observer who replays the `{pin id, client_id}` pair with a `device.id` of their own gets nothing. The app mints a fresh hand-off pin for every exchange attempt. Phase 1 test: `test_pin_exchanged_once`.
 
 Response `200`:
 
@@ -399,7 +423,7 @@ Errors:
 | `409` | `pin_not_linked` | `"That sign-in has not finished at Plex yet."`: the pin exists but carries no `authToken` |
 | `401` | `plex_token_invalid` | `"Plex did not recognise that sign-in."`: `/api/v2/user` refused the token |
 | `403` | `not_shared` | `"That Plex account does not have access to this server."` (wording from `api/routes.py:1121-1124`) |
-| `403` | `invite_pending` | `"Nearly there - Plex sent you an invite to this server that hasn't been accepted yet. Accept it, then sign in here again."` (`api/routes.py:1133-1138`) |
+| `403` | `invite_pending` | `"Nearly there - Plex sent you an invite to this server that hasn't been accepted yet. Find it in your email or at plex.tv, accept it, then sign in here again."` (`api/routes.py:1133-1138`) |
 | `429` | `rate_limited` | plus `rate_limited: true`, `retry_after` int |
 | `502` | `plex_tv_unreachable` | `"could not reach plex.tv: <text>"` |
 | `503` | `plex_unavailable` | the Plex server itself is unreachable so the roster cannot be built |
@@ -443,7 +467,7 @@ Response `200`:
 | `session.expires_at` | str | ISO 8601 |
 | `server` | object | §3.1 body |
 
-Note: design-A §2.2 lists `email` and `thumb` here; the ADR's session columns (§2) do not store them, so they are returned only by §3.2 and the app caches them in the Keychain item for that server.
+Note: design-A §2.2 lists `email` and `thumb` here; the ADR's session columns (§2) do not store them, so they are returned only by §3.2 and the app keeps them in `UserDefaults` under `server.<machine_id>.email` and `server.<machine_id>.thumb` (02 §4.2; not the Keychain, which holds secrets only).
 
 Errors: `401` only. Side effects: `last_seen` updated (which slides an `ios` session).
 
@@ -451,7 +475,7 @@ Example: `GET /api/v1/auth/session` → `200 {"user": {"id": "12345678", "userna
 
 ### 3.4 `DELETE /api/v1/auth/session`
 
-Household. Signs out this device: the row named by the bearer is deleted. Response `204`. Errors: `401`. The app then wipes the Keychain items for that server. `POST /auth/logout` is not used.
+Household. Signs out this device: sets `revoked_at` on the row named by the bearer (as §3.6 does); the next request with that bearer is `401 session_revoked`. Response `204`. Errors: `401`. The app then wipes the Keychain items for that server. `POST /auth/logout` is not used.
 
 ### 3.5 `GET /api/v1/auth/sessions`
 
@@ -520,7 +544,7 @@ Response `200`:
 | `delivery` | str | `"relay"` or `"polling"` |
 | `skipped` | str | present only when config has no `notifications.test` block or it is disabled (`api/push.py:194-196`); the app then says so |
 
-In the polling state `sent` is `0` for a phone but the `events` row exists, so the next `GET /api/v1/changes` returns it and the app posts it as a local notification; that is how "Send a test" proves the fallback path. Errors: `401`.
+In the polling state `sent` is `0` for a phone but the `events` row exists, so the next `GET /api/v1/changes` returns it and the app posts it as a local notification; that is how "Send a test" proves the fallback path. Errors: `401`; `429 {"error": "That's a lot of test pushes - give it an hour.", "code": "rate_limited", "rate_limited": true}` after five calls by one `plex_user_id` in an hour (§1.7; 09 §6), which the Bell screen shows as `.rateLimited`.
 
 ### 3.11 `GET /api/v1/changes?since=<int>&limit=<int>`
 
@@ -550,7 +574,7 @@ Response `200`:
 | `title` | str | rendered from the catalogue (`api/push.py:202-205`) |
 | `body` | str | rendered |
 
-The app routes `wanted:<id>` to the wanted list (owner: Requests), `message:<id>` to the Inbox and `note:<id>` to the Bell (design-A §5.2), and de-duplicates on `id` against pushes already received. When more than `limit` rows are pending the app calls again with the returned cursor until `events` is empty.
+The app routes `wanted:<id>` to the wanted list (owner: Requests), `message:<id>` to the Inbox and `note:<id>` to the Bell (design-A §5.2), and de-duplicates on the key `<srv>|<kind>|<ref>` (`ChangeRouting.pushKey`, 04 §2.7; a push carries `ev`, `ref`, `srv` and never `events.id`, 05 §7.4) against pushes already received. When more than `limit` rows are pending the app calls again with the returned cursor until `events` is empty.
 
 Errors: `400 bad_request` for a non-integer `since` or `limit`; `401`. Side effects: none. Rate limit: none; the app calls it on every foreground and from `BGAppRefreshTask`.
 
@@ -568,7 +592,7 @@ GET /api/v1/changes?since=900&limit=50
 
 ### 3.12 `POST /api/v1/owner/relay`
 
-Owner. Stores the relay server key the owner's app obtained from the relay's `POST /v1/server-keys` (`05-push-relay.md`). Written to `data/relay.json` with mode `0600`, like `data/vapid.json` (`api/push.py:26-48`).
+Owner. Stores the relay server key the owner's app obtained from the relay's `POST /v1/server-keys` (`05-push-relay.md`). Written to `data/relay.json` with mode `0600` (created with `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)` as `api/secrets_store.py:24-29` does, never `write_text` then `chmod` as `api/push.py:44-46` does; `mark_inactive()` rewrites it the same way).
 
 Request JSON: `server_key` str (required, ≤256), `relay_url` str (required, `https://` only, ≤200), `expires_at` str (required, ISO 8601). Response `200 {"delivery": "relay", "relay_expires_at": str}`. Errors: `400 bad_request` (missing field, non-HTTPS `relay_url`, unparseable `expires_at`); `403`; `401`. Side effects: the file; `push.delivery` flips to `"relay"`; the inactive mark set by an earlier relay `401`/`403` is cleared.
 
@@ -603,7 +627,7 @@ The server key itself is never returned. Errors: `403`, `401`. Side effects: non
 
 ### 3.15 The JSON error handler
 
-An unhandled exception on any `/api/v1` path, or on any request carrying `Authorization: Bearer`, is answered `500 {"error": "something went wrong on the server", "code": "internal"}` rather than Flask's HTML page (ADR §2; owner-api.md §1.4, which names `/libraries` and `/summary` as routes with no `try/except`). The exception text is logged server-side, never sent.
+An unhandled exception on any `/api/v1` path, or on any request carrying `Authorization: Bearer`, is answered `500 {"error": "something went wrong on the server", "code": "internal"}` rather than Flask's HTML page (ADR §2; owner-api.md §1.4, which names `/libraries` and `/summary` as routes with no `try/except`). The exception text is logged server-side, never sent. The guard's `401` on the same paths carries `code` per §1.4a.
 
 ## 4. Existing endpoints the app calls unchanged
 
@@ -613,7 +637,7 @@ Each entry gives the tier, the request, the response field by field, the errors,
 
 **`GET /persona`** (`api/routes.py:829-857`; persona-themes-limits.md §1.3). No parameters. Always `200` with the `Persona` shape (§2.12); `Cache-Control: no-store`. The app fetches it once per launch and after every sign-in. Example: `200 {"name": "Reel", "greeting": "Name a film, a series, or just say what you fancy.", "brush_offs": ["Not that. Name a film."], "images": {"greeting": "/icons/reel-waving.png"}, "brush_off_moods": [], "smart_mode": true}`.
 
-**`GET /themes`** (`api/routes.py:781-787`; owner-api.md §2). No parameters. `200 {"themes": [Theme]}` (§2.13); `Cache-Control: no-store`. The list may be empty.
+**`GET /themes`** (`api/routes.py:781-787`; owner-api.md §2). No parameters. `200 {"themes": [Theme]}` (`ThemeList`, §2.13; `Theme` is §2.14); `Cache-Control: no-store`. The list may be empty.
 
 **`GET /themes/art/<slug>.png`** (`api/routes.py:789-797`). PNG bytes, `Cache-Control: public, max-age=600`; `404 {"error": "no such look"}`. Loaded through the Kit's image loader, not `URLSession` elsewhere.
 
@@ -643,11 +667,11 @@ Response `200`, a union keyed on `kind`. Always present: `request` str, `kind` s
 | `"cheeky"` | `"cheeky"` | `interpretation` is a `persona.brush_offs` line; `matches: []`; no `shows` key | `api/request_assistant.py:1119-1129` |
 | `"missing_only"` | model/cache/keywords | `for_age`; `shows: []`; `held_titles` [str]; `wants_shows` bool; `missing` [DiscoveryItem 2f]; `missing_are_shows` bool | `api/request_assistant.py:1164-1181`; `api/routes.py:1520-1549` |
 | `"mood"` | model/cache/keywords | `for_age`; no `shows` key; `missing` and `missing_are_shows` only when `include_missing` or `filters.only_missing` | `api/request_assistant.py:1183-1230` |
-| `"title_missing"` | model/cache/keywords | as `"mood"` plus `did_you_mean` [FilmGuess 2d, ≤5], `did_you_mean_shows` [ShowGuess 2e, ≤5], `close` [Film 2a and Show 2c mixed] | `api/routes.py:1484-1511` |
+| `"title_missing"` | model/cache/keywords | as `"mood"` plus `did_you_mean` [FilmGuess 2d, ≤5], `did_you_mean_shows` [ShowGuess 2e, ≤5], `close` [Film 2a and Show 2c mixed; the Show entries come from `search_shows` through `close_matches()` (`api/request_assistant.py:1081-1097`) and carry none of `held_seasons`, `all_seasons`, `missing_seasons`, `content_rating`] | `api/routes.py:1484-1511` |
 
 The Kit's `SearchResult` is an enum on `kind` with the extras as optionals; `close` decodes as an array of a `FilmOrShow` enum keyed on the presence of `kind == "show"`. `translated_by == "keywords"` with `smart_mode == true` means the model fell back this once; with `smart_mode == false` the server has no key (`request.html:1675-1694`).
 
-Errors: `400`; `401` with `auth_required` from `expired_session()` when the person's Plex token is dead; `429 {"error", "rate_limited": true, "hint": "You can still search for a film by name, and ask for anything we don't have."}`; `503`; `500 {"error": str}`. Side effects: `unavailable` films newly captured into `wanted` with note `"File missing from disk; surfaced by a search (<username>)"` and one `file_missing` push to the owner (`api/routes.py:1446-1481`). Rate limit: §1.7.
+Errors: `400`; `401` with `auth_required` from `expired_session()` when the person's Plex token is dead; `429 {"error", "rate_limited": true, "hint": "You can still search for a film by name, and ask for anything we don't have."}`; `503`; `500 {"error": str}`. Side effects (mood, `title_missing` and `missing_only` paths only; the title and person paths return at `api/routes.py:1406-1409` before the capture): `unavailable` films newly captured into `wanted` with note `"File missing from disk; surfaced by a search (<username>)"` and one `file_missing` push to the owner (`api/routes.py:1446-1481`). Rate limit: §1.7.
 
 Example (title path):
 
@@ -816,7 +840,7 @@ Errors: `503`; `502 {"error": "TMDb is unavailable: ..."}`. No side effects. Slo
 
 ### 4.23 `GET /reports/gaps?type=&library=&limit=` (owner; `api/routes.py:374-383`; owner-api.md §2)
 
-`type` `tv|franchise|alternate` (anything else yields `{}`); `limit` default 500. `200` keyed on `type`: `tv_gaps` [{`title` str, `library` str|null, `tmdb_id` int|null, `missing_seasons` [{`season` int}], `missing_episodes` [{`season` int, `episode` int, `episode_title` str|null}], `total_missing` int}]; `franchise_gaps` [{`collection` str, `library` str|null, `missing_count` int, `missing_entries` [{`title` str, `tmdb_id` int|null, `release_date` str|null}]}]; `alternate_versions` [{`title` str, `library` str|null, `tmdb_id` int|null, `versions` [{`detail` str}]}]. Empty until the gap analysis has run, which needs the filesystem scanner; the Overview screen says "nothing analysed yet" on empty lists and never offers to run it (`POST /analyze/gaps` is class C, §8).
+`type` `tv|franchise|alternate` (anything else yields `{}`); `limit` default 500. `200` keyed on `type`: `tv_gaps` [{`title` str, `library` str|null, `tmdb_id` int|null, `missing_seasons` [{`season` int}], `missing_episodes` [{`season` int, `episode` int, `episode_title` str|null}], `total_missing` int}]; `franchise_gaps` [{`collection` str, `library` str|null, `missing_count` int, `missing_entries` [{`title` str, `tmdb_id` int|null, `release_date` str|null}]}]; `alternate_versions` [{`title` str, `library` str|null, `tmdb_id` int|null, `versions` [{`detail` str}]}]. Empty until the gap analysis has run, which needs the filesystem scanner. No v1 screen calls this route; the Kit decodes `reports.gaps.tv.json` for the contract test only (04 §12 GAP 3), and nothing offers to run the analysis (`POST /analyze/gaps` is class C, §8).
 
 ### 4.24 `GET /summary` and `GET /libraries` (owner; `api/routes.py:134-192`; owner-api.md §2)
 
@@ -867,16 +891,29 @@ Each file in `tests/fixtures/api/` is one JSON object:
 |---|---|
 | any string matching `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$` | `"2026-01-02 03:04:05"` |
 | any string matching `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` | `"2026-01-02T03:04:05Z"` |
-| the value of any key named `token` | `"FIXTURE-TOKEN-0000000000000000000000000000000"` (43 chars) |
+| the value of any key named `token` | `"FIXTURE-TOKEN-00000000000000000000000000000"` (43 chars: 14 plus 29 zeros) |
 | the value of any key named `server_key` or `relay_handle` | `"FIXTURE-KEY"` |
 
-Everything else comes from the stubs, which are fixed data (`tests/conftest.py` monkeypatches `plex_auth.plex_identity`, `plex_auth.server_access_token`, `plex_auth.allowed_users`, the pin read, `relay.post`, `web_push.send_to_user` and the Plex search functions; design-A §10 Phase 1-2). Every test that exercises a route named in §6.4 calls `record`, so a run of `pytest -q` rewrites every fixture. CI then runs `git diff --exit-code tests/fixtures/api`, so a shape change that was not committed fails the build. Fixture data uses public-domain titles only, because the files are also the demo data and are screenshotted (ADR §7 Phase 9 banned-word review).
+Everything else comes from stubs, which are fixed data (design-A §10 Phase 1-2). `tests/conftest.py` stubs, by import site:
+
+| Seam | Stub |
+|---|---|
+| `api.plex_auth.plex_identity`, `server_access_token`, `allowed_users`, `read_pin` | fixed identities and a pin that carries an `authToken` |
+| `PlexServer` as imported in `api.user_library`, `api.suggestions`, `api.request_assistant`, `scanner.wanted_search` and `api.plex_auth` (`api/user_library.py:36`, `api/suggestions.py:37-55`, `api/request_assistant.py:391`, `scanner/wanted_search.py:47, 64`, `api/plex_auth.py:182, 220`) | one `FakePlexServer` class in `tests/fake_plex.py` exposing `machineIdentifier`, `friendlyName`, `version`, `library.sections()`, `library.section(name).search(...)`, `library.search(...)`, `fetchItem(key)`, `playlists()`, `playlist(title)`, `createPlaylist(...)`, `myPlexAccount()`, with items carrying `guids`, `title`, `year`, `ratingKey`, `thumb`, `art`, `summary`, `addedAt`, `media`, `roles`, `directors`, `writers`, `genres`, `seasons()`; the module caches `api.user_library._servers`, `scanner.wanted_search._server` and `_as_user`, and `api.request_assistant._plex` are reset before each test |
+| `api.ai.provider` | a fake adapter whose `structured(...)` method (`api/request_assistant.py:610`) returns a fixed filters JSON, so `translated_by == "model"` and `smart_mode` is true; the test config sets `ai.api_key: FIXTURE-AI-KEY` |
+| `api.tmdb_lookup.suggest`, `suggest_shows`, `discover`, `discover_shows`, `availability`, `genre_ids`, `seasons_that_exist` | fixed public-domain data; the test config sets `tmdb.api_key: FIXTURE-TMDB-KEY` so `/discover/missing` runs |
+| `api.limits` | driven to its ceiling for the `rate_limited` fixtures |
+| `api.relay.post` (Phase 2) and `api.push.send_to_user` | record the call, deliver nothing |
+
+Every fixture in §6.4 is recorded through these seams and no test opens a socket. Every test that exercises a route named in §6.4 calls `record`, so a run of `pytest -q` rewrites every fixture. CI then runs `git diff --exit-code tests/fixtures/api`, so a shape change that was not committed fails the build. Fixture data uses public-domain titles only, because the files are also the demo data and are screenshotted (ADR §7 Phase 9 banned-word review).
 
 ### 6.3 Reader (the Kit)
 
-The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy, refreshed by `scripts/sync-fixtures.sh <path-to-server-repo>`, committed with the server commit hash in `PlexGetKit/Tests/Fixtures/VERSION`). `PlexGetKit/Tests/PlexGetKitTests/FixturesTests.swift` holds a `FixtureCatalogue`: a dictionary from file name to a closure that decodes `body` with the named `Models` type and, when `status` is not `2xx` or the body carries `error`, asserts the error mapper's result. One test enumerates the directory and fails when a file has no catalogue entry; one test iterates the catalogue and fails when a file is missing. Decoding is strict on the fields listed in §2-§4 (a missing required field fails) and lenient on unknown keys (ignored). No fixture is ever edited by hand in either repository; a shape the Kit cannot decode is fixed by a server test and a change to this document (ADR §6 item 8). `DemoServerClient` reads the same files, so demo mode and the contract test cannot drift apart.
+The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy, refreshed by `scripts/sync-fixtures.sh <path-to-server-repo>`, committed with the server commit hash in `PlexGetKit/Tests/Fixtures/VERSION`). `PlexGetKit/Tests/PlexGetKitTests/FixturesTests.swift` holds a `FixtureCatalogue`: a dictionary from file name to a closure that decodes `body` with the named `Models` type and, when `status` is not `2xx` or the body carries `error`, asserts the error mapper's result. One test enumerates the directory and fails when a file has no catalogue entry; one test iterates the catalogue and fails when a file is missing. Decoding is strict on the fields listed in §2-§4 (a missing required field fails) and lenient on unknown keys (ignored). A `204` file has body `null` and its catalogue closure asserts the status only. No fixture is ever edited by hand in either repository; a shape the Kit cannot decode is fixed by a server test and a change to this document (ADR §6 item 8). `DemoServerClient` reads the same files, so demo mode and the contract test cannot drift apart.
 
 ### 6.4 File list
+
+77 rows; the Phase 2 gate counts the directory against this number. Kit error case names are 02 §6.1's verbatim.
 
 | File | Route and case | Kit type |
 |---|---|---|
@@ -884,25 +921,29 @@ The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy
 | `api.v1.server.setup.json` | §3.1 in setup mode | `ServerInfo` |
 | `api.v1.auth.plex.ok.shared.json` | §3.2 success, shared user | `AuthPlexResponse` |
 | `api.v1.auth.plex.ok.owner.json` | §3.2 success, owner | `AuthPlexResponse` |
-| `api.v1.auth.plex.pin_not_linked.json` | §3.2 `409` | error mapper |
-| `api.v1.auth.plex.not_shared.json` | §3.2 `403 not_shared` | error mapper |
-| `api.v1.auth.plex.invite_pending.json` | §3.2 `403 invite_pending` | error mapper |
+| `api.v1.auth.plex.pin_not_linked.json` | §3.2 `409` | `.conflict` |
+| `api.v1.auth.plex.not_shared.json` | §3.2 `403 not_shared` | `.notShared` |
+| `api.v1.auth.plex.invite_pending.json` | §3.2 `403 invite_pending` | `.invitePending` |
 | `api.v1.auth.plex.rate_limited.json` | §3.2 `429` | error mapper `.rateLimited` |
 | `api.v1.auth.session.json` | §3.3 | `SessionInfo` |
-| `api.v1.auth.session.unauthorised.json` | §3.3 with no bearer | `.signInRequired` |
-| `api.v1.auth.sessions.shared.json` | §3.5 as a member | `[Session]` |
-| `api.v1.auth.sessions.owner.json` | §3.5 as the owner, with `username` | `[Session]` |
+| `api.v1.auth.session.unauthorised.json` | §3.3 with no bearer | `.signInRequired(code: "session_expired")` |
+| `api.v1.auth.session.delete.json` | §3.4 `204` | `.none` (body `null`) |
+| `api.v1.auth.sessions.shared.json` | §3.5 as a member | `SessionList` |
+| `api.v1.auth.sessions.owner.json` | §3.5 as the owner, with `username` | `SessionList` |
+| `api.v1.auth.sessions.delete.json` | §3.7 `204` | `.none` |
 | `api.v1.push.devices.json` | §3.8 | `PushRegistration` |
-| `api.v1.push.devices.limit.json` | §3.8 sixth device | error mapper |
+| `api.v1.push.devices.limit.json` | §3.8 sixth device | `.conflict` |
+| `api.v1.push.devices.delete.json` | §3.9 `204` | `.none` |
 | `api.v1.push.test.json` | §3.10 | `PushTestResult` |
+| `api.v1.push.test.rate_limited.json` | §3.10 `429` | `.rateLimited` |
 | `api.v1.changes.shared.json` | §3.11 as a member | `ChangesPage` |
 | `api.v1.changes.owner.json` | §3.11 as the owner with `unread_messages` | `ChangesPage` |
 | `api.v1.owner.relay.json` | §3.12 | `RelayState` |
 | `api.v1.owner.status.json` | §3.14 | `OwnerStatus` |
 | `api.v1.owner.status.forbidden.json` | §3.14 as a member | `.ownerOnly` |
-| `api.v1.internal_error.json` | §3.15 | `.serverError` |
+| `api.v1.internal_error.json` | §3.15 | `.serverFault` |
 | `persona.json` | §4.1 | `Persona` |
-| `themes.json` | §4.1 with one owner-made look | `[Theme]` |
+| `themes.json` | §4.1 with one owner-made look | `ThemeList` |
 | `request.search.title.json` | §4.2 film named | `SearchResult.title` |
 | `request.search.title_show.json` | §4.2 series named | `SearchResult.title` with `shows` |
 | `request.search.person.json` | §4.2 person | `SearchResult.title` shape 2b |
@@ -912,7 +953,7 @@ The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy
 | `request.search.missing_only.json` | §4.2 | `SearchResult.missingOnly` |
 | `request.search.title_missing.json` | §4.2 with `did_you_mean`, `did_you_mean_shows`, `close` | `SearchResult.titleMissing` |
 | `request.search.rate_limited.json` | §4.2 `429` | `.rateLimited` with hint |
-| `request.search.expired.json` | §4.2 `401` with `auth_required` | `.signInRequired` |
+| `request.search.expired.json` | §4.2 `401` with `auth_required` (with a bearer, `code: plex_token_dead`, §1.4a) | `.signInRequired(code: "plex_token_dead")` |
 | `request.wanted.film_added.json` | §4.3 | `WantedResponse` |
 | `request.wanted.film_found.json` | §4.3 `found: true` | `WantedResponse` |
 | `request.wanted.film_missing.json` | §4.3 `file_missing: true` as a member (no `missing_files`) | `WantedResponse` |
@@ -934,9 +975,9 @@ The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy
 | `request.suggestions.json` | §4.12 | `Suggestions` |
 | `request.nudges.json` | §4.12 | `Nudges` |
 | `request.nudges.rate_limited.json` | §4.12 `200` with `rate_limited` | `.rateLimited` |
-| `request.announcements.json` | §4.13 | `[Note]` |
+| `request.announcements.json` | §4.13 | `NoteList` |
 | `request.message.json` | §4.14 | `MessageResult` |
-| `wanted.all.json` | §4.16 `?status=all`, owner, with `missing_files` present on nothing and `tmdb_id` on rows | `[WantedRow]` |
+| `wanted.all.json` | §4.16 `?status=all`, owner, with `missing_files` present on nothing and `tmdb_id` on rows | `WantedPage` |
 | `wanted.search.json` | §4.17 owner, with `missing_files` present | `WantedResponse` |
 | `wanted.status.json` | §4.18 | `WantedRow` |
 | `wanted.recheck.json` | §4.19 with one film and one show hit | `RecheckResult` |
@@ -952,7 +993,7 @@ The iOS repository vendors the directory as `PlexGetKit/Tests/Fixtures/` (a copy
 | `notifications.json` | §4.25 with the `announcement` key | `NotificationCatalogue` |
 | `members.json` | §4.28 | `Members` |
 | `members.picks.json` | §4.28 | `MemberPicks` |
-| `members.picks.not_signed_in.json` | §4.28 `409` | `.serverSaidNo` |
+| `members.picks.not_signed_in.json` | §4.28 `409` | `.conflict` |
 
 ## 7. What the server must strip or never send to members
 

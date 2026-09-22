@@ -63,13 +63,15 @@ selector, which live on the household page today (screens-inventory.md §2.22, �
 | Price | Owner confirms. Working figure £24.99 a year (design-A §11); Apple deducts UK VAT before its 15% small-business commission, so that nets nearer £17-18 (ADR §4). No monthly figure exists in any source; the owner sets it in App Store Connect at Phase 9 | ADR §4, §7 |
 | Billing Grace Period | 16 days, set by the human in App Store Connect so it matches the relay (ADR §2, §7 Phase 9). Apple offers 3, 16 or 28 (verified by the security judge, ADR §5 item 20); 16 is a choice, not the maximum | ADR §2, §5 |
 | Purchase screen | States the trial length, the price billed afterwards, the period, auto-renewal terms and links to the privacy policy and terms of use (design-A §9, guideline 3.1.2) | design-A §6, §9 |
-| Restore | "Restore purchases" calls `AppStore.sync()` (design-A §6; verified there from the framework as documented) | design-A §6 |
+| Restore | "Restore purchases" calls `AppStore.sync()` (design-A §6; unverified: the StoreKit 2 API names are from memory and Phase 7's compile is the check) | design-A §6 |
 
 ### 2.2 The entitlement, on the phone and at the relay
 
 On the phone, `Store` reads `Transaction.currentEntitlements` at launch, listens to `Transaction.updates` for the
-life of the app, reads `Product.SubscriptionInfo.Status` for grace and billing-retry states, and counts only
-`VerificationResult.verified` transactions (design-A §6; StoreKit 2 names marked verified there), producing
+life of the app, reads `Product.SubscriptionInfo.Status` (`.subscribed` and `.inGracePeriod` are active; billing
+retry, expired and revoked are not, 04 §3.3), and counts only
+`VerificationResult.verified` transactions (design-A §6; StoreKit 2 names from memory, checked when Phase 7 compiles;
+Gate: the Phase 7 build), producing
 `@Observable OwnerEntitlement { active, expiresAt, inGrace }`. Phase 7 forbids any other entitlement check and any
 non-IAP unlock outside the demo client (ADR §7 Phase 7).
 
@@ -239,43 +241,45 @@ URLs first (1.5 s) and falls back to the remote ones; the Home-network toggle go
 1. Installs Docker: Docker Desktop on a Mac or Windows PC, or `curl -fsSL https://get.docker.com | sh` on Linux
    (design-A §7 step 1). This is the hard step and the app cannot remove it. 10-30 minutes.
 2. Runs one command from the README: on Linux `docker run -d --name plexget --restart unless-stopped
-   --network host -v plexget-data:/data ghcr.io/<org>/plexget:latest`; on Docker Desktop the same with
-   `-p 5050:5050` in place of `--network host` and `plex.url` defaulting to `http://host.docker.internal:32400`;
-   or `docker compose up -d` with the shipped `docker-compose.yml`; or `install.sh`, which chooses (ADR §2;
-   design-A §7 step 2). 2-5 minutes, mostly the image pull.
+   -p 5050:5050 --add-host host.docker.internal:host-gateway -v plexget-data:/data ghcr.io/<org>/plexget:latest`;
+   on Docker Desktop the same without `--add-host`, and `plex.url` defaulting to
+   `http://host.docker.internal:32400`; `--network host` is a Linux-only option (06 §4.3); or
+   `docker compose up -d` with the shipped `docker-compose.yml`; or `install.sh`, which chooses (ADR §2;
+   06 §4.3). 2-5 minutes, mostly the image pull.
 3. Opens `http://<that machine>:5050/setup`. The server is in setup mode: `/health` answers `{"status": "setup"}`
    and only `/setup/*`, `/health` and `/api/v1/server` with `"setup": true` are served (design-A §7 step 3). The
    page is open to anyone on the LAN until the first save, so the copy says to do it now (design-A §8). 1 minute.
-4. "Connect Plex": the existing server-side PIN flow (`create_pin`/`check_pin`, `api/plex_auth.py:42-145`) with
-   `forwardUrl` set to the setup page; the page lists the owned servers from `/api/v2/resources`, tests
-   `PlexServer(url, token)` and writes `plex.url` and `plex.token` (design-A §7 step 4). 2-3 minutes.
-5. "Name and voice": `app.name` and one of the three shipped personas, `bruce` ("Bruce"), `dry-and-minimal`
-   ("Quill"), `warm-and-chatty` ("Bertie") (persona-themes-limits.md §1.1). 1 minute.
-6. "Optional keys": a TMDb key and a model key, with the note that without a key search is keyword-only
-   (design-A §7 step 4; persona-themes-limits.md §6.4). 0-5 minutes; skippable.
-7. "Reach it from outside": install Tailscale on the server machine, run `tailscale funnel 5050`, paste the
-   `https://<machine>.<tailnet>.ts.net` address; the page stores it as `app.urls.remote` and fetches its own
-   `/health` through it as a self-check (ADR §4 "Remote reach"; design-A §4.2), with the reverse-proxy and
-   Cloudflare Tunnel alternatives beside it. 10-20 minutes; skippable, returnable, and the likeliest abandonment
-   point (ADR §6 item 11).
-8. "Tell Plex when things arrive": the webhook URL with its generated `plex.webhook_key` for Plex Pass owners;
-   otherwise the page says the server checks every two hours (`PLEXGET_SETTLE_MINUTES=120`, ADR §2). 2-5 minutes.
-9. Save writes `/data/config.yaml` with `flask.host: 0.0.0.0` and `app.loopback_owner: false` together (ADR §4
-   "Bind address"), generates `data/secret.key`, `data/client_id` and the webhook key, and the process exits so
-   the restart policy brings it up configured (design-A §7 step 4). 1 minute.
-10. On the phone, steps 1-11 of §6.1. The role is `owner` because the roster's owner is whichever plex.tv account
-    holds `plex.token` (`api/plex_auth.py:174-175`); the app cannot claim it (design-A §3.2). The Console tab is
-    visible. 3-5 minutes.
-11. Uses the household side at home first: a search, an ask. The paywall is not shown until the app has worked
+4. "Sign in with Plex" (06 §5.3 step 1): the existing server-side PIN flow (`create_pin`/`check_pin`,
+   `api/plex_auth.py:42-145`) with `forwardUrl` set to the setup page. 2-3 minutes.
+5. "Choose the server" (06 §5.3 step 2): the page lists the owned servers from `/api/v2/resources`, tests
+   `PlexServer(url, token)` and writes `plex.url` and `plex.token`; `app.name` defaults to the picked server's
+   friendly name and is editable here; the persona stays `config.yaml`'s default. 1 minute.
+6. "TMDb key" (06 §5.3 step 3): pasted or skipped, with the note that without it there are no posters. 0-2
+   minutes; skippable.
+7. "Model key" (06 §5.3 step 4): pasted or skipped, with the note that without a key search is keyword-only
+   (persona-themes-limits.md §6.4). 0-3 minutes; skippable.
+8. "Reach it from outside" (06 §5.3 step 5): install Tailscale on the server machine, run `tailscale funnel 5050`,
+   paste the `https://<machine>.<tailnet>.ts.net` address; the page stores it as `app.urls.remote` and fetches its
+   own `/health` through it as a self-check (ADR §4 "Remote reach"; design-A §4.2), with the reverse-proxy and
+   Cloudflare Tunnel alternatives beside it. Save on this step writes `/data/config.yaml` with `flask.host:
+   0.0.0.0` and `app.loopback_owner: false` together (ADR §4 "Bind address"), generates `data/secret.key`,
+   `data/client_id` and `plex.webhook_key`, and re-executes the process so it comes up configured; the done
+   panel then shows the webhook URL with its key for Plex Pass owners (otherwise the server checks every two
+   hours, `PLEXGET_SETTLE_MINUTES=120`, ADR §2) and the invite link and QR (06 §5.3). 10-20 minutes for the
+   remote part; skippable, returnable, and the likeliest abandonment point (ADR §6 item 11).
+9. On the phone, steps 1-11 of §6.1. The role is `owner` because the roster's owner is whichever plex.tv account
+   holds `plex.token` (`api/plex_auth.py:174-175`); the app cannot claim it (design-A §3.2). The Console tab is
+   visible. 3-5 minutes.
+10. Uses the household side at home first: a search, an ask. The paywall is not shown until the app has worked
     at home (ADR §6 item 11).
-12. Opens the Console tab and sees the paywall: `owner.yearly` first with its 7-day trial, the price billed
+11. Opens the Console tab and sees the paywall: `owner.yearly` first with its 7-day trial, the price billed
     afterwards, the period, the terms and the two links (§2.1). On purchase the app posts the transaction's
     `jwsRepresentation` to `POST /v1/server-keys`, forwards `{server_key, expires_at}` to
     `POST /api/v1/owner/relay`, and the server answers `{"delivery": "relay"}` (§2.2). 2 minutes.
-13. Console, Server screen: shows the invite link and QR; "Send a test" on the Notifications screen calls
+12. Console, Server screen: shows the invite link and QR; "Send a test" on the Notifications screen calls
     `POST /api/v1/push/test` and the phone buzzes (design-A §5.4). Shares the link with the household. 2 minutes.
 
-Total 35-80 minutes, dominated by Docker and Tailscale. Without step 7 the household works at home only, and push
+Total 35-80 minutes, dominated by Docker and Tailscale. Without the remote address at step 8 the household works at home only, and push
 still works because the server reaches the relay outbound; without a Plex Pass webhook, "it arrived" is delayed by
 up to the settle interval (ADR §4 "Server install"; push-and-notifications.md §3.3).
 

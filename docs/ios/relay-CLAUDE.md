@@ -15,9 +15,12 @@ relay abuse, §11 the test names), 07-build-phases.md (Phase 0 skeleton, Phase 6
 
 ## 1. Repository facts
 
-- Keep the layout of 05-push-relay.md §2: `relay/__init__.py` (`create_app(config)`), `config.py`, `db.py`,
-  `apns.py`, `entitlements.py`, `quotas.py`, `routes.py`, `join.py`; `tests/` with one file per endpoint group;
-  `Dockerfile`, `compose.yaml`, `fly.toml`, `pytest.ini`. The phase prompts name files by that map.
+- Keep the layout of 05-push-relay.md §2: `relay/__init__.py` (`create_app(config)`), `wsgi.py`, `config.py`,
+  `db.py`, `apns.py`, `entitlements.py`, `quotas.py`, `routes.py`, `join.py`, `admin.py` (the one operator
+  command); `scripts/request-test-notification.py`; `tests/` with one file per endpoint group plus
+  `test_admin.py`; `Dockerfile`, `compose.yaml`, `fly.toml`, `pytest.ini`. The phase prompts name files by that map.
+  `relay/wsgi.py` holds `app = create_app(Config.from_env())` and nothing else; `relay/__init__.py` exposes only
+  the factory, so importing `relay` in tests validates no secrets (05 §9).
 - Record every Apple fact the code depends on in `docs/verified.md` as (verified: <url>, <date>) before the code that
   uses it is written. 05 §5 and §7 are from memory until then (ADR §6 gates 4 and 5).
 - Never add a route, table, column or field that 05-push-relay.md does not name. A missing one is a `GAP:` line
@@ -31,7 +34,7 @@ relay abuse, §11 the test names), 07-build-phases.md (Phase 0 skeleton, Phase 6
   (07-build-phases.md §2); the relay is 3.12 per 05 §2 and the relay `ci.yml` of 07 §4; do not mix them.
 - Set up with `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt -r requirements-dev.txt`. CI does
   the same on `ubuntu-24.04` with `python-version: "3.12"` (07-build-phases.md §4).
-- Run the gate exactly as: `venv/bin/pytest -q -v` (pass: "N passed", every 05 §12 case listed by name) and
+- Run the gate exactly as: `venv/bin/pytest -v` (pass: "N passed", every 05 §12 case listed by name) and
   `grep -rn "logger\|logging" relay/ | grep -i "body\|title"` (pass: no output). Both are Phase 6's gate
   (07-build-phases.md §5, Phase 6).
 - Never add a dependency beyond the list above. Each is supply-chain and review surface; a need for one is a
@@ -40,13 +43,15 @@ relay abuse, §11 the test names), 07-build-phases.md (Phase 0 skeleton, Phase 6
 ## 3. Deployment: one container
 
 - Ship one container from `python:3.12-slim`, non-root user `relay`, `VOLUME /data`, `HEALTHCHECK` on
-  `GET /v1/health`, `CMD ["waitress-serve", "--listen=0.0.0.0:8080", "--threads=8", "relay:app"]`. One process
+  `GET /v1/health`, `CMD ["waitress-serve", "--listen=0.0.0.0:8080", "--threads=8", "relay.wsgi:app"]`. One process
   keeps the quota counters and the provider-token cache coherent (05-push-relay.md §9; ADR §2).
 - Never run a second worker process, a `gunicorn` worker pool or a second replica against one database. The
   fixed-window counters in SQLite are correct only under one writer (05 §3.4).
 - Listen on plain HTTP 8080 inside the container only; TLS is terminated in front by Fly.io or the `caddy`
-  service in `compose.yaml`, and `RELAY_TRUST_PROXY=1` is set so the client IP is the first `X-Forwarded-For`
-  entry (05 §4, §9).
+  service in `compose.yaml`, and `RELAY_TRUST_PROXY=1` is set so the client IP is the last (rightmost) `X-Forwarded-For`
+  entry, the one the single trusted hop appended; the first entry is client-supplied and never used, since a
+  per-IP quota keyed on it is bypassed by one header (05 §4, §9; the server's `caller()` in `api/routes.py` does
+  the same).
 - Take every setting from the environment variables of 05-push-relay.md §9, validated in `relay/config.py` at
   start. A missing secret fails start-up loudly rather than at the first push.
 
@@ -66,8 +71,10 @@ relay abuse, §11 the test names), 07-build-phases.md (Phase 0 skeleton, Phase 6
 ## 5. Data the relay never holds
 
 - Never accept, store, forward or log a Plex token, a bearer session token, a PlexGet server address or URL, a
-  username, an email address or a plex.tv account id in any request, table, log line or error message. The relay's
-  value to an attacker must stay "APNs tokens under random handles" (ADR §1; 09-security.md §2.5).
+  username, an email address or a plex.tv account id as a named field in any request, table, log line or error
+  message. `title` and `body` are opaque text that the relay never inspects, stores or logs; a username inside
+  them (the server's `"Message from {who}"`) is the server's business (05 §1). The relay's value to an attacker
+  must stay "APNs tokens under random handles" (ADR §1; 09-security.md §2.5).
 - Reject any `POST /v1/push` field outside `handle`, `event`, `title`, `body`, `collapse_id`, `data.ref`, `data.srv`
   with `400 bad_request`; `srv` is the public Plex machine identifier, never an address (05 §4.5).
 - Never write a notification `title` or `body` to the database, a log, a metric label or an exception message.
