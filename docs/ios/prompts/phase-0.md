@@ -56,6 +56,8 @@ line moves here (07-build-phases.md §5 Phase 0) and `PLEXGET_DATA` and setup mo
 
 ## Steps
 
+Note: this server part of Phase 0 already exists, added with the library index: the `PLEXGET_CONFIG` line in `config.py`, `requirements-dev.txt` (pinned to `pytest==9.1.1`, the current release, not 8.x), `pytest.ini`, `tests/__init__.py`, `tests/conftest.py` (with `app`, `client`, `record`, plus `index_path` and `plex` fixtures and an `index` block in the temporary config), `tests/fake_plex.py`, `tests/test_smoke.py` and `tests/fixtures/api/.gitkeep`. Check each against this specification and fix any difference; do not recreate them.
+
 1. In this repository: `git checkout -b phase-0-scaffold main`. Confirm `config.yaml` is absent from the
    checkout; if present, do not delete it, note it, and make sure no test reads it.
 2. Edit `config.py` line 21 (`CONFIG_PATH = ROOT / "config.yaml"`) to `CONFIG_PATH = Path(os.environ.get("PLEXGET_CONFIG") or ROOT / "config.yaml")`,

@@ -80,3 +80,12 @@ contradicted it, the document was corrected. Read this before Phase 0; it is not
    recorded, not built.
 8. Reopening the tunnel decision if more than one TestFlight owner abandons at the remote-address step (ADR §6
    item 11; 08 §7); a Phase 9 observation, not a Phase 9 change.
+
+## 5. Changed since the review
+
+The server gained a library index (`scanner/library_index.py`) that searches ask before Plex. It changes no
+response shape the app decodes. Two things the builder should know: a `title_missing` search answer can now
+arrive with `translated_by: "title"` and empty `matches` when TMDb names the film exactly (03 §4, the search
+table), and the Phase 0 test harness in this repository already exists (07 §5 Phase 0 and prompts/phase-0.md
+carry a note saying what to check rather than create). The new routes `GET /index/status` and `POST
+/index/sync` are owner-tier console routes the app does not call.

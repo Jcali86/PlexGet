@@ -238,6 +238,8 @@ literals `lint.sh` greps), §2.9 (the `Bundle.module` gate), §3.1; 05-push-rela
 
 **Deliverables.**
 
+Note: this server part of Phase 0 already exists, added with the library index: the `PLEXGET_CONFIG` line in `config.py`, `requirements-dev.txt` (pinned to `pytest==9.1.1`, the current release, not 8.x), `pytest.ini`, `tests/__init__.py`, `tests/conftest.py` (with `app`, `client`, `record`, plus `index_path` and `plex` fixtures and an `index` block in the temporary config), `tests/fake_plex.py`, `tests/test_smoke.py` and `tests/fixtures/api/.gitkeep`. Check each against this specification and fix any difference; do not recreate them.
+
 | Repository | Path | Contents |
 |---|---|---|
 | this | `tests/conftest.py`, `tests/test_smoke.py`, `pytest.ini`, `requirements-dev.txt` | `conftest` writes a valid temporary `config.yaml` (`plex.url`, `plex.token`, `flask.host: 127.0.0.1`) at module level under `tempfile.mkdtemp()`, with `database.path` in the same directory (a pytest fixture such as `tmp_path_factory` cannot run before the module-level import), sets `PLEXGET_CONFIG` to it before `config` is imported, and provides `app`, `client` and `record` (03-server-api.md §6.2); the smoke test asserts `GET /health` is `200` with `status: "ok"` and `build` (`api/routes.py:127-132`); `testpaths = tests`; `pytest==8.<x>` |
