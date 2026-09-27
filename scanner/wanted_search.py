@@ -8,7 +8,10 @@ PlexUnavailable - an outage must never be recorded as a missing film.
 import datetime
 import os
 import re
+import threading
+import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 
 from plexapi.server import PlexServer
 
@@ -86,19 +89,19 @@ def search_shows(title, token=None):
     A series is returned as one result carrying its own counts, never as a heap
     of episodes: someone asking for Blackadder wants to know whether it is here
     and how much of it, not to scroll past twenty-four separate rows.
+
+    The library index is asked first which libraries could hold it at all. A
+    name it has never seen is answered without asking Plex anything; one it
+    has seen is searched for only in the libraries that hold it.
     """
     query = (title or "").strip()
     if not query:
         return []
 
     found = {}
-    for section in show_sections(token):
-        try:
-            results = section.search(title=query)
-        except Exception as e:
-            raise PlexUnavailable(str(e))
+    for section, results in _search_with_index(query, "show", show_sections(token)):
         for item in results:
-            confidence = title_confidence(query, item.title or "")
+            confidence = best_confidence(query, item.title, getattr(item, "originalTitle", None))
             if not confidence:
                 continue
             key = ((item.title or "").strip().lower(), item.year)
@@ -125,8 +128,73 @@ def search_shows(title, token=None):
     return ordered
 
 
+def _search_with_index(query, kind, sections):
+    """(section, results) for a title search, asking Plex only where it can help.
+
+    The library index says which libraries hold anything by that name; the
+    rest are not asked. What the index finds is then confirmed with the
+    person's own token, because Plex decides who may see what. Usually the
+    search by the typed words confirms it, but Plex matches those words more
+    literally than people type them - "oceans eleven" is not a word of "Ocean's
+    Eleven" to Plex - so anything the index found that the typed words did not
+    is looked up by its own title, which Plex always matches.
+    """
+    from scanner import library_index
+    held = library_index.lookup(query, kind, sections)
+    if held is None:
+        return _search_sections(sections, query)
+    holding = {key for key, _rating_key, _title in held}
+    answered = _search_sections([s for s in sections if str(s.key) in holding], query)
+    seen = {str(item.ratingKey) for _section, items in answered for item in items}
+    missed = {}
+    for key, rating_key, title in held:
+        if rating_key not in seen:
+            missed.setdefault((key, title), set()).add(rating_key)
+    if not missed:
+        return answered
+    by_key = {str(s.key): s for s in sections}
+
+    def by_own_title(job):
+        (key, title), wanted = job
+        section = by_key[key]
+        _section, items = _search_sections([section], title)[0]
+        return section, [item for item in items if str(item.ratingKey) in wanted]
+
+    jobs = list(missed.items())[:5]
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        extra = [pair for pair in pool.map(by_own_title, jobs) if pair[1]]
+    return answered + extra
+
+
+def _search_sections(sections, query):
+    """The same title search in several libraries at once, answered in library order.
+
+    Each library is its own request to Plex; asking them one after another made
+    a search as slow as all of them added together.
+    """
+    def one(section):
+        try:
+            return section, listed(section.search(title=query))
+        except Exception as e:
+            raise PlexUnavailable(str(e))
+
+    if len(sections) <= 1:
+        return [one(section) for section in sections]
+    with ThreadPoolExecutor(max_workers=min(len(sections), 8)) as pool:
+        return list(pool.map(one, sections))
+
+
 def seasons_held(rating_key, token=None):
-    """Which season numbers of a series are actually here."""
+    """Which season numbers of a series are actually here.
+
+    Only ever asked about a series the person's own search has already shown
+    them, so the index's list is theirs too: a share covers a whole series, not
+    some of its seasons.
+    """
+    from scanner import library_index
+    known = library_index.seasons_of(rating_key)
+    if known is not None:
+        return known
     try:
         show = server_for(token).fetchItem(int(rating_key))
         return sorted(
@@ -209,15 +277,84 @@ def availability(item):
     different questions. A film whose every copy is gone is, in practice,
     missing - UNLESS the store it lives on is offline, in which case it is
     simply unknown, and saying so beats declaring it gone.
+
+    The library index checks every file in the background, so a search asks it
+    first and only looks at the disk itself when the index has no fresh answer
+    for exactly these files. Looking at the disk from inside a search is what
+    let one wedged network share hold a page open for as long as the share
+    stayed wedged.
     """
-    # Judge each copy at the path this app can actually reach, not the one
-    # Plex happens to name.
-    files = [paths.readable_path(f) for f in part_files(item)]
-    offline = [f for f in files if paths.store_offline(f)]
-    # Only files whose store is actually readable can be judged; a file on an
-    # offline store is unknown, never missing.
-    checkable = [f for f in files if f not in offline]
-    missing = [f for f in checkable if not os.path.exists(f)]
+    files = part_files(item)
+    from scanner import library_index
+    known = library_index.file_state(getattr(item, "ratingKey", None), files)
+    if known is not None:
+        return known
+    return availability_of(files)
+
+
+def _unknown(files):
+    """The verdict for files that could not be looked at: unknown, never missing."""
+    return {"files": len(files), "missing_files": [], "store_offline": bool(files),
+            "all_missing": False, "some_missing": False}
+
+
+# After a disk check has run out of time, others are not attempted for a while.
+# A wedged mount stays wedged, and every search waiting its turn behind it
+# would otherwise pay the full timeout again, once per film.
+_wedged_until = 0.0
+
+
+def availability_of(files):
+    """Check these files on disk now, giving up after the probe timeout.
+
+    The store each file lives on is asked first, through the guarded probe in
+    scanner.paths, so a drive that has gone away is found out without touching
+    any file on it. The files themselves are then looked at on a thread this is
+    prepared to abandon, because a file on no configured store is looked at
+    directly, and a hung network mount does not refuse - it hangs.
+    """
+    global _wedged_until
+    files = list(files or [])
+    if not files:
+        return files_state(files)
+    if time.time() < _wedged_until:
+        return _unknown(files)
+    outcome = []
+
+    def check():
+        try:
+            outcome.append(files_state(files))
+        except Exception:
+            # A fault is not a hang: answer unknown without holding back the
+            # checks that come after.
+            outcome.append(_unknown(files))
+
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    worker.join(paths.probe_timeout())
+    if outcome:
+        return outcome[0]
+    _wedged_until = time.time() + paths.probe_cache()
+    return _unknown(files)
+
+
+def files_state(files):
+    """Which of these files are on disk, judged the way availability() judges.
+
+    Unguarded: the library index runs this on its own thread, where a slow
+    answer holds up nobody. Everything on the request path goes through
+    availability_of() instead.
+    """
+    offline, checkable = [], []
+    for path in files:
+        names = paths.store_for(path)
+        if names and not any(paths.store_ready(name) for name in names):
+            offline.append(path)
+            continue
+        # Judge each copy at the path this app can actually reach, not the one
+        # Plex happens to name.
+        checkable.append(paths.readable_path(path))
+    missing = [path for path in checkable if not os.path.exists(path)]
     return {
         "files": len(files),
         "missing_files": missing,
@@ -232,10 +369,36 @@ def availability(item):
     }
 
 
+def listed(items):
+    """Search results as Plex listed them, never quietly fetched again one by one.
+
+    plexapi treats a search result as a partial object: reading any field that
+    came back empty - an unrated film's contentRating, a missing audienceRating
+    or originalTitle - makes it fetch that whole film from Plex again, one
+    request per film, inside the search. The listing already carries every
+    field these pages show, so an empty field is simply empty.
+    """
+    for item in items or []:
+        try:
+            item._autoReload = False
+        except AttributeError:
+            pass
+    return items
+
+
+_APOSTROPHES = re.compile("['`\u2018\u2019\u02bc]")
+
+
 def fold(value):
-    """Compare titles the way people do: ignoring case, accents and punctuation."""
+    """Compare titles the way people do: ignoring case, accents and punctuation.
+
+    An apostrophe joins rather than splits, because nobody types one: split,
+    "oceans eleven" was never Ocean's Eleven and "dont look up" was never Don't
+    Look Up. An ampersand is the word it stands for.
+    """
     decomposed = unicodedata.normalize("NFKD", value or "")
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    stripped = _APOSTROPHES.sub("", stripped).replace("&", " and ")
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", stripped)).strip().lower()
 
 
@@ -293,23 +456,58 @@ def title_confidence(query, title):
     return 0
 
 
+# "Matrix" is The Matrix. Measured against the full name it only ever came out
+# as a maybe, and a maybe is never claimed, so naming a film without its
+# article sent the search down the slow path meant for films the library does
+# not have.
+_ARTICLE = re.compile(r"^(the|a|an)\s+", re.I)
+
+
+def best_confidence(query, *names):
+    """title_confidence against every name a film goes by, the best of them.
+
+    Its title, its title without a leading article, and its original title - so
+    "matrix" finds The Matrix and "le fabuleux destin d'amelie poulain" finds
+    Amelie. The rules for each comparison are title_confidence's own.
+    """
+    best = 0
+    for name in names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        best = max(best, title_confidence(query, name))
+        bare = without_article(name)
+        if bare != name:
+            best = max(best, title_confidence(query, bare))
+        if best == 2:
+            break
+    return best
+
+
+def without_article(name):
+    """A name without a leading "The", "A" or "An"."""
+    return _ARTICLE.sub("", (name or "").strip())
+
+
 def search_plex(title, token=None):
     """Search every movie library for a title.
 
     Plex matches on word boundaries, case- and accent-insensitively, so
     "anchorman" finds "Anchorman: The Legend of Ron Burgundy" and "amelie"
     finds "Amelie". A film held in two libraries is returned once, listing both.
+
+    The library index is asked first which libraries could hold it. A title it
+    has never seen is answered with nothing, without a single request to Plex -
+    the case that used to cost the most, because every library had to be asked
+    to be sure. One it has seen is confirmed with the person's own token, only
+    in the libraries that hold it, since Plex also decides who may see what.
     """
     query = (title or "").strip()
     if not query:
         return []
 
-    collected = {}
-    for section in movie_sections(token):
-        try:
-            results = section.search(title=query)
-        except Exception as e:
-            raise PlexUnavailable(str(e))
+    collected, originals = {}, {}
+    for section, results in _search_with_index(query, "movie", movie_sections(token)):
         for item in results:
             key = ((item.title or "").strip().lower(), item.year)
             if key in collected:
@@ -317,6 +515,7 @@ def search_plex(title, token=None):
                     collected[key]["libraries"].append(section.title)
                 continue
             state = availability(item)
+            originals[key] = getattr(item, "originalTitle", None)
             collected[key] = {
                 "title": (item.title or "").strip(),
                 "year": item.year,
@@ -331,8 +530,8 @@ def search_plex(title, token=None):
                 "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     scored = []
-    for movie in collected.values():
-        confidence = title_confidence(query, movie["title"])
+    for key, movie in collected.items():
+        confidence = best_confidence(query, movie["title"], originals.get(key))
         if confidence:
             movie["confidence"] = confidence
             scored.append((confidence, movie))

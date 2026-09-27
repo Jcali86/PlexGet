@@ -13,6 +13,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from scanner import MediaScanner
 from scanner.gap_analysis import run_full_analysis, run_tv_analysis, run_movie_analysis
 from scanner import discover
+from scanner import library_index
 from scanner.quality_auditor import run_quality_audit
 from scanner.reports import generate_upgrade_report, generate_gap_report, generate_poster_report
 from scanner.plex_fixer import run_audit, apply_rename, apply_batch, get_known_issues
@@ -32,7 +33,9 @@ from api import user_library
 from api import themes as looks
 from api.ai import has_api_key
 from api.request_assistant import (
-    close_matches,
+    describe_missing,
+    names_a_film,
+    title_missing as title_missing_answer,
     off_topic,
     search as mood_search,
     search_by_person,
@@ -40,14 +43,16 @@ from api.request_assistant import (
     showcase,
     worth_asking,
 )
-from scanner.wanted_search import parse_query, query_hint
+from scanner.wanted_search import parse_query
 from scanner.wanted_search import (
     PlexTokenDead,
     PlexUnavailable,
     export_text as wanted_export_text,
     recheck as recheck_wanted,
+    movie_sections,
     search_and_capture,
     search_shows,
+    show_sections,
 )
 from analyzer import MediaAnalyzer
 from config import config
@@ -77,7 +82,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "missing-search-4"
+BUILD = "library-index-1"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
@@ -85,6 +90,9 @@ FEATURES = [
     "ask-companion-guard",  # the making-of no longer answers for the film
     "account-skins",        # config can dress an account in a look, e.g. bruce
     "persona-by-name",      # persona: bruce in config reads personas/bruce.yaml
+    "year-in-title",        # "Resident Evil 2026" is no longer answered with the 2002 film
+    "report-a-problem",     # the household can tell the owner something is wrong, from the page
+    "library-index",        # searches ask the local catalogue first; a miss asks Plex nothing
 ]
 
 
@@ -290,6 +298,22 @@ def create_app():
         rows = db.get_gaps(gap_type=gap_type, library=library)
         db.close()
         return jsonify([dict(row) for row in rows])
+
+    @app.route("/index/status")
+    def index_status():
+        """The library index: what it holds, how fresh it is, where the file lives."""
+        return jsonify(library_index.status())
+
+    @app.route("/index/sync", methods=["POST"])
+    def index_sync():
+        """Refresh the library index now. JSON body {"full": true} re-reads every library."""
+        body = request.get_json(silent=True) or {}
+        ok, why = library_index.available()
+        if not ok:
+            return jsonify({"error": f"the library index is not in use: {why}"}), 409
+        full = bool(body.get("full"))
+        how = library_index.request_sync(full=full)
+        return jsonify({"sync": how, "full": full, "status": library_index.status()})
 
     @app.route("/discover/genres")
     def discover_genres():
@@ -685,6 +709,20 @@ def create_app():
         event = payload.get("event")
         if event != "library.new":
             return jsonify({"ignored": event}), 200
+        # Into the library index first. The check against the wanted list below
+        # trusts the index to say what is missing, and an index that had not
+        # heard of the new arrival would say it was still missing.
+        indexed = None
+        key = str((payload.get("Metadata") or {}).get("ratingKey") or "")
+        if key.isdigit():
+            try:
+                indexed = library_index.add_or_refresh(key)
+            except Exception:
+                indexed = None
+        if not indexed:
+            # Not brought in: make the next miss look at new additions again
+            # rather than believe an index that may be one film behind.
+            library_index.forget_recent()
         db = Database()
         try:
             outcome = settle_wanted(db)
@@ -692,7 +730,7 @@ def create_app():
             return plex_trouble(e)
         finally:
             db.close()
-        return jsonify({"event": event, **outcome})
+        return jsonify({"event": event, **outcome, "indexed": indexed})
 
     @app.route("/wanted/recheck", methods=["GET", "POST"])
     def wanted_recheck():
@@ -1353,6 +1391,20 @@ def create_app():
                 show["all_seasons"], show["missing_seasons"] = [], []
         return result
 
+    def held_verdicts(candidates, token, as_shows=False):
+        """For each suggestion, whether the shelves already hold it; None when unknown.
+
+        Answered by the library index in one lookup per suggestion. Before it,
+        each suggestion cost a full title search of every library in turn - the
+        "include ones we haven't got" box alone was eight of those in a row.
+        """
+        try:
+            sections = show_sections(token) if as_shows else movie_sections(token)
+        except PlexUnavailable:
+            return None
+        return library_index.owned(candidates, "show" if as_shows else "movie",
+                                   [s.key for s in sections])
+
     def only_what_we_lack(candidates, token, as_shows=False):
         """Drop anything from a discovery list that is on the shelves after all.
 
@@ -1364,6 +1416,9 @@ def create_app():
         before it is offered, which is what the playlist builder was already
         doing one route over.
         """
+        verdicts = held_verdicts(candidates or [], token, as_shows)
+        if verdicts is not None:
+            return [item for item, held in zip(candidates, verdicts) if not held]
         keep = []
         for item in candidates or []:
             title, year = item.get("title"), item.get("year")
@@ -1409,6 +1464,20 @@ def create_app():
             by_title["captured_missing"] = []
             return jsonify(add_season_detail(by_title))
 
+        # The name of a real film or series that is not on the shelves needs no
+        # model to understand it and no looser search to pad it out: say so and
+        # offer to ask for it. Free, like any title search.
+        try:
+            lacking = names_a_film(query)
+        except Exception:
+            lacking = False
+        if lacking:
+            result = title_missing_answer(query)
+            result.update(describe_missing(query, user.get("plex_token")))
+            result["captured_missing"] = []
+            result["smart_mode"] = has_api_key()
+            return jsonify(result)
+
         # Reserved before the call rather than recorded after it: a burst of
         # requests arriving together would otherwise all pass a check none of
         # them had yet paid for.
@@ -1436,7 +1505,7 @@ def create_app():
                     gb.close()
 
         try:
-            result = mood_search(query, token=user.get("plex_token"))
+            result = mood_search(query, token=user.get("plex_token"), tried_title=True)
         except PlexTokenDead:
             give_back()
             return expired_session()
@@ -1490,41 +1559,7 @@ def create_app():
         # Nothing in the library matches a title they named: work out which film
         # they mean, so what goes on the list is a real one with a year on it.
         if result.get("kind") == "title_missing":
-            # Parse the query rather than trusting the mood result to carry a
-            # title: it does not, so this was searching TMDb for "Taxi (French)"
-            # rather than for Taxi.
-            named, said_year = parse_query(query)
-            result["did_you_mean"] = tmdb_lookup.suggest(
-                named or query, hint=query_hint(query), year=said_year
-            )
-            # A film still on at the pictures cannot be put on anybody's shelf,
-            # so say so rather than offering to add it and quietly never
-            # delivering. Only the top few are checked - one call each, and
-            # nobody reads past them.
-            for guess in result["did_you_mean"][:3]:
-                try:
-                    state, when = tmdb_lookup.availability(guess.get("tmdb_id"))
-                except Exception:
-                    state, when = "out", None
-                guess["release_state"] = state
-                guess["available_from"] = when
-            # It might be a series rather than a film, in which case the useful
-            # answer is which series, and whether they want all of it.
-            shows = tmdb_lookup.suggest_shows(named or query, hint=query_hint(query))
-            for show in shows[:3]:
-                try:
-                    show["all_seasons"] = [
-                        s["season"] for s in tmdb_lookup.seasons_that_exist(show["title"], show.get("year"))
-                    ]
-                except Exception:
-                    show["all_seasons"] = []
-            result["did_you_mean_shows"] = shows
-            # Anything in the library with a similar name, offered as a maybe
-            # rather than presented as the answer.
-            try:
-                result["close"] = close_matches(query, user.get("plex_token"))
-            except PlexUnavailable:
-                result["close"] = []
+            result.update(describe_missing(query, user.get("plex_token")))
 
         add_season_detail(result)
         result["captured_missing"] = captured
@@ -1724,16 +1759,20 @@ def create_app():
                           if as_shows else
                           tmdb_lookup.discover(found.get("filters") or {},
                                                exclude_titles=have, limit=8))
+            verdicts = held_verdicts(candidates, user.get("plex_token"), as_shows)
             db = Database()
             try:
-                for film in candidates:
+                for position, film in enumerate(candidates):
                     # Cheap, and it stops us asking for something on the shelf:
                     # discovery only knows what we showed it, not the library.
                     # A series has to be looked for among the series: asking
                     # the film sections for Fawlty Towers finds nothing, and
                     # puts a show we already have on the wanted list.
                     try:
-                        if as_shows:
+                        if verdicts is not None:
+                            if verdicts[position]:
+                                continue
+                        elif as_shows:
                             if search_shows(film["title"], user.get("plex_token")):
                                 continue
                         elif search_by_title(f"{film['title']} ({film['year']})" if film["year"]
@@ -2109,5 +2148,8 @@ def create_app():
             mimetype=r.headers.get("content-type", "image/jpeg"),
             headers={"Cache-Control": "public, max-age=86400"},
         )
+
+    # Keeps the library index fresh from now on; see scanner/library_index.py.
+    library_index.start_background()
 
     return app

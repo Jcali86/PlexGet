@@ -103,6 +103,12 @@ What they get:
   left can be put on the wanted list with one click. The rating is TMDb's user
   score rather than IMDb's; the two run close enough that a floor of six means
   the same thing on either.
+- **A library index.** Every film and series on the server, kept in a small
+  SQLite file on this machine and refreshed in the background. Searches ask it
+  before they ask Plex: a title the library does not have is answered without a
+  single request to Plex, and a named film you lack is answered straight from
+  TMDb instead of going through the model. It can live on any local drive; see
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#the-library-index).
 - **Library maintenance tooling** — a file scanner, an ffprobe quality audit, a
   TMDb gap analysis, a filename auditor and a poster pipeline. This is the
   older half of the project and it assumes the machine running it can see the
@@ -460,6 +466,7 @@ api/
   secrets_store.py    encryption for stored Plex tokens
 scanner/              the maintenance half: files, quality, gaps, names
   discover.py         films TMDb rates well, by genre, that Plex lacks
+  library_index.py    the local catalogue searches ask before Plex
 analyzer/             ffprobe and TMDb helpers
 db/database.py        SQLite schema and queries
 dashboard/

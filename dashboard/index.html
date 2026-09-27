@@ -851,6 +851,27 @@
 
   .download-btn:hover { background: var(--accent-dim); }
 
+  /* The library index */
+  .index-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+  }
+  .index-panel.stale { border-left-color: var(--yellow); }
+  .index-panel.off { border-left-color: var(--red); }
+  .index-panel b { font-size: 14px; }
+  .index-panel .dim { color: var(--text-dim); }
+  .index-panel .path { color: var(--text-dim); font-size: 11px; word-break: break-all; flex-basis: 100%; }
+  .index-panel .actions { margin-left: auto; display: flex; gap: 8px; }
+
   /* Messages from the household */
   nav .badge {
     display: inline-block; min-width: 18px; padding: 1px 6px; margin-left: 4px;
@@ -896,6 +917,7 @@
 <main>
   <!-- Overview Tab -->
   <div class="tab active" id="tab-overview">
+    <div class="index-panel" id="indexPanel"><span class="loading">Library index</span></div>
     <div class="cards" id="summaryCards"><div class="loading">Loading summary</div></div>
     <div class="chart-container">
       <h3>Quality Score Distribution</h3>
@@ -1813,6 +1835,69 @@ document.getElementById('wantedQuery').addEventListener('keydown', e => {
 
 // Boot
 loadOverview();
+
+// ---- The library index ----
+function ago(stamp) {
+  if (!stamp) return 'never';
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - stamp));
+  for (const [size, unit] of [[86400, 'day'], [3600, 'hour'], [60, 'minute']]) {
+    if (seconds >= size) { const n = Math.floor(seconds / size); return `${n} ${unit}${n === 1 ? '' : 's'} ago`; }
+  }
+  return 'just now';
+}
+
+async function loadIndex() {
+  const box = document.getElementById('indexPanel');
+  try {
+    const d = await (await fetch(API + '/index/status')).json();
+    drawIndex(box, d);
+    return d;
+  } catch (e) {
+    box.className = 'index-panel off';
+    box.innerHTML = `<b>Library index</b><span class="dim">could not be read: ${esc(e.message)}</span>`;
+    return null;
+  }
+}
+
+function drawIndex(box, d) {
+  if (!d.available) {
+    box.className = 'index-panel off';
+    box.innerHTML = `<b>Library index off</b><span class="dim">${esc(d.reason || '')}. Searches ask Plex directly.</span>
+      <span class="path">${esc(d.path)}</span>`;
+    return;
+  }
+  const f = d.files || {};
+  box.className = 'index-panel' + (d.ready ? '' : ' stale');
+  box.innerHTML = `<b>Library index</b>
+    <span>${(d.films || 0).toLocaleString()} films · ${(d.series || 0).toLocaleString()} series</span>
+    <span class="dim">read ${ago(d.full_synced_at)}${d.full_sync_seconds ? ` in ${Math.round(d.full_sync_seconds)}s` : ''}</span>
+    <span class="dim">files ${(f.ok || 0).toLocaleString()} fine${f.missing ? `, <span style="color:var(--red)">${f.missing} missing</span>` : ''}${f.unknown ? `, ${f.unknown} unreadable` : ''}</span>
+    ${d.working_on ? `<span class="dim">now: ${esc(d.working_on)}…</span>` : ''}
+    ${d.last_error ? `<span style="color:var(--red)">${esc(d.last_error)}</span>` : ''}
+    <span class="actions">
+      <button class="copy-btn" onclick="syncIndex(false)">Check for new</button>
+      <button class="copy-btn" onclick="syncIndex(true)">Re-read everything</button>
+    </span>
+    <span class="path">${esc(d.path)} · ${((d.size_bytes || 0) / 1048576).toFixed(1)} MB</span>`;
+}
+
+async function syncIndex(full) {
+  try {
+    const res = await fetch(API + '/index/sync', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({full}),
+    });
+    const d = await res.json();
+    if (!res.ok) { alert(d.error || res.statusText); return; }
+  } catch (e) { alert(e.message); return; }
+  // A full read of a big library takes a while; look again until it is done.
+  for (let tries = 0; tries < 200; tries++) {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    const d = await loadIndex();
+    if (!d || !d.working_on) break;
+  }
+}
+
+loadIndex();
 loadUpgrades();
 loadGaps();
 loadPosters();

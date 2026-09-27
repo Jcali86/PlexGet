@@ -21,7 +21,8 @@ import time
 import requests
 
 from config import config
-from scanner.wanted_search import PlexUnavailable, fold, movie_sections
+from scanner import library_index
+from scanner.wanted_search import PlexUnavailable, fold, listed, movie_sections
 
 POSTER = "https://image.tmdb.org/t/p/w185"
 RATE_LIMIT_DELAY = 0.26          # the same throttle the gap analysis uses
@@ -112,40 +113,60 @@ def _title_keys(title, year):
 def owned_index(refresh=False):
     """Every film Plex lists, keyed by TMDb id, IMDb id and folded title.
 
-    Built from a single listing per library rather than a lookup per film: a
-    shopping list a hundred films long would otherwise be a hundred round
-    trips. Ten minutes is long enough to page through results and short
-    enough that a film added this evening is not offered again tomorrow.
+    Taken from the library index when it can vouch for every film library,
+    which costs no request to Plex at all. Otherwise built from a single
+    listing per library rather than a lookup per film: a shopping list a
+    hundred films long would otherwise be a hundred round trips. A listing is
+    kept for ten minutes, long enough to page through results and short enough
+    that a film added this evening is not offered again tomorrow; the index is
+    kept fresh by its own worker, so what comes from it is kept for one.
     """
     global _owned
-    if _owned and not refresh and time.time() - _owned[0] < OWNED_CACHE_SECONDS:
+    if _owned and not refresh and time.time() - _owned[0] < _owned[2]:
         return _owned[1]
 
     index = {"tmdb": set(), "imdb": set(), "titles": set(), "count": 0}
-    for section in movie_sections():
+    sections = movie_sections()
+    rows = library_index.catalogue("movie", [s.key for s in sections])
+    if rows is not None:
+        for row in rows:
+            _note(index, row["tmdb_id"], row["imdb_id"], (row["title"], row["original_title"]), row["year"])
+        _owned = (time.time(), index, 60)
+        return index
+
+    for section in sections:
         try:
-            films = section.all()
+            # listed(): an empty original title must not make plexapi fetch
+            # every film again, one request each.
+            films = listed(section.all())
         except Exception as e:
             raise PlexUnavailable(str(e))
         for film in films:
-            index["count"] += 1
+            ids = {}
             for guid in (film.guids or []):
-                gid = guid.id or ""
-                if gid.startswith("tmdb://"):
-                    index["tmdb"].add(gid[7:])
-                elif gid.startswith("imdb://"):
-                    index["imdb"].add(gid[7:])
-            for name in (film.title, film.originalTitle):
-                # Only the exact year goes in; the tolerance is applied when
-                # a candidate is looked up, so it is not doubled. A film Plex
-                # holds no year for is keyed as None, so it still matches a
-                # dated candidate; "any" answers a candidate with no year.
-                key = fold(name)
-                if key:
-                    index["titles"].add((key, film.year))
-                    index["titles"].add((key, "any"))
-    _owned = (time.time(), index)
+                scheme, _, value = (guid.id or "").partition("://")
+                ids.setdefault(scheme, value)
+            _note(index, ids.get("tmdb"), ids.get("imdb"), (film.title, film.originalTitle), film.year)
+    _owned = (time.time(), index, OWNED_CACHE_SECONDS)
     return index
+
+
+def _note(index, tmdb_id, imdb_id, names, year):
+    """Add one film to an owned index."""
+    index["count"] += 1
+    if tmdb_id:
+        index["tmdb"].add(str(tmdb_id))
+    if imdb_id:
+        index["imdb"].add(str(imdb_id))
+    for name in names:
+        # Only the exact year goes in; the tolerance is applied when a
+        # candidate is looked up, so it is not doubled. A film Plex holds no
+        # year for is keyed as None, so it still matches a dated candidate;
+        # "any" answers a candidate with no year.
+        key = fold(name)
+        if key:
+            index["titles"].add((key, year))
+            index["titles"].add((key, "any"))
 
 
 def is_owned(index, tmdb_id, title, original_title, year):
