@@ -47,7 +47,37 @@ DEFAULTS = {
     # if all you want is the request page.
     "nas": {},
     "app": {},
-    "notifications": {},
+    # Every notification has a default wording, the same as the example
+    # file's, so a config.yaml written by hand without a notifications block
+    # still sends them. Without these, "it's here" was silently never sent to
+    # anybody on such a config. Each can still be reworded or switched off.
+    "notifications": {
+        "arrived": {
+            "enabled": True,
+            "title": "It's here",
+            "body": "{film} is now on Plex - the film you asked for.",
+        },
+        "requested": {
+            "enabled": True,
+            "title": "New request",
+            "body": "{who} asked for {film}",
+        },
+        "file_missing": {
+            "enabled": True,
+            "title": "A file has gone missing",
+            "body": "{film} is in Plex but the file is gone. It is back on the wanted list.",
+        },
+        "message": {
+            "enabled": True,
+            "title": "Message from {who}",
+            "body": "{text}",
+        },
+        "test": {
+            "enabled": True,
+            "title": "Notifications",
+            "body": "Notifications are working. You'll hear from us when a film you asked for arrives.",
+        },
+    },
     # The optional services. Blank keys are how each of them is turned off, so
     # a config.yaml that says nothing about TMDb gets a TMDb that is switched
     # off rather than a server that will not start. Two of the modules behind

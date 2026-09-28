@@ -328,6 +328,10 @@ notifications:
     enabled: true
     title: "A file has gone missing"
     body: "{film} is in Plex but the file is gone. It is back on the wanted list."
+  message:            # to you, when somebody reports a problem from inside the app
+    enabled: true
+    title: "Message from {who}"
+    body: "{text}"
   test:               # only ever sent when somebody presses the test button
     enabled: true
     title: "Notifications"
@@ -350,3 +354,40 @@ flask:
 # backing up. Relative paths are read from the project folder.
 database:
   path: "plex_ops.db"
+
+
+# ---- The library index. On by default, and nothing to fill in. ----
+# A catalogue of every film and series on the server, kept on this machine and
+# refreshed in the background, so a search knows at once what is NOT on the
+# shelves instead of asking Plex library by library. A title it does not hold
+# is answered without a single request to Plex; one it does hold is still
+# checked with the person's own Plex account before it is shown.
+#
+# It is a cache. Delete the file and it is rebuilt; if it cannot be opened,
+# searches carry on asking Plex directly, only slower. The console's overview
+# shows what it holds and has buttons to refresh it, and
+#   venv/bin/python scripts/sync_library.py --status
+# says the same in a terminal.
+index:
+  enabled: true
+  # Where the file lives. Relative paths are read from the project folder.
+  # Any always-connected local drive is a good home - on a Mac with an
+  # external SSD, something like:
+  #   path: "/Volumes/<drive name>/PlexGet/library_index.db"
+  # The folder must already exist. It is never created, so a drive that is not
+  # mounted cannot quietly become a folder of the same name on the internal
+  # disk. `ls /Volumes` lists the names macOS has given your drives.
+  path: "library_index.db"
+  # A complete re-read of every library. Catches removals and renames.
+  full_sync_hours: 6
+  # A quick look at the newest additions in each library. Plex's webhook
+  # (a Plex Pass feature) brings a new arrival in at once; this is the backstop.
+  recent_sync_minutes: 5
+  # Checking the files behind each film are still on disk, so a search never
+  # has to look at the disk itself while somebody waits.
+  file_check_minutes: 60
+  # An index not re-read for this long is not trusted to say "we don't have
+  # that", and searches ask Plex until it catches up.
+  max_age_hours: 24
+  # Off only if something else runs scripts/sync_library.py on a schedule.
+  background: true

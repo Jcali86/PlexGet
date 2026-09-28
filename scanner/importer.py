@@ -14,7 +14,7 @@ import shutil
 import subprocess
 
 from scanner import libraries
-from scanner.wanted_search import parse_query, search_plex
+from scanner.wanted_search import parse_query, same_year, search_plex
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv"}
 JUNK = re.compile(r"(sample|trailer|rarbg|\.nfo$|screens?)", re.I)
@@ -110,12 +110,14 @@ def plex_state(item):
     """Is this already in Plex, and can Plex actually play it?"""
     if item["kind"] != "movie" or not item["title"]:
         return {"in_plex": False, "matches": []}
-    matches = search_plex(item["title"])
-    if item["year"]:
-        exact = [m for m in matches if m["year"] == item["year"]]
-        matches = exact or matches
+    # Only a certain match, and only one of this year: "already in Plex" here
+    # tells the owner the staging copy can be deleted, so being wrong costs the
+    # only copy. The 2026 Resident Evil is not the 2002 one, and Taxi (2004) is
+    # not Taxi Driver.
+    matches = [m for m in search_plex(item["title"]) if m.get("confidence", 2) >= 2]
+    matches = same_year(matches, item["year"])
     playable = [m for m in matches if not m["file_missing"]]
-    return {"in_plex": bool(playable), "matches": matches}
+    return {"in_plex": bool(playable), "matches": playable or matches}
 
 
 def library_paths(library_key):
@@ -249,16 +251,11 @@ def close_wanted(db, item):
         return None
     db.set_wanted_status(row["id"], "acquired")
 
-    columns = row.keys()
-    requester = row["requested_by_id"] if "requested_by_id" in columns else None
-    if requester:
-        try:
-            from api import push as web_push
+    try:
+        from api import push as web_push
 
-            label = row["title"] + (f" ({row['year']})" if row["year"] else "")
-            web_push.send_event(
-                db, "arrived", requester, url="/", tag=f"arrived-{row['id']}", film=label
-            )
-        except Exception:
-            pass   # a notification failing must never fail an import
+        label = row["title"] + (f" ({row['year']})" if row["year"] else "")
+        web_push.tell_arrived(db, row, label)
+    except Exception:
+        pass   # a notification failing must never fail an import
     return row["title"]

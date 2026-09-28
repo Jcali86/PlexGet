@@ -14,6 +14,7 @@ page works either way: "romcom" still resolves, "something gentle after a long
 week" does not.
 """
 
+import datetime
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +25,9 @@ from pydantic import BaseModel, Field
 from api import ai
 from api import persona
 from config import config
-from scanner.wanted_search import availability, fold, narrow_by_year, parse_query
+from api import tmdb_lookup
+from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
+from scanner.wanted_search import name_or_year, same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -764,8 +767,8 @@ def find_shows(filters, limit=MAX_MATCHES, token=None, age=0):
     for section in show_sections(token):
         try:
             kwargs = {"filters": {"and": conditions}} if conditions else {}
-            results = section.search(sort="audienceRating:desc",
-                                     maxresults=max(limit * 2, 30), **kwargs)
+            results = listed(section.search(sort="audienceRating:desc",
+                                            maxresults=max(limit * 2, 30), **kwargs))
         except Exception:
             continue
         group = [_show_dict(s, section.title) for s in results
@@ -815,11 +818,11 @@ def _run_search(genres, filters, limit, token=None, age=0):
             # every library is truncated to the same handful.
             conditions = _conditions(genres, filters, age)
             kwargs = {"filters": conditions} if conditions["and"] else {}
-            results = section.search(
+            results = listed(section.search(
                 sort="audienceRating:desc",
                 maxresults=max(limit * 4, 40),
                 **kwargs,
-            )
+            ))
         except Exception:
             return []
         return [_movie_dict(m, section.title) for m in results]
@@ -914,12 +917,14 @@ def search_by_title(request_text, token=None):
     naming a film should always work, even for someone who has used up their
     searching for the day.
     """
-    title, year = parse_query(request_text)
+    title, year, found = name_or_year(request_text, lambda name: search_shows(name, token),
+                                      lambda name: title_lookup(name, token))
     if not title:
         return None
-    shows = search_shows(title, token)
+    shows, films = found or (search_shows(title, token), title_lookup(title, token))
+    shows = same_year(shows, year)
     certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = narrow_by_year(title_lookup(title, token), year)
+    exact = same_year(films, year)
     playable = [m for m in exact if not m["file_missing"]]
     # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
     # and answering a maybe with "yes, we have that" is how someone ends up
@@ -993,6 +998,14 @@ def _resolve_person(name, sections, role):
     want = fold(name)
     if not want:
         return []
+    # The library index keeps every library's list of people, so a name is
+    # not a fresh listing of every actor Plex knows - which, on the first
+    # search after a restart, was several seconds of a search for a film the
+    # library does not have.
+    from scanner import library_index
+    indexed = library_index.people_named(want, [s.key for s in sections], role)
+    if indexed is not None:
+        return indexed if len(indexed) <= 2 else []
     matcher = re.compile(rf"\b{re.escape(want)}\b")
     found = {}
     for section in sections:
@@ -1030,9 +1043,9 @@ def search_by_person(request_text, token=None):
         for section in sections:
             for person in people:
                 try:
-                    results = section.search(filters={role: person},
-                                             sort="audienceRating:desc",
-                                             maxresults=60)
+                    results = listed(section.search(filters={role: person},
+                                                    sort="audienceRating:desc",
+                                                    maxresults=60))
                 except Exception:
                     continue    # this library does not know them; the others may
                 for movie in results:
@@ -1063,31 +1076,240 @@ def search_by_person(request_text, token=None):
 
 def close_matches(request_text, token=None):
     """Films and series that might be what was meant, without being certain."""
-    title, year = parse_query(request_text)
+    title, year, found = name_or_year(request_text, lambda name: title_lookup(name, token),
+                                      lambda name: search_shows(name, token))
     if not title:
         return []
-    films = narrow_by_year(title_lookup(title, token), year)
-    maybe = [m for m in films if not m["file_missing"] and m.get("confidence", 2) == 1]
-    maybe += [x for x in search_shows(title, token) if x["confidence"] == 1]
+    films, shows = found or (title_lookup(title, token), search_shows(title, token))
+    fitting = same_year(films, year)
+    maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
+    if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
+        # The same name from another year is not the film asked for, but it
+        # is worth a mention: "Resident Evil 2026" is not on the shelf, and
+        # the six that are should be visible without being claimed as it.
+        kept = {m.get("rating_key") for m in fitting}
+        maybe += [m for m in films
+                  if m.get("rating_key") not in kept and not m["file_missing"]]
+    maybe += [x for x in shows if x["confidence"] == 1]
+    if not maybe:
+        maybe = misspelt(title, token)
     return maybe
 
 
-def search(request_text, limit=MAX_MATCHES, token=None):
+def misspelt(title, token=None):
+    """Films whose names are spelled nearly like this one, offered as maybes.
+
+    "Anchroman" shares no word with Anchorman, so neither Plex nor the word
+    index finds it. The library index compares the spelling against every
+    title it holds; each near miss is then looked up as a title with the
+    person's own token, so nothing they cannot see is ever suggested.
+    """
+    from scanner import library_index
+    sections = visible_sections(token)
+    suggestions = library_index.near_misses(title, "movie", [s.key for s in sections])
+    found = []
+    for rating_key, name, _section in suggestions:
+        for film in title_lookup(name, token):
+            if film["rating_key"] == rating_key and not film["file_missing"]:
+                film["confidence"] = 1
+                found.append(film)
+    return found
+
+
+def tmdb_reading(request_text):
+    """(title, year) to ask TMDb with, a bare trailing year read both ways as on the shelf.
+
+    Asked about a film the shelf has not got, so the shelf cannot say whether
+    the number in "Wonder Woman 1984" is a year. Asked for "Wonder Woman" from
+    1984, TMDb knew nothing of the kind, and the request went to the model.
+    """
+    title, year, _found = name_or_year(request_text, tmdb_lookup.well_known)
+    return title, year
+
+
+def names_a_film(request_text):
+    """Is this plainly the name of one film or series - just not one of ours?
+
+    Asked only after the library has been searched by title and by person and
+    come back empty. Until now the model was the one to decide that a request
+    was a title, which meant a request for a film the library lacks paid for a
+    model call and a round of looser searches, then came back with "similar
+    things we do have" chosen from the model's guess at a genre. TMDb can say
+    it directly: a film of exactly that name, of that year when one was given,
+    is a request for that film.
+
+    Anything that reads as a description or carries a mood word goes the long
+    way round as before, so "comedy" is never mistaken for The Comedy.
+    """
+    if (reads_as_description(request_text) or off_topic(request_text)
+            or not worth_asking(request_text)):
+        return False
+    lowered = (request_text or "").lower()
+    if any(re.search(pattern, lowered) for pattern, _rule in _FALLBACK_RULES):
+        return False
+    title, year = tmdb_reading(request_text)
+    wanted = fold(title)
+    if len(wanted) < 2:
+        return False
+
+    def same(guess):
+        names = {fold(guess.get("title")), fold(guess.get("original_title"))}
+        if wanted not in names:
+            return False
+        if year:
+            return bool(guess.get("year")) and abs(guess["year"] - year) <= 1
+        # Without a year, only something people have heard of: an exact name
+        # shared with a mood word is filtered above, and one shared with an
+        # obscure short film is not worth skipping the model for.
+        return (guess.get("popularity") or 0) >= 1
+
+    hint = query_hint(request_text)
+    if any(same(g) for g in tmdb_lookup.suggest(title, hint=hint, year=year)):
+        return True
+    return any(same(g) for g in tmdb_lookup.suggest_shows(title, hint=hint))
+
+
+def title_missing(request_text):
+    """The answer for a named title the library lacks, in the same shape the model path gives."""
+    named, _year = tmdb_reading(request_text)
+    filters = MovieFilters(is_title=True, interpretation="That is a title the library does not have.",
+                           playlist_name=(named or request_text)[:40])
+    return {
+        "request": (request_text or "").strip(),
+        "for_age": 0,
+        "kind": "title_missing",
+        "translated_by": "title",
+        "filters": filters.model_dump(),
+        "interpretation": filters.interpretation,
+        "playlist_name": filters.playlist_name,
+        "matches": [],
+        "unavailable": [],
+    }
+
+
+# How far either side of today a film of the same name counts as the new one.
+# Long enough to cover the trailers before release, the run in cinemas and the
+# months after while it reaches digital and streaming, which is when a bare
+# name most likely means it; after a year, "Resident Evil" means the old one
+# again and pointing at the other would be noise.
+NEWER_WINDOW_DAYS = 365
+
+
+def newer_same_name(request_text, token=None):
+    """A newer film by exactly this name that the shelves do not have yet.
+
+    Somebody types "Resident Evil" with no year. The library holds the 2002
+    film, so the title search rightly answers "we have that" - and says
+    nothing about the one in cinemas now, which may well be the one they
+    meant. Only asked for with no year typed, only an exact name (a subtitle is
+    a different film), only something released within a year either side of
+    today, newer than anything of that name already here, and not on the
+    shelves. At most two, newest first.
+    """
+    title, year = parse_query(request_text)
+    if not title or year or not tmdb_lookup.configured():
+        return []
+    wanted = fold(without_article(title))
+    held = [m for m in title_lookup(title, token) if fold(without_article(m["title"])) == wanted]
+    newest_held = max([m["year"] or 0 for m in held], default=0)
+    today = datetime.date.today()
+    picks = []
+    for guess in tmdb_lookup.suggest(title):
+        names = {fold(without_article(guess.get("title"))), fold(without_article(guess.get("original_title")))}
+        if wanted not in names or not guess.get("year") or (guess.get("popularity") or 0) < 1:
+            continue
+        try:
+            released = datetime.date.fromisoformat(guess.get("release_date") or "")
+        except ValueError:
+            continue
+        if abs((released - today).days) > NEWER_WINDOW_DAYS or guess["year"] <= newest_held:
+            continue
+        picks.append(guess)
+    if not picks:
+        return []
+    # Owned already, by TMDb id or name and year, in a library this person can see.
+    from scanner import library_index
+    verdicts = library_index.owned(picks, "movie", [s.key for s in visible_sections(token)])
+    if verdicts is None:
+        verdicts = [any(m["year"] and abs(m["year"] - guess["year"]) <= 1 for m in held) for guess in picks]
+    picks = [guess for guess, owned in zip(picks, verdicts) if not owned]
+    picks.sort(key=lambda g: g.get("release_date") or "", reverse=True)
+    picks = picks[:2]
+    for guess in picks:
+        try:
+            guess["release_state"], guess["available_from"] = tmdb_lookup.availability(guess.get("tmdb_id"))
+        except Exception:
+            guess["release_state"], guess["available_from"] = "out", None
+    return picks
+
+
+def describe_missing(request_text, token=None):
+    """What to offer for a title the library does not have.
+
+    Which film on TMDb it probably is, whether that film can be had yet, which
+    series it might be instead, and anything on the shelves with a similar name.
+    These are separate lookups on separate services, so they run at once rather
+    than one after another.
+    """
+    named, said_year = tmdb_reading(request_text)
+    name, hint = named or request_text, query_hint(request_text)
+
+    def close():
+        try:
+            return close_matches(request_text, token)
+        except PlexUnavailable:
+            return []
+
+    def release(guess):
+        try:
+            state, when = tmdb_lookup.availability(guess.get("tmdb_id"))
+        except Exception:
+            state, when = "out", None
+        guess["release_state"] = state
+        guess["available_from"] = when
+
+    def seasons(show):
+        try:
+            show["all_seasons"] = [s["season"] for s in
+                                   tmdb_lookup.seasons_that_exist(show["title"], show.get("year"))]
+        except Exception:
+            show["all_seasons"] = []
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        films = pool.submit(tmdb_lookup.suggest, name, hint, said_year)
+        shows = pool.submit(tmdb_lookup.suggest_shows, name, hint)
+        nearby = pool.submit(close)
+        films, shows = films.result(), shows.result()
+        # A film still on at the pictures cannot be put on anybody's shelf,
+        # so say so rather than offering to add it and quietly never
+        # delivering. Only the top few are checked - nobody reads past them.
+        extra = ([pool.submit(release, g) for g in films[:3]]
+                 + [pool.submit(seasons, s) for s in shows[:3]])
+        for job in extra:
+            job.result()
+        return {"did_you_mean": films, "did_you_mean_shows": shows, "close": nearby.result()}
+
+
+def search(request_text, limit=MAX_MATCHES, token=None, tried_title=False):
     """Answer a request, whether it names a film or describes a mood.
 
     A title is looked up as a title first. Sending "Inception" to the mood
     search returns films that merely share its genres, which reads as though
     the library has it when it does not.
     """
-    found = search_by_title(request_text, token)
-    if found:
-        return found
+    # tried_title: the caller has already looked it up as a title and as a
+    # person and found nothing, so doing both again here only doubled the
+    # cost of the slowest kind of search.
+    if not tried_title:
+        found = search_by_title(request_text, token)
+        if found:
+            return found
 
-    # Not a film we hold - but perhaps a person we do. Free and exact, so it
-    # is tried before anything costs money or guesses.
-    person = search_by_person(request_text, token)
-    if person:
-        return person
+        # Not a film we hold - but perhaps a person we do. Free and exact, so
+        # it is tried before anything costs money or guesses.
+        person = search_by_person(request_text, token)
+        if person:
+            return person
 
     # Only once it is definitely not a film we hold: someone trying it on gets
     # a brush-off from here, so it never reaches the model. Free, and there is

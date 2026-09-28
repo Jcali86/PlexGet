@@ -217,7 +217,16 @@
   .doorbtn .chev { margin-left: auto; color: var(--accent); font-size: 18px; font-weight: 700; }
   .doorbtn:active { border-color: var(--accent); }
   .minor .opt { margin: 2px 0 0 2px; }
-  .minor .linkbtn { justify-self: end; margin-right: 2px; }
+  .minor .minorlinks { justify-self: end; margin-right: 2px; display: flex; gap: 14px; }
+  .report textarea {
+    width: 100%; box-sizing: border-box; min-height: 110px; resize: vertical;
+    padding: 10px; font: inherit; font-size: 14px; color: var(--text);
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .report .ctx {
+    font-size: 12px; color: var(--dim); margin: 8px 0 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .linkbtn {
     background: none; border: none; padding: 0; cursor: pointer;
     color: var(--accent); font-size: 13px; font-weight: 600;
@@ -764,7 +773,10 @@
       <span class="chev">›</span>
     </button>
     <label class="opt"><input type="checkbox" id="alsomissing"> include ones we haven't got</label>
-    <button class="linkbtn" id="helpbtn" type="button">Help</button>
+    <span class="minorlinks">
+      <button class="linkbtn" id="reportbtn" type="button">Something wrong?</button>
+      <button class="linkbtn" id="helpbtn" type="button">Help</button>
+    </span>
   </div>
 
   <!-- What a new visitor sees at once. The sign-in replaces it in place, so
@@ -860,9 +872,25 @@
   <p><b>About the AI</b> — describing a mood uses a bit of AI to work out what to look for.
      There's a daily allowance so it can't run up a bill. Searching by name is free and
      always works, allowance or not.</p>
+  <p><b>Something not right?</b> — a film it says we have but we don't, a search that
+     makes no sense, anything at all: tell the owner from here rather than by text.
+     Your last search comes with it, so they can see what you saw.</p>
   <div class="row" style="display:flex;gap:8px">
     <button class="ghost" data-act="tour">Show me around</button>
+    <button class="ghost" data-act="report">Tell the owner</button>
     <form method="dialog" style="margin-left:auto"><button class="primary">Got it</button></form>
+  </div>
+</dialog>
+
+<dialog id="report" class="report">
+  <h3>Tell the owner</h3>
+  <p class="sub" style="margin:0 0 12px">What went wrong, or what you expected to see.
+    It lands on their console and their phone, so nobody has to text.</p>
+  <textarea id="reportbody" maxlength="500" placeholder="e.g. Searched for Resident Evil 2026 and it said we have it, but only the old ones came up."></textarea>
+  <div class="ctx" id="reportctx"></div>
+  <div class="row" style="display:flex;gap:8px;margin-top:14px">
+    <button class="primary" id="reportsend" type="button">Send</button>
+    <form method="dialog" style="margin-left:auto"><button class="ghost">Cancel</button></form>
   </div>
 </dialog>
 
@@ -1292,6 +1320,7 @@ function shutCard(btn) {
 const ACTIONS = {
   shut:  (btn) => shutCard(btn),
   announce: () => askAnnouncement(),
+  report: () => openReport(),
   wanted: () => showWanted(),
   ask:   (btn) => ask(btn.dataset.value, btn),
   look:  (btn) => lookUp(btn.dataset.value),
@@ -1312,7 +1341,7 @@ const ACTIONS = {
     } catch (e) {}
   },
   askshow: (btn) => askShow(btn.dataset.value, btn.dataset.season,
-                            (btn.dataset.seasons || '').split(',').filter(Boolean)),
+                            (btn.dataset.seasons || '').split(',').filter(Boolean), false, btn.dataset.year),
   sortby: (btn) => resort(btn.dataset.value),
   quickadd: (btn) => quickAdd(btn),
   mylists: () => showLists(),
@@ -1356,12 +1385,12 @@ function showCard(x) {
     : Array.from({length: held.length ? Math.max(...held) : 0}, (_, i) => i + 1);
   const chips = all.map(n => held.includes(n)
     ? `<span class="have">S${n}</span>`
-    : `<button data-act="askshow" data-value="${esc(x.title)}" data-season="${n}">S${n} — ask</button>`);
+    : `<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="${n}">S${n} — ask</button>`);
   const gaps = (x.missing_seasons || []).length;
   if (gaps) {
-    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
   } else {
-    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-season="next">Ask for more</button>`);
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="next">Ask for more</button>`);
   }
   return `<div class="show">${poster}
       <div><h3>${esc(x.title)}</h3>
@@ -1371,12 +1400,12 @@ function showCard(x) {
       </div></div>`;
 }
 
-async function askShow(title, season, seasons, quiet) {
+async function askShow(title, season, seasons, quiet, year) {
   if (season === 'all' && seasons && seasons.length) {
     // One press should not become forty requests: ask for a sensible run and
     // say so if there were more.
     const batch = seasons.slice(0, 12);
-    for (const n of batch) await askShow(title, n, null, true);
+    for (const n of batch) await askShow(title, n, null, true, year);
     status('good', `Asked for ${batch.length} season${batch.length === 1 ? '' : 's'} of ${esc(title)}.`,
       seasons.length > batch.length
         ? `The first ${batch.length} are on the list; ask for the rest once these arrive.`
@@ -1385,6 +1414,7 @@ async function askShow(title, season, seasons, quiet) {
   }
   const body = {title, kind: 'show'};
   if (season && season !== 'next' && season !== 'all') body.season = Number(season);
+  if (year) body.year = Number(year);
   try {
     const res = await fetch('/request/wanted', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
@@ -1626,10 +1656,75 @@ function missingBlock(d, heading) {
            .filter(Boolean).map(esc).join(' \u00b7 ')}</div>
         <div class="blurb">${esc(m.overview || '')}</div>
         ${shows
-          ? `<button class="primary" data-act="askshow" data-value="${esc(m.title)}" data-season="next">Ask for the series</button>`
-          : `<button class="primary" data-act="ask" data-value="${esc(m.title + (m.year ? ' (' + m.year + ')' : ''))}">Ask for it</button>`}
+          ? `<button class="primary" data-act="askshow" data-value="${esc(m.title)}" data-year="${esc(m.year || '')}" data-season="next">Ask for the series</button>`
+          : `<button class="primary" data-act="ask" data-value="${esc(m.title + (m.year ? ' (' + m.year + ')' : ''))}"
+               data-year="${esc(m.year || '')}" data-tmdb="${esc(m.tmdb_id || '')}">Ask for it</button>`}
       </div>
     </div>`).join('');
+}
+
+// A film from TMDb that is not on the shelves. The ask button carries the
+// film's year and TMDb id as they are: folded into the title as "Resident
+// Evil (2026)" and read back out on the server, the year was once dropped and
+// the 2002 film answered "we already have that".
+function guessCard(g) {
+  const notYet = g.release_state === 'cinema' || g.release_state === 'unreleased';
+  const exact = `data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}"
+    data-year="${esc(g.year || '')}" data-tmdb="${esc(g.tmdb_id || '')}"`;
+  const button = g.wanted_status === 'wanted'
+    ? `<button disabled>On the list \u2713</button>`
+    : notYet
+      ? `<button class="ghost" data-act="ask" data-notyet="1"
+           data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me when it lands</button>`
+      : `<button class="primary" data-act="ask" ${exact}>Ask for this one</button>`;
+  return `
+          <div class="guess">
+            ${g.poster ? `<img src="${esc(g.poster)}" alt="" loading="lazy">` : '<img alt="">'}
+            <div><h3>${esc(g.title)}</h3>
+              <div class="meta">${[g.year, g.language ? g.language.toUpperCase() : '']
+                 .filter(Boolean).map(esc).join(' · ')}</div>
+              <div class="blurb">${esc(g.overview)}</div>
+              ${notYet ? `<div class="notyet">${g.release_state === 'cinema'
+                   ? "Chill - it's still in the cinema. Go watch it!"
+                   : `Not out yet${g.available_from ? ` - due ${esc(g.available_from)}` : ''}.`}</div>` : ''}
+              ${button}
+            </div>
+          </div>`;
+}
+
+// After a title search that found films on the shelves, ask whether a newer
+// film by exactly that name is out or coming - "Resident Evil" finds the 2002
+// film and says nothing about the one in cinemas now. Fetched after the answer
+// is drawn, so it never holds that up; a failure simply shows nothing.
+async function fillNewer(query) {
+  try {
+    const res = await fetch('/request/newer?q=' + encodeURIComponent(query));
+    if (!res.ok) return;
+    const d = await res.json();
+    const slot = document.getElementById('newer');
+    // A newer search has replaced this one; its answer is not wanted here.
+    if (!slot || slot.dataset.q !== query || !(d.newer || []).length) return;
+    slot.innerHTML = `<div class="rowhead">There's a new one by that name — not here yet</div>`
+      + d.newer.map(guessCard).join('');
+  } catch (e) { /* a bonus, never a blocker */ }
+}
+
+// After something goes on the list: will this device actually be told? Asking
+// is the promise; the nudge only arrives if notifications are on.
+async function notifyHint() {
+  let state;
+  try { state = await setupPush(false); } catch (e) { return ''; }
+  if (state === 'already' || state === 'on') return '';
+  if (state === 'needs-install') {
+    return `<div class="sub">To be told on this phone, add this page to your Home Screen and open it from there.</div>`;
+  }
+  if (state === 'blocked') {
+    return `<div class="sub">Notifications are blocked for this site in your browser settings, so the nudge can't reach this device.</div>`;
+  }
+  if (state === 'not-asked') {
+    return `<div class="sub">Turn on notifications to get the nudge. <button class="linkbtn" data-act="bell">Turn on</button></div>`;
+  }
+  return '';
 }
 
 // This answer came from the keyword rules rather than from reading the mood,
@@ -1717,23 +1812,7 @@ async function find(query) {
   if (d.kind === 'title_missing') {
     const guesses = d.did_you_mean || [];
     const guessBlock = guesses.length
-      ? `<div class="rowhead">Which one do you mean?</div>` + guesses.map(g => `
-          <div class="guess">
-            ${g.poster ? `<img src="${esc(g.poster)}" alt="" loading="lazy">` : '<img alt="">'}
-            <div><h3>${esc(g.title)}</h3>
-              <div class="meta">${[g.year, g.language ? g.language.toUpperCase() : '']
-                 .filter(Boolean).map(esc).join(' · ')}</div>
-              <div class="blurb">${esc(g.overview)}</div>
-              ${g.release_state === 'cinema' || g.release_state === 'unreleased'
-                ? `<div class="notyet">${g.release_state === 'cinema'
-                     ? "Chill - it's still in the cinema. Go watch it!"
-                     : `Not out yet${g.available_from ? ` - due ${esc(g.available_from)}` : ''}.`}</div>
-                   <button class="ghost" data-act="ask" data-notyet="1"
-                     data-when="${esc(g.available_from || '')}"
-                     data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}">🔔 Tell me when it lands</button>`
-                : `<button class="primary" data-act="ask" data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}">Ask for this one</button>`}
-            </div>
-          </div>`).join('')
+      ? `<div class="rowhead">Which one do you mean?</div>` + guesses.map(guessCard).join('')
       : '';
 
     const showGuesses = (d.did_you_mean_shows || []).length
@@ -1745,10 +1824,10 @@ async function find(query) {
                  ? `${g.all_seasons.length} season${g.all_seasons.length === 1 ? '' : 's'}` : '']
                  .filter(Boolean).map(esc).join(' · ')}</div>
               <div class="blurb">${esc(g.overview)}</div>
-              <button class="primary" data-act="askshow" data-value="${esc(g.title)}" data-season="next">Ask for the whole series</button>
+              <button class="primary" data-act="askshow" data-value="${esc(g.title)}" data-year="${esc(g.year || '')}" data-season="next">Ask for the whole series</button>
               ${(g.all_seasons || []).length > 1
                 ? `<div class="seasons">` + g.all_seasons.map(n =>
-                    `<button data-act="askshow" data-value="${esc(g.title)}" data-season="${n}">S${n} only</button>`).join('') + `</div>`
+                    `<button data-act="askshow" data-value="${esc(g.title)}" data-year="${esc(g.year || '')}" data-season="${n}">S${n} only</button>`).join('') + `</div>`
                 : ''}
             </div>
           </div>`).join('')
@@ -1825,9 +1904,11 @@ async function find(query) {
     ? ((d.shows || []).length ? `<div class="rowhead">Films</div>` : '')
       + sortBar() + `<div id="films">${sortedFilms().map(m => filmCard(m, true)).join('')}</div>`
     : '';
-  out.innerHTML = back + head + missing + series + films
+  const newerSlot = d.kind === 'title' ? `<div id="newer" data-q="${esc(query)}"></div>` : '';
+  out.innerHTML = back + head + newerSlot + missing + series + films
     + missingBlock(d, "While we're at it — ones we haven't got");
   wireSelection();
+  if (d.kind === 'title' && d.translated_by === 'title' && (d.matches || []).length) fillNewer(query);
 }
 
 // ---- the wanted list ----
@@ -1876,10 +1957,13 @@ async function showWanted() {
 }
 
 async function ask(title, btn) {
+  const body = {title};
+  if (btn && btn.dataset.year) body.year = Number(btn.dataset.year);
+  if (btn && btn.dataset.tmdb) body.tmdb_id = btn.dataset.tmdb;
   try {
     const res = await fetch('/request/wanted', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title}),
+      body: JSON.stringify(body),
     });
     const d = await res.json();
     if (!res.ok) { alert(d.error || 'Could not send that'); return; }
@@ -1890,9 +1974,10 @@ async function ask(title, btn) {
     let msg;
     if (d.found) msg = `<b>Good news — we already have that.</b><div class="sub">${
       esc(d.matches.map(m => m.title + ' (' + m.year + ')').join(', '))}</div>`;
-    else if (d.added_to_wanted) msg = notYet
+    else if (d.added_to_wanted) msg = (notYet
       ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
-      : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`;
+      : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`)
+      + await notifyHint();
     else {
       const status = d.wanted ? d.wanted.status : 'wanted';
       const note = status === 'dismissed' ? 'That one has been asked for before and set aside for now.'
@@ -2222,6 +2307,44 @@ input.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); const q = input.value.trim(); if (q) { input.blur(); find(q); } }
 });
 document.getElementById('helpbtn').addEventListener('click', () => document.getElementById('help').showModal());
+
+// ---- telling the owner ----
+// The whole point of the page is that nobody has to text the owner about
+// films. When the page itself is wrong they were texting anyway, so the
+// complaint goes through the app too - with the search that caused it.
+function openReport() {
+  const help = document.getElementById('help');
+  if (help.open) help.close();
+  const box = document.getElementById('report');
+  const ctx = document.getElementById('reportctx');
+  const last = input.value.trim();
+  ctx.textContent = last ? `Attached: your search "${last}"` : '';
+  ctx.hidden = !last;
+  document.getElementById('reportbody').value = '';
+  box.showModal();
+  document.getElementById('reportbody').focus();
+}
+document.getElementById('reportbtn').addEventListener('click', openReport);
+
+document.getElementById('reportsend').addEventListener('click', async () => {
+  const btn = document.getElementById('reportsend');
+  const body = document.getElementById('reportbody').value.trim();
+  if (!body) { document.getElementById('reportbody').focus(); return; }
+  btn.disabled = true;
+  try {
+    const res = await fetch('/request/message', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body, context: input.value.trim()}),
+    });
+    const d = await res.json();
+    if (!res.ok) { status('bad', 'That did not send', d.error || ''); return; }
+    document.getElementById('report').close();
+    status('good', 'Sent to the owner',
+      d.sent ? "Their phone has been told. You'll hear back the usual way."
+             : "It's on their console for next time they look.");
+  } catch (e) { status('bad', 'That did not send', e.message); }
+  finally { btn.disabled = false; }
+});
 document.getElementById('belltest').addEventListener('click', (ev) => {
   document.getElementById('bellbox').close();
   testPush(ev.currentTarget);

@@ -12,6 +12,8 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 from werkzeug.middleware.proxy_fix import ProxyFix
 from scanner import MediaScanner
 from scanner.gap_analysis import run_full_analysis, run_tv_analysis, run_movie_analysis
+from scanner import discover
+from scanner import library_index
 from scanner.quality_auditor import run_quality_audit
 from scanner.reports import generate_upgrade_report, generate_gap_report, generate_poster_report
 from scanner.plex_fixer import run_audit, apply_rename, apply_batch, get_known_issues
@@ -31,7 +33,10 @@ from api import user_library
 from api import themes as looks
 from api.ai import has_api_key
 from api.request_assistant import (
-    close_matches,
+    describe_missing,
+    names_a_film,
+    newer_same_name,
+    title_missing as title_missing_answer,
     off_topic,
     search as mood_search,
     search_by_person,
@@ -39,14 +44,16 @@ from api.request_assistant import (
     showcase,
     worth_asking,
 )
-from scanner.wanted_search import parse_query, query_hint
+from scanner.wanted_search import BRACKETED_YEAR, parse_query, plausible_year
 from scanner.wanted_search import (
     PlexTokenDead,
     PlexUnavailable,
     export_text as wanted_export_text,
     recheck as recheck_wanted,
+    movie_sections,
     search_and_capture,
     search_shows,
+    show_sections,
 )
 from analyzer import MediaAnalyzer
 from config import config
@@ -76,7 +83,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "missing-search-4"
+BUILD = "arrivals-2"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
@@ -84,6 +91,12 @@ FEATURES = [
     "ask-companion-guard",  # the making-of no longer answers for the film
     "account-skins",        # config can dress an account in a look, e.g. bruce
     "persona-by-name",      # persona: bruce in config reads personas/bruce.yaml
+    "year-in-title",        # "Resident Evil 2026" is no longer answered with the 2002 film
+    "report-a-problem",     # the household can tell the owner something is wrong, from the page
+    "library-index",        # searches ask the local catalogue first; a miss asks Plex nothing
+    "ask-by-year",          # asking for Resident Evil (2026) is not answered by the 2002 film
+    "arrival-by-year",      # "it's here" only for the film asked for, told to everybody who asked
+    "newer-same-name",      # a title hit mentions a newer film of that name the shelves lack
 ]
 
 
@@ -289,6 +302,63 @@ def create_app():
         rows = db.get_gaps(gap_type=gap_type, library=library)
         db.close()
         return jsonify([dict(row) for row in rows])
+
+    @app.route("/index/status")
+    def index_status():
+        """The library index: what it holds, how fresh it is, where the file lives."""
+        return jsonify(library_index.status())
+
+    @app.route("/index/sync", methods=["POST"])
+    def index_sync():
+        """Refresh the library index now. JSON body {"full": true} re-reads every library."""
+        body = request.get_json(silent=True) or {}
+        ok, why = library_index.available()
+        if not ok:
+            return jsonify({"error": f"the library index is not in use: {why}"}), 409
+        full = bool(body.get("full"))
+        how = library_index.request_sync(full=full)
+        return jsonify({"sync": how, "full": full, "status": library_index.status()})
+
+    @app.route("/discover/genres")
+    def discover_genres():
+        """TMDb's film genres, for the pickers on the gaps page."""
+        return jsonify({"genres": discover.genres(), "configured": discover.configured()})
+
+    @app.route("/discover/missing")
+    def discover_missing():
+        """Well-rated films in the chosen genres that Plex does not have.
+
+        Params: genres (comma-separated TMDb ids, required), match (all|any),
+        min_rating, min_votes, year_from, year_to, sort (rating|popularity|
+        newest), pages (1-25, twenty films a page), refresh (re-read Plex).
+        """
+        if not discover.configured():
+            return jsonify({"error": "no TMDb API key in config.yaml - this needs one"}), 400
+        genre_ids = [g for g in re.split(r"[,\s]+", request.args.get("genres", "")) if g.isdigit()]
+        if not genre_ids:
+            return jsonify({"error": "pick at least one genre",
+                            "example": {"genres": "27,35", "match": "all"}}), 400
+        db = Database()
+        try:
+            result = discover.find_missing(
+                db, genre_ids,
+                match=request.args.get("match", "all"),
+                min_rating=request.args.get("min_rating", 6.0, type=float),
+                min_votes=request.args.get("min_votes", 200, type=int),
+                year_from=request.args.get("year_from", type=int),
+                year_to=request.args.get("year_to", type=int),
+                sort=request.args.get("sort", "rating"),
+                pages=request.args.get("pages", 5, type=int),
+                refresh=request.args.get("refresh") in ("1", "true", "yes"),
+            )
+        except PlexUnavailable as e:
+            # Not knowing what is owned must never read as owning nothing.
+            return plex_trouble(e)
+        except requests.RequestException as e:
+            return jsonify({"error": f"TMDb is unavailable: {str(e)[:120]}"}), 502
+        finally:
+            db.close()
+        return jsonify(result)
 
     @app.route("/analyze/quality", methods=["POST"])
     def analyze_quality():
@@ -593,24 +663,11 @@ def create_app():
             if row is None:
                 continue
             name = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+            if entry.get("season"):
+                name += f", series {entry['season']}"
             settled.append(name)
-            # Whoever asked hears about it; if nobody is recorded against the
-            # row it was captured by a search, so the owner is told instead.
-            # Whoever asked hears about it. If their id is unknown or stale -
-            # older rows predate it being recorded - the owner is told rather
-            # than the arrival passing in silence.
-            owner = web_push.owner_id()
-            for target in (entry.get("requested_by_id"), owner):
-                if not target:
-                    continue
-                try:
-                    sent = web_push.send_event(db, "arrived", target,
-                                               url="/request",
-                                               tag=f"arrived-{entry['id']}", film=name)
-                except Exception:
-                    sent = None
-                if sent and sent.get("sent"):
-                    break
+            # Everybody who asked hears about it; the owner if none of them does.
+            web_push.tell_arrived(db, row, name)
         return {"checked": result.get("checked", 0), "settled": settled}
 
     @app.route("/wanted/settle", methods=["POST"])
@@ -643,6 +700,20 @@ def create_app():
         event = payload.get("event")
         if event != "library.new":
             return jsonify({"ignored": event}), 200
+        # Into the library index first. The check against the wanted list below
+        # trusts the index to say what is missing, and an index that had not
+        # heard of the new arrival would say it was still missing.
+        indexed = None
+        key = str((payload.get("Metadata") or {}).get("ratingKey") or "")
+        if key.isdigit():
+            try:
+                indexed = library_index.add_or_refresh(key)
+            except Exception:
+                indexed = None
+        if not indexed:
+            # Not brought in: make the next miss look at new additions again
+            # rather than believe an index that may be one film behind.
+            library_index.forget_recent()
         db = Database()
         try:
             outcome = settle_wanted(db)
@@ -650,7 +721,7 @@ def create_app():
             return plex_trouble(e)
         finally:
             db.close()
-        return jsonify({"event": event, **outcome})
+        return jsonify({"event": event, **outcome, "indexed": indexed})
 
     @app.route("/wanted/recheck", methods=["GET", "POST"])
     def wanted_recheck():
@@ -981,6 +1052,23 @@ def create_app():
         _wanted_adds[str(uid)] = fresh
         return True
 
+    # Messages to the owner buzz a phone each, so they get a ceiling too. Not
+    # configurable: ten an hour is more than anyone has to say about a film
+    # page, and fewer than it takes to be a nuisance.
+    _messages_sent = {}
+    MESSAGES_PER_HOUR = 10
+
+    def message_allowed(uid):
+        import time as _t
+        now = _t.time()
+        fresh = [t for t in _messages_sent.get(str(uid), ()) if now - t < 3600]
+        if len(fresh) >= MESSAGES_PER_HOUR:
+            _messages_sent[str(uid)] = fresh
+            return False
+        fresh.append(now)
+        _messages_sent[str(uid)] = fresh
+        return True
+
     POLL_MAX = 900
 
     @app.route("/auth/start", methods=["POST"])
@@ -1294,6 +1382,20 @@ def create_app():
                 show["all_seasons"], show["missing_seasons"] = [], []
         return result
 
+    def held_verdicts(candidates, token, as_shows=False):
+        """For each suggestion, whether the shelves already hold it; None when unknown.
+
+        Answered by the library index in one lookup per suggestion. Before it,
+        each suggestion cost a full title search of every library in turn - the
+        "include ones we haven't got" box alone was eight of those in a row.
+        """
+        try:
+            sections = show_sections(token) if as_shows else movie_sections(token)
+        except PlexUnavailable:
+            return None
+        return library_index.owned(candidates, "show" if as_shows else "movie",
+                                   [s.key for s in sections])
+
     def only_what_we_lack(candidates, token, as_shows=False):
         """Drop anything from a discovery list that is on the shelves after all.
 
@@ -1305,6 +1407,9 @@ def create_app():
         before it is offered, which is what the playlist builder was already
         doing one route over.
         """
+        verdicts = held_verdicts(candidates or [], token, as_shows)
+        if verdicts is not None:
+            return [item for item, held in zip(candidates, verdicts) if not held]
         keep = []
         for item in candidates or []:
             title, year = item.get("title"), item.get("year")
@@ -1350,6 +1455,20 @@ def create_app():
             by_title["captured_missing"] = []
             return jsonify(add_season_detail(by_title))
 
+        # The name of a real film or series that is not on the shelves needs no
+        # model to understand it and no looser search to pad it out: say so and
+        # offer to ask for it. Free, like any title search.
+        try:
+            lacking = names_a_film(query)
+        except Exception:
+            lacking = False
+        if lacking:
+            result = title_missing_answer(query)
+            result.update(describe_missing(query, user.get("plex_token")))
+            result["captured_missing"] = []
+            result["smart_mode"] = has_api_key()
+            return jsonify(result)
+
         # Reserved before the call rather than recorded after it: a burst of
         # requests arriving together would otherwise all pass a check none of
         # them had yet paid for.
@@ -1377,7 +1496,7 @@ def create_app():
                     gb.close()
 
         try:
-            result = mood_search(query, token=user.get("plex_token"))
+            result = mood_search(query, token=user.get("plex_token"), tried_title=True)
         except PlexTokenDead:
             give_back()
             return expired_session()
@@ -1431,41 +1550,7 @@ def create_app():
         # Nothing in the library matches a title they named: work out which film
         # they mean, so what goes on the list is a real one with a year on it.
         if result.get("kind") == "title_missing":
-            # Parse the query rather than trusting the mood result to carry a
-            # title: it does not, so this was searching TMDb for "Taxi (French)"
-            # rather than for Taxi.
-            named, said_year = parse_query(query)
-            result["did_you_mean"] = tmdb_lookup.suggest(
-                named or query, hint=query_hint(query), year=said_year
-            )
-            # A film still on at the pictures cannot be put on anybody's shelf,
-            # so say so rather than offering to add it and quietly never
-            # delivering. Only the top few are checked - one call each, and
-            # nobody reads past them.
-            for guess in result["did_you_mean"][:3]:
-                try:
-                    state, when = tmdb_lookup.availability(guess.get("tmdb_id"))
-                except Exception:
-                    state, when = "out", None
-                guess["release_state"] = state
-                guess["available_from"] = when
-            # It might be a series rather than a film, in which case the useful
-            # answer is which series, and whether they want all of it.
-            shows = tmdb_lookup.suggest_shows(named or query, hint=query_hint(query))
-            for show in shows[:3]:
-                try:
-                    show["all_seasons"] = [
-                        s["season"] for s in tmdb_lookup.seasons_that_exist(show["title"], show.get("year"))
-                    ]
-                except Exception:
-                    show["all_seasons"] = []
-            result["did_you_mean_shows"] = shows
-            # Anything in the library with a similar name, offered as a maybe
-            # rather than presented as the answer.
-            try:
-                result["close"] = close_matches(query, user.get("plex_token"))
-            except PlexUnavailable:
-                result["close"] = []
+            result.update(describe_missing(query, user.get("plex_token")))
 
         add_season_detail(result)
         result["captured_missing"] = captured
@@ -1665,16 +1750,20 @@ def create_app():
                           if as_shows else
                           tmdb_lookup.discover(found.get("filters") or {},
                                                exclude_titles=have, limit=8))
+            verdicts = held_verdicts(candidates, user.get("plex_token"), as_shows)
             db = Database()
             try:
-                for film in candidates:
+                for position, film in enumerate(candidates):
                     # Cheap, and it stops us asking for something on the shelf:
                     # discovery only knows what we showed it, not the library.
                     # A series has to be looked for among the series: asking
                     # the film sections for Fawlty Towers finds nothing, and
                     # puts a show we already have on the wanted list.
                     try:
-                        if as_shows:
+                        if verdicts is not None:
+                            if verdicts[position]:
+                                continue
+                        elif as_shows:
                             if search_shows(film["title"], user.get("plex_token")):
                                 continue
                         elif search_by_title(f"{film['title']} ({film['year']})" if film["year"]
@@ -1804,6 +1893,71 @@ def create_app():
             db.close()
         return jsonify({"note": dict(note), "sent": told.get("sent", 0)})
 
+    @app.route("/request/message", methods=["POST"])
+    def request_message():
+        """Somebody in the household telling the owner something is wrong.
+
+        The alternative is a text message, which is what this exists to
+        replace: the note lands on the console with the search that prompted
+        it attached, and the owner's phone is told once.
+        """
+        user = current_user()
+        payload = request.get_json(silent=True) or {}
+        body = " ".join((payload.get("body") or "").split())[:500]
+        context = " ".join((payload.get("context") or "").split())[:200]
+        if not body:
+            return jsonify({"error": "say what went wrong first"}), 400
+        if user and not message_allowed(user["id"]):
+            return jsonify({"error": "That's a lot of messages in one go - give it an hour.",
+                            "rate_limited": True}), 429
+        who = user["username"] if user else "someone"
+        db = Database()
+        try:
+            note = db.post_message(body, who, (user or {}).get("id"), context or None)
+            told = {"sent": 0}
+            try:
+                owner = web_push.owner_id()
+                if owner and str(owner) != str((user or {}).get("id")):
+                    told = web_push.send_event(
+                        db, "message", owner, url="/dashboard",
+                        tag=f"message-{note['id']}", who=who,
+                        text=body if len(body) <= 120 else body[:117] + "...",
+                    )
+            except Exception:
+                # Undelivered is not unsent: the note is on the console
+                # regardless, which is the part that replaces the text message.
+                pass
+        finally:
+            db.close()
+        return jsonify({"message": dict(note), "sent": told.get("sent", 0)})
+
+    @app.route("/messages")
+    def messages_list():
+        """What the household has reported. Owner tier by placement."""
+        unread_only = request.args.get("unread") in ("1", "true", "yes")
+        db = Database()
+        try:
+            rows = [dict(r) for r in db.messages(unread_only=unread_only)]
+            unread = db.count_unread_messages()
+        finally:
+            db.close()
+        return jsonify({"messages": rows, "unread": unread})
+
+    @app.route("/messages/<int:message_id>/read", methods=["POST"])
+    def message_read(message_id):
+        """Mark a message read, or unread again with {"read": false}."""
+        payload = request.get_json(silent=True) or {}
+        read = payload.get("read", True) is not False
+        db = Database()
+        try:
+            row = db.mark_message_read(message_id, read)
+            unread = db.count_unread_messages()
+        finally:
+            db.close()
+        if row is None:
+            return jsonify({"error": f"no message with id {message_id}"}), 404
+        return jsonify({"message": dict(row), "unread": unread})
+
     @app.route("/announce/<int:note_id>/retire", methods=["POST"])
     def announce_retire(note_id):
         """Take a note down for everyone."""
@@ -1862,6 +2016,12 @@ def create_app():
         kind = "show" if body.get("kind") == "show" else "film"
         season = body.get("season")
         season = int(season) if str(season).isdigit() and 0 < int(season) < 100 else None
+        # A card that knows the film sends its year and TMDb id as they are,
+        # rather than folded into the title for the server to read back out.
+        year = body.get("year")
+        year = int(year) if str(year).isdigit() and plausible_year(int(year)) else None
+        tmdb_id = str(body.get("tmdb_id") or "")
+        tmdb_id = tmdb_id if tmdb_id.isdigit() else None
         user = current_user()
         who = user["username"] if user else (body.get("who") or "").strip()[:40]
         if not title:
@@ -1880,10 +2040,13 @@ def create_app():
         try:
             if kind == "show":
                 # A series is not looked up as a film, and a season request is
-                # about one season, so it is recorded directly.
-                named, said_year = parse_query(title)
+                # about one season, so it is recorded directly. Only a
+                # bracketed year is read out of the name: Space: 1999 is a
+                # series, not "Space:" from 1999.
+                named, said_year = parse_query(title) if BRACKETED_YEAR.match(title) else (title, None)
+                said_year = year or said_year
                 row, created = db.insert_wanted(
-                    named or title, said_year, title, kind="show", season=season
+                    named or title, said_year, title, kind="show", season=season, tmdb_id=tmdb_id
                 )
                 result = {
                     "found": False, "kind": "show", "season": season,
@@ -1892,7 +2055,20 @@ def create_app():
                     "wanted": dict(row), "matches": [],
                 }
             else:
-                result = search_and_capture(db, title)
+                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id)
+                existing = result.get("wanted") or {}
+                if not result.get("found") and existing.get("status") == "acquired":
+                    # Marked as arrived, yet nothing on the shelf plays - wrongly
+                    # settled, or since deleted. Asking again puts it back on
+                    # the list, rather than answering "already picked up"
+                    # forever with no notification ever to come.
+                    row = db.set_wanted_status(existing["id"], "wanted")
+                    result.update(wanted=dict(row), added_to_wanted=True,
+                                  already_wanted=False, reopened=True)
+            wanted_row = result.get("wanted") or {}
+            if user and wanted_row.get("id") and wanted_row.get("status") != "dismissed":
+                # Everybody who asks is told when it arrives, not only the first.
+                db.add_requester(wanted_row["id"], user["id"], who)
             if result.get("added_to_wanted") and who:
                 db.conn.execute(
                     "UPDATE wanted SET notes = ?, requested_by = ?, requested_by_id = ? WHERE id = ?",
@@ -1924,6 +2100,33 @@ def create_app():
         finally:
             db.close()
         return jsonify(result)
+
+    @app.route("/request/newer")
+    def request_newer():
+        """A newer film by exactly the name searched for, that the shelves lack.
+
+        Asked by the page after a title search that found something, so the
+        answer it already drew is not held up by a round trip to TMDb. Always
+        answers 200; a failure is simply no newer film.
+        """
+        user = current_user()
+        query = " ".join((request.args.get("q") or "").split())[:200]
+        if not query:
+            return jsonify({"error": "which film?"}), 400
+        named, _year = parse_query(query)
+        try:
+            found = newer_same_name(query, (user or {}).get("plex_token"))
+        except Exception:
+            found = []
+        if found:
+            db = Database()
+            try:
+                for guess in found:
+                    row = db.find_wanted(guess["title"], guess.get("year"))
+                    guess["wanted_status"] = row["status"] if row else None
+            finally:
+                db.close()
+        return jsonify({"query": query, "title": named or query, "newer": found})
 
     @app.route("/request/wanted/list")
     def request_wanted_list():
@@ -1985,5 +2188,20 @@ def create_app():
             mimetype=r.headers.get("content-type", "image/jpeg"),
             headers={"Cache-Control": "public, max-age=86400"},
         )
+
+    # When the index finds something new on the shelves, check the wanted list
+    # against it: that is how "it's here" reaches somebody without Plex Pass,
+    # whose server never sends the library.new webhook. Runs on the index's
+    # own thread, never inside a search.
+    def settle_after_arrivals(rating_keys):
+        db = Database()
+        try:
+            settle_wanted(db)
+        finally:
+            db.close()
+
+    library_index.on_arrivals(settle_after_arrivals)
+    # Keeps the library index fresh from now on; see scanner/library_index.py.
+    library_index.start_background()
 
     return app

@@ -359,14 +359,73 @@ Plex Media Server posts it from the same machine, which is why the loopback
 rule lets it through without a session. Only `library.new` is acted on; the
 rest is noise.
 
-Webhooks are a Plex Pass feature. Without one, ask the app to check for itself
-on a timer — say every couple of hours:
+Webhooks are a Plex Pass feature. Without one, nothing extra is needed: the
+library index (next section) looks at what each library added every few
+minutes, and when it finds something new it checks the wanted list and tells
+whoever asked. The webhook only makes that immediate.
+
+If the index is switched off, settle the list on a timer instead - say every
+couple of hours:
 
 ```
-0 */2 * * * curl -fsS -X POST http://127.0.0.1:5050/wanted/recheck >/dev/null
+0 */2 * * * curl -fsS -X POST http://127.0.0.1:5050/wanted/settle >/dev/null
 ```
 
-It only reports; marking something acquired stays a deliberate step.
+`/wanted/settle` marks what has arrived and sends the notifications.
+`/wanted/recheck` is only the report behind it: it lists what looks arrived
+and changes nothing.
+
+---
+
+## The library index
+
+A catalogue of every film and series on the server, kept in a SQLite file of
+its own and refreshed by the app in the background. Searches ask it first: a
+title it does not hold is answered without a single request to Plex, and one it
+does hold is looked up only in the library that holds it. The files behind each
+film are checked in the background too, so no search ever waits on a disk.
+
+Nothing needs setting up; it builds itself the first time the app starts, and
+the console's overview shows what it holds. To watch the first build, or to
+check on it from a terminal:
+
+```bash
+venv/bin/python scripts/sync_library.py            # read every library now
+venv/bin/python scripts/sync_library.py --status   # what it holds, and where
+```
+
+**Putting it on another drive.** The file is small - a few megabytes for a
+large library - and any always-connected local drive is a good home for it. On
+a Mac, find the name macOS gave the drive, make a folder on it, and point
+`index.path` at a file in that folder:
+
+```bash
+ls /Volumes
+mkdir "/Volumes/<drive name>/PlexGet"
+```
+
+```yaml
+index:
+  path: "/Volumes/<drive name>/PlexGet/library_index.db"
+```
+
+Restart the app. The folder has to exist already: the app never creates it,
+because a drive that is not mounted leaves nothing at `/Volumes/<drive name>`,
+and creating the folder there would quietly put the index on the internal disk
+under the drive's name. If the drive is missing, searches carry on asking Plex
+directly, the console says why, and the index comes back when the drive does.
+
+The drive's speed matters much less than it sounds. The gain comes from not
+asking Plex, library by library, whether it has something; a lookup in the
+index takes a millisecond or two on any SSD, internal or external.
+
+**If the app's own worker is switched off** (`index.background: false`), run
+the script on a schedule instead:
+
+```
+*/5 * * * * cd /path/to/plexget && venv/bin/python scripts/sync_library.py --recent >/dev/null
+0 */6 * * * cd /path/to/plexget && venv/bin/python scripts/sync_library.py >/dev/null
+```
 
 ---
 
@@ -387,6 +446,7 @@ which is the only thing here that is not reconstructible from Plex.
 
 Everything the maintenance tooling produces — the scan, the quality scores, the
 gap analysis — is rebuilt by running it again, so it is not worth backing up.
+The same goes for the library index: delete it and it is read again from Plex.
 
 ---
 

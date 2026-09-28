@@ -115,6 +115,19 @@ class Database:
                 retired_at TIMESTAMP
             );
 
+            -- Notes the other way: a household member telling the owner that
+            -- something is wrong, from inside the app. Kept so the owner reads
+            -- them on the console rather than in a text message.
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                body TEXT NOT NULL,
+                context TEXT,
+                posted_by TEXT,
+                posted_by_id TEXT,
+                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                read_at TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS wanted (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -125,14 +138,12 @@ class Database:
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_wanted_title_year
-                ON wanted (lower(title), year);
-
-            -- SQLite treats NULLs as distinct in a UNIQUE index, so the index
-            -- above does not stop duplicates when the year is unknown.
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_wanted_title_noyear
-                ON wanted (lower(title)) WHERE year IS NULL;
-
+            -- Uniqueness is idx_wanted_entry, below: kind, title, year and
+            -- season together. The older title-and-year indexes are dropped
+            -- there and must never be created here again - this script runs
+            -- on every open, before the drop, so re-creating them failed the
+            -- moment two seasons of one series were on the list, and with it
+            -- every page that opens the database.
             CREATE INDEX IF NOT EXISTS idx_wanted_status
                 ON wanted (status, added_at DESC);
         """)
@@ -148,6 +159,29 @@ class Database:
             self.conn.execute("ALTER TABLE wanted ADD COLUMN kind TEXT NOT NULL DEFAULT 'film'")
         if "season" not in wanted_columns:
             self.conn.execute("ALTER TABLE wanted ADD COLUMN season INTEGER")
+        # The film exactly, when the page knew it: "Resident Evil (2026)" by
+        # name and year could still be confused with something; by TMDb id it
+        # cannot, and Plex files each film under its TMDb id too.
+        if "tmdb_id" not in wanted_columns:
+            self.conn.execute("ALTER TABLE wanted ADD COLUMN tmdb_id INTEGER")
+        # Everybody who asked, not only the first. requested_by_id on the row
+        # is the first asker and stays as it was; a second person pressing
+        # "tell me when it lands" on the same film goes here, so they are told
+        # as well. Rows from before this table are copied in once.
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS wanted_requesters (
+                wanted_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                username TEXT,
+                asked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (wanted_id, user_id)
+            );
+        """)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO wanted_requesters (wanted_id, user_id, username) "
+            "SELECT id, requested_by_id, requested_by FROM wanted "
+            "WHERE requested_by_id IS NOT NULL AND requested_by_id != ''"
+        )
         self.conn.execute("DROP INDEX IF EXISTS idx_wanted_title_year")
         self.conn.execute("DROP INDEX IF EXISTS idx_wanted_title_noyear")
         self.conn.execute("""
@@ -337,16 +371,23 @@ class Database:
              season if season is not None else -1),
         ).fetchone()
 
-    def insert_wanted(self, title, year, search_query, notes=None, kind="film", season=None):
+    def insert_wanted(self, title, year, search_query, notes=None, kind="film", season=None,
+                      tmdb_id=None):
         """Add something missing. Returns (row, created) - never duplicates."""
+        tmdb_id = int(tmdb_id) if str(tmdb_id or "").isdigit() else None
         existing = self.find_wanted(title, year, kind, season)
         if existing is not None:
+            if tmdb_id and not existing["tmdb_id"]:
+                # Asked for again from a card that knew exactly which film.
+                self.conn.execute("UPDATE wanted SET tmdb_id = ? WHERE id = ?", (tmdb_id, existing["id"]))
+                self.conn.commit()
+                existing = self.conn.execute("SELECT * FROM wanted WHERE id = ?", (existing["id"],)).fetchone()
             return existing, False
         try:
             cursor = self.conn.execute(
-                "INSERT INTO wanted (title, year, search_query, notes, kind, season) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (title, year, search_query, notes, kind, season),
+                "INSERT INTO wanted (title, year, search_query, notes, kind, season, tmdb_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (title, year, search_query, notes, kind, season, tmdb_id),
             )
             self.conn.commit()
         except sqlite3.IntegrityError:
@@ -360,6 +401,22 @@ class Database:
             "SELECT * FROM wanted WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
         return row, True
+
+    def add_requester(self, wanted_id, user_id, username=None):
+        """Remember that this person is waiting on this entry. Asking twice is harmless."""
+        if not user_id:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO wanted_requesters (wanted_id, user_id, username) VALUES (?, ?, ?)",
+            (wanted_id, str(user_id), username),
+        )
+        self.conn.commit()
+
+    def requesters(self, wanted_id):
+        """Everybody waiting on an entry, first asker first: [(user_id, username)]."""
+        return [(row["user_id"], row["username"]) for row in self.conn.execute(
+            "SELECT user_id, username FROM wanted_requesters WHERE wanted_id = ? "
+            "ORDER BY asked_at, rowid", (wanted_id,))]
 
     def get_wanted(self, status="wanted", limit=500):
         """Wanted entries, newest first. status=None returns every row."""
@@ -425,4 +482,44 @@ class Database:
             (announcement_id,),
         )
         self.conn.commit()
+
+    # ---- messages to the owner ---------------------------------------------
+
+    def post_message(self, body, posted_by, posted_by_id=None, context=None):
+        """A household member telling the owner something."""
+        cursor = self.conn.execute(
+            "INSERT INTO messages (body, context, posted_by, posted_by_id) VALUES (?, ?, ?, ?)",
+            (body, context, posted_by, str(posted_by_id) if posted_by_id else None),
+        )
+        self.conn.commit()
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+
+    def messages(self, unread_only=False, limit=200):
+        """What the household has said, newest first."""
+        where = "WHERE read_at IS NULL " if unread_only else ""
+        return self.conn.execute(
+            f"SELECT * FROM messages {where}ORDER BY posted_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def count_unread_messages(self):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE read_at IS NULL"
+        ).fetchone()[0]
+
+    def mark_message_read(self, message_id, read=True):
+        """Rows are kept for history, never deleted; read is the only state."""
+        cursor = self.conn.execute(
+            "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE id = ?" if read
+            else "UPDATE messages SET read_at = NULL WHERE id = ?",
+            (message_id,),
+        )
+        self.conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
 

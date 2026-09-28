@@ -43,9 +43,23 @@ it is easy to convince yourself a change works when it works only for you.
 
 ### Tests
 
-There are none, which is the plain truth rather than an invitation to leave it
-that way. Until there are, say in the pull request what you actually exercised.
-The paths worth walking by hand after almost any change:
+A start, under `tests/`, run with:
+
+```bash
+pip install -r requirements-dev.txt
+venv/bin/python -m pytest -q
+```
+
+They run against a fake Plex built from real plexapi objects
+(`tests/fake_plex.py`) and a throwaway config, database and library index, so
+they need no server and never touch your own `config.yaml`. The fake fails any
+request plexapi makes behind your back - reading an empty field on a search
+result makes it fetch the whole film again - so a test will say so if a change
+quietly adds a request per result.
+
+They cover the library index and the searches that use it, not the whole app,
+so still say in the pull request what you exercised by hand. The paths worth
+walking after almost any change:
 
 - A title search, an actor search and a mood search.
 - A request for something the library does not have.
