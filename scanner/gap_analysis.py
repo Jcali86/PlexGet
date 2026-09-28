@@ -70,11 +70,17 @@ def _title_owned(tmdb_title, tmdb_original_title, tmdb_year, owned_films):
     'One Hundred and One Dalmatians'), but only when both years are known and
     agree, since otherwise it matches any title that contains a held one. With
     a year missing on either side the title alone decides.
+
+    A title that ends in a number, 'Blade Runner 2049.mkv', has that number
+    read as its year, so the title and the year together are tried as a title
+    before the years are allowed to rule anything out.
     """
     candidates = [tmdb_title]
     if tmdb_original_title:
         candidates.append(tmdb_original_title)
     for owned, owned_year in owned_films:
+        if owned_year is not None and f"{owned} {owned_year}" in candidates:
+            return True
         years_known = tmdb_year is not None and owned_year is not None
         if years_known and abs(tmdb_year - owned_year) > 1:
             continue
@@ -130,6 +136,7 @@ def _parse_movie_title(file_path):
     Handles patterns like:
       <library>/Batman v. Superman-Dawn of Justice 2016 ...mkv
       <library>/500 Days of Summer.mkv
+      <library>/Halloween (1978).mkv
     """
     basename = re.split(r"[\\/]", file_path)[-1]
     # Remove extension
@@ -137,8 +144,9 @@ def _parse_movie_title(file_path):
     # Strip common release tags from the right
     name = re.split(r"[\.\s](?:\d{3,4}p|BluRay|BRRip|WEB-DL|WEBRip|REMUX|HDTV|BDRip|AMZN|NF|PCOK|WEB\b)", name, flags=re.IGNORECASE)[0]
     name = name.replace(".", " ").strip()
-    # Try to pull out year
-    year_match = re.search(r"[\s\.](\d{4})$", name)
+    # The year in brackets is Plex's own naming, and the importer's. Without
+    # it the franchise check has no year to tell a remake by.
+    year_match = re.search(r"[\s\.]\(?(\d{4})\)?$", name)
     year = int(year_match.group(1)) if year_match else None
     if year_match:
         name = name[:year_match.start()].strip()

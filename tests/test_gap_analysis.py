@@ -34,6 +34,11 @@ RESIDENT_EVIL = {"id": 17255, "name": "Resident Evil Collection", "parts": [
     part(1234, "Resident Evil", "2026-09-18"),
 ]}
 
+BLADE_RUNNER = {"id": 422837, "name": "Blade Runner Collection", "parts": [
+    part(78, "Blade Runner", "1982-06-25"),
+    part(335984, "Blade Runner 2049", "2017-10-04"),
+]}
+
 
 class Gaps:
     """Just enough of the database for the analysis to write gaps into."""
@@ -74,6 +79,18 @@ def tmdb(monkeypatch):
     return install
 
 
+def analyse(db):
+    """Run the whole movie analysis and insist every film got through it.
+
+    run_movie_analysis catches and prints whatever goes wrong with a film, the
+    fake's own complaints included, so a broken path shows up only as a film
+    that was never counted.
+    """
+    result = gap_analysis.run_movie_analysis(db, libraries=["Movies"])
+    assert result["movies_analyzed"] == len(db.files)
+    return db.missing()
+
+
 def test_a_remake_of_a_held_film_is_still_missing(tmdb):
     tmdb(HALLOWEEN)
     db = Gaps()
@@ -100,12 +117,40 @@ def test_films_whose_titles_contain_a_held_one_are_still_missing(tmdb):
         "/media/Movies/Resident.Evil.The.Final.Chapter.2016.1080p.BluRay.mkv",
     ])
 
-    gap_analysis.run_movie_analysis(db, libraries=["Movies"])
-
-    assert db.missing() == [
+    assert analyse(db) == [
         ("Resident Evil", "Release: 2026-09-18"),
         ("Resident Evil: Welcome to Raccoon City", "Release: 2021-11-24"),
     ]
+
+
+def test_the_importers_own_naming_carries_the_year(tmdb):
+    tmdb(HALLOWEEN)
+    db = Gaps(["/media/Movies/Halloween (1978).mkv"])
+
+    assert analyse(db) == [
+        ("Halloween", "Release: 2018-10-18"),
+        ("Halloween Ends", "Release: 2022-10-12"),
+        ("Halloween Kills", "Release: 2021-10-14"),
+    ]
+
+
+def test_a_title_ending_in_a_number_is_not_mistaken_for_a_year(tmdb):
+    tmdb(BLADE_RUNNER)
+    db = Gaps([
+        "/media/Movies/Blade.Runner.1982.1080p.BluRay.mkv",
+        "/media/Movies/Blade Runner 2049.mkv",
+    ])
+
+    assert analyse(db) == []
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("/media/Movies/Halloween (1978).mkv", ("Halloween", 1978)),
+    ("/media/Movies/Wonder Woman 1984 (2020).mkv", ("Wonder Woman 1984", 2020)),
+    ("/media/Movies/Halloween.1978.1080p.BluRay.mkv", ("Halloween", 1978)),
+])
+def test_parse_movie_title(path, expected):
+    assert gap_analysis._parse_movie_title(path) == expected
 
 
 @pytest.mark.parametrize("title, year, owned, expected", [
@@ -118,6 +163,9 @@ def test_films_whose_titles_contain_a_held_one_are_still_missing(tmdb):
     # With no year to go on, the title alone decides.
     ("halloween", 2018, {("halloween", None)}, True),
     ("halloween", None, {("halloween", 1978)}, True),
+    # 'Blade Runner 2049.mkv' parses as Blade Runner from the year 2049.
+    ("blade runner 2049", 2017, {("blade runner", 2049)}, True),
+    ("blade runner", 1982, {("blade runner", 2049)}, False),
 ])
 def test_title_owned(title, year, owned, expected):
     assert gap_analysis._title_owned(title, title, year, owned) is expected
