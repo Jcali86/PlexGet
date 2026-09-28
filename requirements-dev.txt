@@ -1,0 +1,2 @@
+# Only needed to run the tests: pip install -r requirements-dev.txt
+pytest==9.1.1

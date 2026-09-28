@@ -12,13 +12,14 @@ for it. Everything else is filled in below or is a feature that stays quietly
 off until somebody wants it, so a working config.yaml can be three lines long.
 """
 
+import os
 import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).parent
-CONFIG_PATH = ROOT / "config.yaml"
+CONFIG_PATH = Path(os.environ.get("PLEXGET_CONFIG") or ROOT / "config.yaml")
 EXAMPLE_PATH = ROOT / "config.example.yaml"
 
 # Nothing works without these two, so they are worth stopping for. The third
