@@ -8,18 +8,31 @@ PlexUnavailable - an outage must never be recorded as a missing film.
 import datetime
 import os
 import re
+import threading
+import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 
 from plexapi.server import PlexServer
 
 from config import config
 from scanner import paths
 
-# "Chef (2014)" / "Chef [2014]" - an explicit, bracketed year.
-BRACKETED_YEAR = re.compile(r"^\s*(?P<title>.+?)\s*[\(\[]\s*(?P<year>\d{4})\s*[\)\]]\s*$")
+# "Chef (2014)" / "Chef [2014]" - an explicit, bracketed year - and "Resident
+# Evil (2026 film)", the way Wikipedia tells apart films of one name. A few
+# words after the brackets describe the copy rather than name the film -
+# "Resident Evil (2026) 4K" - so they are let go rather than costing the year.
+BRACKETED_YEAR = re.compile(
+    r"^\s*(?P<title>.+?)\s*[\(\[]\s*(?P<year>\d{4})(?:\s+(?P<film>film|movie))?\s*[\)\]]"
+    r"(?:\s+[^\(\)\[\]]{1,24})?\s*$", re.I)
 # "Chef 2014" - a bare trailing year, trusted only inside a plausible range so
-# that titles like "Blade Runner 2049" keep their number.
+# that titles like "Blade Runner 2049" keep their number. Inside that range it
+# is still a guess - Wonder Woman 1984 is a name, not a year - which is why
+# name_or_year asks the shelf, and TMDb, both ways.
 TRAILING_YEAR = re.compile(r"^\s*(?P<title>.+?)\s+(?P<year>\d{4})\s*$")
+# What parted a name from its year, "Resident Evil - 2026" or "Resident Evil,
+# 2026", is not part of the name; kept, it made a wanted row of its own.
+DANGLING = re.compile(r"(?:\s+[-–—]+|\s*,)\s*$")
 
 _server = None
 _as_user = {}
@@ -86,19 +99,19 @@ def search_shows(title, token=None):
     A series is returned as one result carrying its own counts, never as a heap
     of episodes: someone asking for Blackadder wants to know whether it is here
     and how much of it, not to scroll past twenty-four separate rows.
+
+    The library index is asked first which libraries could hold it at all. A
+    name it has never seen is answered without asking Plex anything; one it
+    has seen is searched for only in the libraries that hold it.
     """
     query = (title or "").strip()
     if not query:
         return []
 
     found = {}
-    for section in show_sections(token):
-        try:
-            results = section.search(title=query)
-        except Exception as e:
-            raise PlexUnavailable(str(e))
+    for section, results in _search_with_index(query, "show", show_sections(token)):
         for item in results:
-            confidence = title_confidence(query, item.title or "")
+            confidence = best_confidence(query, item.title, getattr(item, "originalTitle", None))
             if not confidence:
                 continue
             key = ((item.title or "").strip().lower(), item.year)
@@ -120,13 +133,79 @@ def search_shows(title, token=None):
                 "libraries": [section.title],
                 "confidence": confidence,
                 "kind": "show",
+                "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     ordered = sorted(found.values(), key=lambda m: (-m["confidence"], m["title"].lower()))
     return ordered
 
 
+def _search_with_index(query, kind, sections):
+    """(section, results) for a title search, asking Plex only where it can help.
+
+    The library index says which libraries hold anything by that name; the
+    rest are not asked. What the index finds is then confirmed with the
+    person's own token, because Plex decides who may see what. Usually the
+    search by the typed words confirms it, but Plex matches those words more
+    literally than people type them - "oceans eleven" is not a word of "Ocean's
+    Eleven" to Plex - so anything the index found that the typed words did not
+    is looked up by its own title, which Plex always matches.
+    """
+    from scanner import library_index
+    held = library_index.lookup(query, kind, sections)
+    if held is None:
+        return _search_sections(sections, query)
+    holding = {key for key, _rating_key, _title in held}
+    answered = _search_sections([s for s in sections if str(s.key) in holding], query)
+    seen = {str(item.ratingKey) for _section, items in answered for item in items}
+    missed = {}
+    for key, rating_key, title in held:
+        if rating_key not in seen:
+            missed.setdefault((key, title), set()).add(rating_key)
+    if not missed:
+        return answered
+    by_key = {str(s.key): s for s in sections}
+
+    def by_own_title(job):
+        (key, title), wanted = job
+        section = by_key[key]
+        _section, items = _search_sections([section], title)[0]
+        return section, [item for item in items if str(item.ratingKey) in wanted]
+
+    jobs = list(missed.items())[:5]
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        extra = [pair for pair in pool.map(by_own_title, jobs) if pair[1]]
+    return answered + extra
+
+
+def _search_sections(sections, query):
+    """The same title search in several libraries at once, answered in library order.
+
+    Each library is its own request to Plex; asking them one after another made
+    a search as slow as all of them added together.
+    """
+    def one(section):
+        try:
+            return section, listed(section.search(title=query))
+        except Exception as e:
+            raise PlexUnavailable(str(e))
+
+    if len(sections) <= 1:
+        return [one(section) for section in sections]
+    with ThreadPoolExecutor(max_workers=min(len(sections), 8)) as pool:
+        return list(pool.map(one, sections))
+
+
 def seasons_held(rating_key, token=None):
-    """Which season numbers of a series are actually here."""
+    """Which season numbers of a series are actually here.
+
+    Only ever asked about a series the person's own search has already shown
+    them, so the index's list is theirs too: a share covers a whole series, not
+    some of its seasons.
+    """
+    from scanner import library_index
+    known = library_index.seasons_of(rating_key)
+    if known is not None:
+        return known
     try:
         show = server_for(token).fetchItem(int(rating_key))
         return sorted(
@@ -151,7 +230,12 @@ def plausible_year(year):
     return 1888 <= year <= datetime.date.today().year + 5
 
 
-QUALIFIER = re.compile(r"\s*[\(\[]\s*(?!(?:19|20)\d{2}\s*[\)\]])[^\)\]]{1,24}[\)\]]\s*")
+# An aside comes after the name it qualifies, never first. A name can open
+# with brackets of its own, and taking them for an aside cost "(500) Days of
+# Summer" its number and "[REC]" the whole of its name.
+QUALIFIER = re.compile(
+    r"(?<=\S)\s*[\(\[]\s*(?!(?:19|20)\d{2}(?:\s+(?:film|movie))?\s*[\)\]])[^\)\]]{1,24}[\)\]]\s*",
+    re.I)
 
 
 def query_hint(query):
@@ -167,25 +251,38 @@ def parse_query(query):
     (original)" - is how people qualify a half-remembered title. It is not part
     of the name, so it is dropped before searching and kept as a hint.
     """
+    title, year, _source = split_query(query)
+    return title, year
+
+
+def split_query(query):
+    """parse_query, and where the year came from: "bracketed", "film", "trailing" or None.
+
+    "film" is the Wikipedia form, "Resident Evil (2026 film)". Only a bare
+    trailing year is a guess, and a caller searching the shelf should try it
+    both ways - see name_or_year.
+    """
     raw = QUALIFIER.sub(" ", (query or "")).strip()
     if not raw:
-        return "", None
+        return "", None, None
 
     match = BRACKETED_YEAR.match(raw)
     if match:
         year = int(match.group("year"))
-        title = match.group("title").strip()
+        title = DANGLING.sub("", match.group("title").strip())
         if title:
-            return title, (year if plausible_year(year) else None)
+            if not plausible_year(year):
+                return title, None, None
+            return title, year, ("film" if match.group("film") else "bracketed")
 
     match = TRAILING_YEAR.match(raw)
     if match:
         year = int(match.group("year"))
-        title = match.group("title").strip()
+        title = DANGLING.sub("", match.group("title").strip())
         if title and plausible_year(year):
-            return title, year
+            return title, year, "trailing"
 
-    return raw, None
+    return DANGLING.sub("", raw), None, None
 
 
 def part_files(item):
@@ -209,15 +306,84 @@ def availability(item):
     different questions. A film whose every copy is gone is, in practice,
     missing - UNLESS the store it lives on is offline, in which case it is
     simply unknown, and saying so beats declaring it gone.
+
+    The library index checks every file in the background, so a search asks it
+    first and only looks at the disk itself when the index has no fresh answer
+    for exactly these files. Looking at the disk from inside a search is what
+    let one wedged network share hold a page open for as long as the share
+    stayed wedged.
     """
-    # Judge each copy at the path this app can actually reach, not the one
-    # Plex happens to name.
-    files = [paths.readable_path(f) for f in part_files(item)]
-    offline = [f for f in files if paths.store_offline(f)]
-    # Only files whose store is actually readable can be judged; a file on an
-    # offline store is unknown, never missing.
-    checkable = [f for f in files if f not in offline]
-    missing = [f for f in checkable if not os.path.exists(f)]
+    files = part_files(item)
+    from scanner import library_index
+    known = library_index.file_state(getattr(item, "ratingKey", None), files)
+    if known is not None:
+        return known
+    return availability_of(files)
+
+
+def _unknown(files):
+    """The verdict for files that could not be looked at: unknown, never missing."""
+    return {"files": len(files), "missing_files": [], "store_offline": bool(files),
+            "all_missing": False, "some_missing": False}
+
+
+# After a disk check has run out of time, others are not attempted for a while.
+# A wedged mount stays wedged, and every search waiting its turn behind it
+# would otherwise pay the full timeout again, once per film.
+_wedged_until = 0.0
+
+
+def availability_of(files):
+    """Check these files on disk now, giving up after the probe timeout.
+
+    The store each file lives on is asked first, through the guarded probe in
+    scanner.paths, so a drive that has gone away is found out without touching
+    any file on it. The files themselves are then looked at on a thread this is
+    prepared to abandon, because a file on no configured store is looked at
+    directly, and a hung network mount does not refuse - it hangs.
+    """
+    global _wedged_until
+    files = list(files or [])
+    if not files:
+        return files_state(files)
+    if time.time() < _wedged_until:
+        return _unknown(files)
+    outcome = []
+
+    def check():
+        try:
+            outcome.append(files_state(files))
+        except Exception:
+            # A fault is not a hang: answer unknown without holding back the
+            # checks that come after.
+            outcome.append(_unknown(files))
+
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    worker.join(paths.probe_timeout())
+    if outcome:
+        return outcome[0]
+    _wedged_until = time.time() + paths.probe_cache()
+    return _unknown(files)
+
+
+def files_state(files):
+    """Which of these files are on disk, judged the way availability() judges.
+
+    Unguarded: the library index runs this on its own thread, where a slow
+    answer holds up nobody. Everything on the request path goes through
+    availability_of() instead.
+    """
+    offline, checkable = [], []
+    for path in files:
+        names = paths.store_for(path)
+        if names and not any(paths.store_ready(name) for name in names):
+            offline.append(path)
+            continue
+        # Judge each copy at the path this app can actually reach, not the one
+        # Plex happens to name.
+        checkable.append(paths.readable_path(path))
+    missing = [path for path in checkable if not os.path.exists(path)]
     return {
         "files": len(files),
         "missing_files": missing,
@@ -232,10 +398,36 @@ def availability(item):
     }
 
 
+def listed(items):
+    """Search results as Plex listed them, never quietly fetched again one by one.
+
+    plexapi treats a search result as a partial object: reading any field that
+    came back empty - an unrated film's contentRating, a missing audienceRating
+    or originalTitle - makes it fetch that whole film from Plex again, one
+    request per film, inside the search. The listing already carries every
+    field these pages show, so an empty field is simply empty.
+    """
+    for item in items or []:
+        try:
+            item._autoReload = False
+        except AttributeError:
+            pass
+    return items
+
+
+_APOSTROPHES = re.compile("['`\u2018\u2019\u02bc]")
+
+
 def fold(value):
-    """Compare titles the way people do: ignoring case, accents and punctuation."""
+    """Compare titles the way people do: ignoring case, accents and punctuation.
+
+    An apostrophe joins rather than splits, because nobody types one: split,
+    "oceans eleven" was never Ocean's Eleven and "dont look up" was never Don't
+    Look Up. An ampersand is the word it stands for.
+    """
     decomposed = unicodedata.normalize("NFKD", value or "")
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    stripped = _APOSTROPHES.sub("", stripped).replace("&", " and ")
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", stripped)).strip().lower()
 
 
@@ -293,23 +485,85 @@ def title_confidence(query, title):
     return 0
 
 
+# "Matrix" is The Matrix. Measured against the full name it only ever came out
+# as a maybe, and a maybe is never claimed, so naming a film without its
+# article sent the search down the slow path meant for films the library does
+# not have.
+_ARTICLE = re.compile(r"^(the|a|an)\s+", re.I)
+
+
+def best_confidence(query, *names):
+    """title_confidence against every name a film goes by, the best of them.
+
+    Its title, its title without a leading article, and its original title - so
+    "matrix" finds The Matrix and "le fabuleux destin d'amelie poulain" finds
+    Amelie. The rules for each comparison are title_confidence's own.
+    """
+    best = 0
+    for name in names:
+        name = (name or "").strip()
+        if not name:
+            continue
+        best = max(best, title_confidence(query, name))
+        bare = without_article(name)
+        if bare != name:
+            best = max(best, title_confidence(query, bare))
+        if best == 2:
+            break
+    return best
+
+
+def without_article(name):
+    """A name without a leading "The", "A" or "An"."""
+    return _ARTICLE.sub("", (name or "").strip())
+
+
+def named_exactly(name, matches):
+    """Is any of these called exactly this, rather than merely starting with it?"""
+    wanted = fold(without_article(name))
+    return any(fold(without_article(m.get("title"))) == wanted for m in matches)
+
+
+def name_or_year(query, *lookups):
+    """(title, year, found): what was asked for, a bare trailing year read both ways.
+
+    "Chef 2014" is Chef from 2014, but Wonder Woman 1984 is the whole of a
+    film's name, and so are Death Race 2000 and Class of 1984. Read as a year,
+    the number found the 2017 Wonder Woman instead, or nothing, and a film on
+    the shelf looked missing. The words cannot tell the two apart; the shelf
+    can, and for a film the shelf lacks, TMDb can. Each lookup is asked for the
+    whole of it, and if anything is called exactly that, the number was part of
+    the name. found is then what each lookup returned, so the caller need not
+    ask again; otherwise it is None and the year stands.
+    """
+    title, year, source = split_query(query)
+    if source == "trailing":
+        whole = f"{title} {year}"
+        found = [lookup(whole) for lookup in lookups]
+        if any(named_exactly(whole, matches) for matches in found):
+            return whole, None, found
+    return title, year, None
+
+
 def search_plex(title, token=None):
     """Search every movie library for a title.
 
     Plex matches on word boundaries, case- and accent-insensitively, so
     "anchorman" finds "Anchorman: The Legend of Ron Burgundy" and "amelie"
     finds "Amelie". A film held in two libraries is returned once, listing both.
+
+    The library index is asked first which libraries could hold it. A title it
+    has never seen is answered with nothing, without a single request to Plex -
+    the case that used to cost the most, because every library had to be asked
+    to be sure. One it has seen is confirmed with the person's own token, only
+    in the libraries that hold it, since Plex also decides who may see what.
     """
     query = (title or "").strip()
     if not query:
         return []
 
-    collected = {}
-    for section in movie_sections(token):
-        try:
-            results = section.search(title=query)
-        except Exception as e:
-            raise PlexUnavailable(str(e))
+    collected, originals = {}, {}
+    for section, results in _search_with_index(query, "movie", movie_sections(token)):
         for item in results:
             key = ((item.title or "").strip().lower(), item.year)
             if key in collected:
@@ -317,6 +571,7 @@ def search_plex(title, token=None):
                     collected[key]["libraries"].append(section.title)
                 continue
             state = availability(item)
+            originals[key] = getattr(item, "originalTitle", None)
             collected[key] = {
                 "title": (item.title or "").strip(),
                 "year": item.year,
@@ -331,8 +586,8 @@ def search_plex(title, token=None):
                 "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     scored = []
-    for movie in collected.values():
-        confidence = title_confidence(query, movie["title"])
+    for key, movie in collected.items():
+        confidence = best_confidence(query, movie["title"], originals.get(key))
         if confidence:
             movie["confidence"] = confidence
             scored.append((confidence, movie))
@@ -340,17 +595,45 @@ def search_plex(title, token=None):
     return [movie for _confidence, movie in scored]
 
 
-def narrow_by_year(matches, year):
-    """When the user gave a year and something matches it exactly, trust it."""
+def same_year(matches, year):
+    """The matches from the year that was named, allowing one either side.
+
+    A year given is a year meant. The rule this replaces trusted a year only
+    when something matched it and otherwise handed back every match, so
+    "Resident Evil (2026)" was answered with the 2002 film: asking for the new
+    one was told "we already have that", and a request for it would have been
+    settled - "it's here" - by the old one. One year of slack, because Plex and
+    TMDb disagree on a film's year often enough: a festival premiere against
+    the release, one country against another.
+    """
     if not year:
         return matches
-    exact = [m for m in matches if m["year"] == year]
-    return exact or matches
+    exact = [m for m in matches if m.get("year") == year]
+    return exact or [m for m in matches if m.get("year") and abs(m["year"] - year) <= 1]
 
 
-def search_and_capture(db, query, capture=True):
-    """Search Plex; add the title to the wanted list when nothing matches."""
-    title, year = parse_query(query)
+def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
+    """Search Plex; add the title to the wanted list when nothing matches.
+
+    year and tmdb_id, when the caller knows them, are the film exactly - a
+    button on a TMDb card knows both - and a year given this way is used as it
+    is rather than read back out of the title.
+    """
+    title, said_year, found = name_or_year(query, search_plex)
+    everything = found[0] if found else search_plex(title)
+    if found is None and split_query(query)[2] == "trailing":
+        # Neither reading is on the shelf, so the shelf cannot say which was
+        # meant, and "Wonder Woman 1984" went on the list as Wonder Woman from
+        # 1984. TMDb can say, but only once the shelf has had its turn: a film
+        # held under the year's reading is still the answer.
+        held = same_year(everything, said_year if year is None else year)
+        if not any(m.get("confidence", 2) >= 2 for m in held):
+            from api import tmdb_lookup
+            whole = f"{title} {said_year}"
+            if named_exactly(whole, tmdb_lookup.well_known(whole)):
+                title, said_year, everything = whole, None, search_plex(whole)
+    if year is None:
+        year = said_year
     result = {
         "query": (query or "").strip(),
         "title": title,
@@ -364,7 +647,7 @@ def search_and_capture(db, query, capture=True):
     if not title:
         return result
 
-    matches = narrow_by_year(search_plex(title), year)
+    matches = same_year(everything, year)
     # Only certainty answers "we have that" - the same bar search_by_title
     # holds. A confidence of 1 is the making-of documentary, or Taxi Driver
     # turning up for "Taxi": worth mentioning, never worth claiming, and
@@ -373,8 +656,13 @@ def search_and_capture(db, query, capture=True):
     # of an Epic", and never gets the film they wanted.
     certain = [m for m in matches if m.get("confidence", 2) >= 2]
     result["matches"] = certain
-    result["close"] = [m for m in matches
-                       if m.get("confidence") == 1 and not m["file_missing"]]
+    # Films of the same name from other years are worth naming for the same
+    # reason - "the 2002 one is here, not the one you asked for" - and never
+    # worth claiming.
+    kept = {m["rating_key"] for m in matches}
+    result["close"] = ([m for m in matches if m.get("confidence") == 1 and not m["file_missing"]]
+                       + [m for m in everything if m["rating_key"] not in kept
+                          and m.get("confidence", 2) >= 2 and not m["file_missing"]])
 
     # Plex still lists a film after its file disappears. If every copy of every
     # match is gone, the library cannot actually play it, so it belongs on the
@@ -388,14 +676,14 @@ def search_and_capture(db, query, capture=True):
         gone = certain[0]
         note = "Plex lists this but the file is missing from disk"
         row, created = db.insert_wanted(
-            gone["title"], gone["year"], (query or "").strip(), notes=note
+            gone["title"], gone["year"], (query or "").strip(), notes=note, tmdb_id=tmdb_id
         )
         result["added_to_wanted"] = created
         result["already_wanted"] = not created
         result["wanted"] = dict(row)
         return result
 
-    row, created = db.insert_wanted(title, year, (query or "").strip())
+    row, created = db.insert_wanted(title, year, (query or "").strip(), tmdb_id=tmdb_id)
     result["added_to_wanted"] = created
     result["already_wanted"] = not created
     result["wanted"] = dict(row)
@@ -405,26 +693,67 @@ def search_and_capture(db, query, capture=True):
 def recheck(db):
     """Re-search every wanted entry and report the ones Plex now has.
 
-    Nothing is reclassified automatically - marking something acquired stays a
-    deliberate, manual step.
+    Nothing is reclassified here; settle_wanted in api/routes.py does that,
+    and marking something acquired by hand stays possible from the console.
     """
     now_in_plex = []
     entries = db.get_wanted("wanted")
     for entry in entries:
-        matches = narrow_by_year(search_plex(entry["title"]), entry["year"])
-        # Plex keeps listing a title after its file is gone - which is often
-        # exactly why the title is on this list. Only a copy that can actually
-        # be played means it has arrived; otherwise announcing "it's here" is a
-        # lie, and it would flip straight back on the next check. The same
-        # goes for a companion piece: the making-of arriving is not the film
-        # arriving, however alike the names.
-        playable = [m for m in matches
-                    if not m["file_missing"] and m.get("confidence", 2) >= 2]
-        if playable:
+        matches = arrived(entry)
+        if matches:
             found = dict(entry)
-            found["matches"] = playable
+            found["matches"] = matches
             now_in_plex.append(found)
     return {"checked": len(entries), "now_in_plex": now_in_plex}
+
+
+def _asked_at(entry):
+    """When an entry was added, as a Unix time. SQLite writes it in UTC."""
+    try:
+        return datetime.datetime.strptime(str(entry["added_at"])[:19], "%Y-%m-%d %H:%M:%S") \
+            .replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def arrived(entry):
+    """What in Plex now answers this wanted entry; empty while it has not arrived.
+
+    A film by the same name from another year is not it: this is the check
+    that sends "it's here", and it once sent that for Resident Evil (2026) on
+    the strength of the 2002 film. A series is looked for among the series -
+    the film libraries hold nothing that answers it - and a season among that
+    series' seasons.
+    """
+    keys = entry.keys()
+    kind = (entry["kind"] if "kind" in keys else None) or "film"
+    title, year = entry["title"], entry["year"]
+
+    if kind == "show":
+        shows = [s for s in same_year(search_shows(title), year) if s.get("confidence", 2) >= 2]
+        season = entry["season"] if "season" in keys else None
+        if season:
+            return [s for s in shows if season in seasons_held(s["rating_key"])]
+        # The whole series, or "the next season" of one that is partly here:
+        # finding the series proves nothing when it was already on the shelf
+        # when they asked, so it has to have been added since.
+        asked = _asked_at(entry)
+        return [s for s in shows if asked and (s.get("added_at") or 0) > asked]
+
+    tmdb_id = entry["tmdb_id"] if "tmdb_id" in keys else None
+    if tmdb_id:
+        from scanner import library_index
+        by_id = library_index.films_by_tmdb(tmdb_id)
+        if by_id:
+            return by_id
+    films = same_year(search_plex(title), year)
+    # Plex keeps listing a title after its file is gone - which is often
+    # exactly why the title is on this list. Only a copy that can actually be
+    # played means it has arrived; otherwise announcing "it's here" is a lie,
+    # and it would flip straight back on the next check. The same goes for a
+    # companion piece: the making-of arriving is not the film arriving,
+    # however alike the names.
+    return [m for m in films if not m["file_missing"] and m.get("confidence", 2) >= 2]
 
 
 def export_line(title, year):

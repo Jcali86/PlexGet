@@ -149,6 +149,9 @@ def suggest(title, hint="", year=None, limit=5):
             "language": item.get("original_language", ""),
             "popularity": item.get("popularity", 0),
             "original_title": (item.get("original_title") or "").strip(),
+            # The day, not just the year: "is this the new one?" needs to know
+            # whether it came out last month or last December.
+            "release_date": (item.get("release_date") or "")[:10] or None,
         })
 
     def rank(film):
@@ -209,6 +212,17 @@ def suggest_shows(title, hint="", limit=5):
     found = found[:limit]
     _cache[cache_key] = (time.time(), found)
     return found
+
+
+def well_known(title):
+    """Films and series by this name that people have heard of.
+
+    For telling whether a number at the end of a name is part of it: Wonder
+    Woman 1984 is a film everybody has heard of, while a short that happens to
+    be called "Chef 2014" is no reason to stop reading 2014 as a year. The bar
+    is the one names_a_film sets for a bare name.
+    """
+    return [g for g in suggest(title) + suggest_shows(title) if (g.get("popularity") or 0) >= 1]
 
 
 def seasons_that_exist(title, year=None):
@@ -381,6 +395,8 @@ def discover(filters, exclude_titles=(), limit=8):
             continue
         released = (item.get("release_date") or "")[:4]
         found.append({
+            # The film exactly, for the library's own check and for the ask.
+            "tmdb_id": item.get("id"),
             "title": name,
             "year": int(released) if released.isdigit() else None,
             "overview": (item.get("overview") or "").strip(),
@@ -523,6 +539,7 @@ def discover_shows(filters, exclude_titles=(), limit=8):
             continue
         first = (item.get("first_air_date") or "")[:4]
         found.append({
+            "tmdb_id": item.get("id"),
             "title": name,
             "year": int(first) if first.isdigit() else None,
             "overview": (item.get("overview") or "").strip(),

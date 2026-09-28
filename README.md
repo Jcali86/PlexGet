@@ -80,18 +80,37 @@ What they get:
   and never proposing something that would have to be fetched.
 - **Notes from you**, if you post one, and a skin picker for people with
   opinions about how it looks.
+- **A way to tell you something is wrong** without texting. "Something
+  wrong?" on the page takes a sentence, attaches whatever they last searched
+  for, and puts it on your console and your phone.
 
 ### For you
 
-- **The wanted list**, with who asked and when. Plex's `library.new` webhook
-  settles entries the moment the file lands and tells whoever asked. Webhooks
-  are a Plex Pass feature; without one, `POST /wanted/recheck` does the same
-  job on a schedule.
+- **The wanted list**, with who asked and when. When a film or series on it
+  lands, everybody who asked for it is told. Plex's `library.new` webhook (a
+  Plex Pass feature) does that the moment the file lands; without it, the
+  library index notices new arrivals within a few minutes and does the same.
+  An entry is only ever settled by the film asked for - Resident Evil (2026)
+  is not answered by the 2002 film of the same name.
 - **A push when somebody asks for something**, and another when a search turns
   up a film Plex lists but can no longer play — a file that has quietly gone
   missing puts itself back on the wanted list.
+- **Messages from the household**, on their own console tab, with the search
+  that prompted each one. A push arrives as each lands.
 - **An owner console** at `/dashboard`: overview, upgrade priority, gaps,
   poster status, wanted, export.
+- **Films you don't have, by genre.** On the gaps tab: pick genres (horror
+  and comedy, say), a rating floor and a vote floor, and TMDb's list of
+  matching films is read with everything Plex already holds taken out. What is
+  left can be put on the wanted list with one click. The rating is TMDb's user
+  score rather than IMDb's; the two run close enough that a floor of six means
+  the same thing on either.
+- **A library index.** Every film and series on the server, kept in a small
+  SQLite file on this machine and refreshed in the background. Searches ask it
+  before they ask Plex: a title the library does not have is answered without a
+  single request to Plex, and a named film you lack is answered straight from
+  TMDb instead of going through the model. It can live on any local drive; see
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#the-library-index).
 - **Library maintenance tooling** — a file scanner, an ffprobe quality audit, a
   TMDb gap analysis, a filename auditor and a poster pipeline. This is the
   older half of the project and it assumes the machine running it can see the
@@ -378,7 +397,7 @@ rather than instruction are all fixed in code. A persona author can change how
 it sounds, never what it may do.
 
 **What it sends.** The `notifications` block holds every message this app is
-capable of sending — four of them. Reword any of them, or turn them off.
+capable of sending — five of them. Reword any of them, or turn them off.
 Nothing else is ever sent.
 
 **What it may spend.** `app.limits` caps model use per person per hour and per
@@ -448,6 +467,8 @@ api/
   tmdb_lookup.py      naming a film the library does not have
   secrets_store.py    encryption for stored Plex tokens
 scanner/              the maintenance half: files, quality, gaps, names
+  discover.py         films TMDb rates well, by genre, that Plex lacks
+  library_index.py    the local catalogue searches ask before Plex
 analyzer/             ffprobe and TMDb helpers
 db/database.py        SQLite schema and queries
 dashboard/
