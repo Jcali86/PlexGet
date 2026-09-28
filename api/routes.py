@@ -1506,6 +1506,9 @@ def create_app():
         except Exception as e:
             give_back()
             return jsonify({"error": str(e)}), 500
+        # Taken out here, before anything can answer with it: held_titles is
+        # the part of a missing-only answer the page and the app are given.
+        held = result.pop("_held", None)
 
         # Films Plex lists but can no longer play are no use for a playlist.
         # Put them on the wanted list instead - a search that turns up a hole in
@@ -1563,12 +1566,12 @@ def create_app():
         wants_missing = (result.get("filters") or {}).get("only_missing")
         if wants_missing or body.get("include_missing"):
             filters = result.get("filters") or {}
-            # held_titles on a missing-only answer, otherwise whatever is
-            # already on the page - either way, what not to offer again.
-            held = result.get("held_titles")
+            # What a missing-only answer held, otherwise whatever is already on
+            # the page - either way, what not to offer again. With the years,
+            # so a remake of something here is still offered.
             if held is None:
-                held = ([m["title"] for m in result.get("matches") or []]
-                        + [x["title"] for x in result.get("shows") or []])
+                held = ([(m["title"], m.get("year")) for m in result.get("matches") or []]
+                        + [(x["title"], x.get("year")) for x in result.get("shows") or []])
             as_shows = result.get("wants_shows")
             if as_shows is None:
                 as_shows = bool(result.get("shows"))
@@ -1741,8 +1744,8 @@ def create_app():
         # they go on the wanted list instead, and the playlist grows into them.
         result["also_wanted"] = []
         if rounding_out:
-            have = ([m["title"] for m in found["matches"]]
-                    + list(found.get("held_titles") or []))
+            have = ([(m["title"], m.get("year")) for m in found["matches"]]
+                    + list(found.get("_held") or []))
             as_shows = bool(found.get("wants_shows"))
             result["wanted_are_shows"] = as_shows
             candidates = (tmdb_lookup.discover_shows(found.get("filters") or {},
