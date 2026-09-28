@@ -106,12 +106,85 @@ def availability(tmdb_id):
     return state
 
 
+def movie(tmdb_id):
+    """One film by its TMDb id: {tmdb_id, title, original_title, year}, or None.
+
+    A film TMDb has already described in a recent search is taken from that
+    answer rather than asked for again: the card somebody pressed came from
+    one. Otherwise asked for with a short timeout, since a person is waiting.
+    """
+    if not configured() or not tmdb_id:
+        return None
+    cache_key = ("movie", str(tmdb_id))
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    # Film searches only: TMDb numbers films and series separately, so a
+    # series can carry the same id as an unrelated film.
+    for key, (at, value) in list(_cache.items()):
+        if key[0] != "films" or time.time() - at >= CACHE_SECONDS:
+            continue
+        for item in value:
+            if str(item.get("tmdb_id")) == str(tmdb_id):
+                return {field: item.get(field) for field in ("tmdb_id", "title", "original_title", "year")}
+    try:
+        r = requests.get(
+            f"{config['tmdb']['base_url']}/movie/{int(tmdb_id)}",
+            params={"api_key": config["tmdb"]["api_key"],
+                    "language": config["tmdb"].get("language", "en-US")},
+            timeout=(3.05, 5),
+        )
+        if r.status_code == 404:
+            found = None
+        else:
+            r.raise_for_status()
+            item = r.json()
+            released = (item.get("release_date") or "")[:4]
+            found = {
+                "tmdb_id": item.get("id"),
+                "title": (item.get("title") or "").strip(),
+                "original_title": (item.get("original_title") or "").strip(),
+                "year": int(released) if released.isdigit() else None,
+            }
+    except Exception:
+        return None     # not cached: TMDb being awkward is not an answer
+    _cache[cache_key] = (time.time(), found)
+    return found
+
+
+def confirmed(tmdb_id, names, year=None):
+    """TMDb's own record of tmdb_id if it is a film by one of these names, within a year; else None.
+
+    The wanted list trusts a TMDb id over a name when it decides something has
+    arrived - that is the point of having one - so an id is only kept when it
+    is the film named. Sent by anybody in the household, an id for some other
+    film already on the shelf would otherwise settle the request, tell
+    everybody who asked "it's here", and do it again every time it was asked
+    for. Without TMDb there is nothing to check it against, so it is dropped.
+
+    names is every reading of what was sent: the title as the card sent it
+    matters, because reading a query strips brackets - "(500) Days of Summer"
+    would be checked as "Days of Summer" and never match.
+    """
+    from scanner.wanted_search import same_name
+
+    found = movie(tmdb_id)
+    if not found:
+        return None
+    if not any(same_name(name, tmdb_name) for name in names if name
+               for tmdb_name in (found["title"], found["original_title"]) if tmdb_name):
+        return None
+    if year and found["year"] and abs(found["year"] - year) > 1:
+        return None
+    return found
+
+
 def suggest(title, hint="", year=None, limit=5):
     """Films this might be, best guess first."""
     if not configured() or not (title or "").strip():
         return []
 
-    cache_key = (title.strip().lower(), (hint or "").lower(), year)
+    cache_key = ("films", title.strip().lower(), (hint or "").lower(), year)
     cached = _cache.get(cache_key)
     if cached and time.time() - cached[0] < CACHE_SECONDS:
         return cached[1]

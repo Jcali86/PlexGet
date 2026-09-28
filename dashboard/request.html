@@ -1390,7 +1390,8 @@ function showCard(x) {
   if (gaps) {
     chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
   } else {
-    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="next">Ask for more</button>`);
+    // "More" of a series that is here: the server records its next season.
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="more">Ask for more</button>`);
   }
   return `<div class="show">${poster}
       <div><h3>${esc(x.title)}</h3>
@@ -1413,7 +1414,8 @@ async function askShow(title, season, seasons, quiet, year) {
     return;
   }
   const body = {title, kind: 'show'};
-  if (season && season !== 'next' && season !== 'all') body.season = Number(season);
+  if (season === 'more') body.more = true;
+  else if (season && season !== 'next' && season !== 'all') body.season = Number(season);
   if (year) body.year = Number(year);
   try {
     const res = await fetch('/request/wanted', {
@@ -1422,10 +1424,21 @@ async function askShow(title, season, seasons, quiet, year) {
     const d = await res.json();
     if (!res.ok) { alert(d.error || 'Could not send that'); return; }
     if (quiet) return;
-    const what = body.season ? `${esc(title)}, series ${body.season}` : esc(title);
+    // The server's season, not the button's: "ask for more" of a series that
+    // is here comes back as the next one.
+    const what = d.season ? `${esc(title)}, series ${d.season}` : esc(title);
+    if (d.found) { status('good', `${what} is here already.`, "It's on the shelf now."); return; }
+    const waiting = d.added_to_wanted || (d.wanted && d.wanted.status === 'wanted');
     status('good', `Asked for ${what}.`,
       d.added_to_wanted ? "It's on the list — you'll hear when it arrives."
-                        : 'It was already on the list.');
+        : waiting ? "It was already on the list — you'll hear when it arrives too."
+        : 'It was already on the list.');
+    if (waiting) {
+      const card = out.firstElementChild;
+      notifyHint().then(hint => {
+        if (hint && card && card.isConnected) card.insertAdjacentHTML('beforeend', hint);
+      });
+    }
   } catch (e) { alert(e.message); }
 }
 
@@ -1671,8 +1684,13 @@ function guessCard(g) {
   const notYet = g.release_state === 'cinema' || g.release_state === 'unreleased';
   const exact = `data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}"
     data-year="${esc(g.year || '')}" data-tmdb="${esc(g.tmdb_id || '')}"`;
-  const button = g.wanted_status === 'wanted'
+  // On the list because this person asked: nothing to press. Somebody else
+  // asked: they can still ask to be told too.
+  const button = g.wanted_status === 'wanted' && g.you_asked !== false
     ? `<button disabled>On the list \u2713</button>`
+    : g.wanted_status === 'wanted'
+      ? `<button class="ghost" data-act="ask" data-notyet="${notYet ? '1' : ''}"
+           data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me too</button>`
     : notYet
       ? `<button class="ghost" data-act="ask" data-notyet="1"
            data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me when it lands</button>`
@@ -1710,21 +1728,24 @@ async function fillNewer(query) {
 }
 
 // After something goes on the list: will this device actually be told? Asking
-// is the promise; the nudge only arrives if notifications are on.
+// is the promise; the nudge only arrives if notifications are on. Only looks -
+// it never subscribes or registers anything, and never waits on the service
+// worker becoming ready, so it cannot hold anything up. The caller draws its
+// answer first and adds this line when it comes.
 async function notifyHint() {
-  let state;
-  try { state = await setupPush(false); } catch (e) { return ''; }
-  if (state === 'already' || state === 'on') return '';
-  if (state === 'needs-install') {
+  const support = pushSupport();
+  if (support === 'needs-install') {
     return `<div class="sub">To be told on this phone, add this page to your Home Screen and open it from there.</div>`;
   }
-  if (state === 'blocked') {
+  if (support !== 'ok') return '';
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/');
+    if (reg && await reg.pushManager.getSubscription()) return '';
+  } catch (e) { return ''; }
+  if (Notification.permission === 'denied') {
     return `<div class="sub">Notifications are blocked for this site in your browser settings, so the nudge can't reach this device.</div>`;
   }
-  if (state === 'not-asked') {
-    return `<div class="sub">Turn on notifications to get the nudge. <button class="linkbtn" data-act="bell">Turn on</button></div>`;
-  }
-  return '';
+  return `<div class="sub">Turn on notifications to get the nudge. <button class="linkbtn" data-act="bell">Turn on</button></div>`;
 }
 
 // This answer came from the keyword rules rather than from reading the mood,
@@ -1960,29 +1981,36 @@ async function ask(title, btn) {
   const body = {title};
   if (btn && btn.dataset.year) body.year = Number(btn.dataset.year);
   if (btn && btn.dataset.tmdb) body.tmdb_id = btn.dataset.tmdb;
+  // One press, one request: a second tap while the first is on its way
+  // asked twice.
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/request/wanted', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     const d = await res.json();
-    if (!res.ok) { alert(d.error || 'Could not send that'); return; }
+    if (!res.ok) { if (btn) btn.disabled = false; alert(d.error || 'Could not send that'); return; }
     // Something not out yet is a standing order rather than a request: there
     // is nothing to fetch today, so say what will actually happen.
     const notYet = btn && btn.dataset.notyet;
     const due = btn && btn.dataset.when ? ` It's due ${esc(btn.dataset.when)}.` : '';
     let msg;
+    let willHear = false;
     if (d.found) msg = `<b>Good news — we already have that.</b><div class="sub">${
       esc(d.matches.map(m => m.title + ' (' + m.year + ')').join(', '))}</div>`;
-    else if (d.added_to_wanted) msg = (notYet
-      ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
-      : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`)
-      + await notifyHint();
-    else {
+    else if (d.added_to_wanted) {
+      willHear = true;
+      msg = notYet
+        ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
+        : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`;
+    } else {
       const status = d.wanted ? d.wanted.status : 'wanted';
+      // Somebody else asked first; this person is told when it lands as well.
+      willHear = status === 'wanted';
       const note = status === 'dismissed' ? 'That one has been asked for before and set aside for now.'
         : status === 'acquired' ? 'That is marked as already picked up — it may still be arriving.'
-        : 'It was already on the list.';
+        : "It was already on the list — you'll hear when it arrives too.";
       msg = `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">${note}</div>`;
     }
     // The shelf holds something with a confusable name — the making-of, or
@@ -1995,10 +2023,17 @@ async function ask(title, btn) {
         } — not the one you asked for, so it stays on the list.</div>`;
     }
     out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}${msg}</div>`);
+    const card = out.firstElementChild;
+    if (willHear) {
+      notifyHint().then(hint => {
+        if (hint && card && card.isConnected) card.insertAdjacentHTML('beforeend', hint);
+      });
+    }
+    if (d.found && btn) btn.disabled = false;
 
     // The card that said we hadn't got it, and the button that asked, are both
     // out of date now - say so rather than leaving the old instruction standing.
-    if (d.added_to_wanted || d.wanted) {
+    if (!d.found && (d.added_to_wanted || d.wanted)) {
       const miss = document.getElementById('missing');
       if (miss) {
         miss.className = 'card good';
@@ -2012,7 +2047,7 @@ async function ask(title, btn) {
       }
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
-  } catch (e) { alert(e.message); }
+  } catch (e) { if (btn) btn.disabled = false; alert(e.message); }
 }
 
 // ---- playlists ----

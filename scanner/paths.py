@@ -35,6 +35,10 @@ DEFAULT_PROBE_CACHE = 30
 _stores = None
 _library_roots = None
 _state = {}
+# Every store name that has answered at least once in this process. A drive
+# that answered and now does not has dropped out; one that has never answered
+# may simply be somewhere this app cannot read, while Plex can.
+_answered = set()
 
 
 def _settings():
@@ -236,7 +240,14 @@ def store_ready(name):
         return cached[1]
     ready = _listable(name, probe_timeout())
     _state[name] = (now, ready)
+    if ready:
+        _answered.add(name)
     return ready
+
+
+def ever_answered(names):
+    """Has any of these names for a store answered since this app started?"""
+    return any(name in _answered for name in names or ())
 
 
 def store_offline(path):
