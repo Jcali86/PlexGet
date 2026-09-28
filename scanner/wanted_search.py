@@ -109,11 +109,17 @@ def search_shows(title, token=None):
             if existing:
                 if section.title not in existing["libraries"]:
                     existing["libraries"].append(section.title)
+                if str(item.ratingKey) not in existing["rating_keys"]:
+                    existing["rating_keys"].append(str(item.ratingKey))
                 continue
             found[key] = {
                 "title": (item.title or "").strip(),
+                "original_title": (getattr(item, "originalTitle", None) or "").strip(),
                 "year": item.year,
                 "rating_key": str(item.ratingKey),
+                # Every copy: one series in two TV libraries is one result, and a
+                # season can land in either.
+                "rating_keys": [str(item.ratingKey)],
                 "thumb": item.thumb,
                 "art": getattr(item, "art", None),
                 "summary": (item.summary or "").strip(),
@@ -257,17 +263,20 @@ def parse_query(query):
     return raw, None
 
 
-def parse_series(text):
+def parse_series(text, bare_year=True):
     """A series name and, if one was given, its year: "Doctor Who 2005" or "Doctor Who (2005)".
 
     Stricter than parse_query, because series names carry things film titles
     do not. A bare year is only read off a name that ends in a word - Space:
     1999 is a series, not "Space:" from 1999 - and a bracketed aside that is
-    not a year stays, since "The Office (US)" is the series' own name.
+    not a year stays, since "The Office (US)" is the series' own name. With
+    bare_year False only a bracketed year is read: a caller that already
+    knows the year (every card does) knows "Reply 1988" and "Paris Police
+    1900" are whole names.
     """
     raw = " ".join((text or "").split())
     bracketed = BRACKETED_YEAR.match(raw)
-    match = bracketed or TRAILING_YEAR.match(raw)
+    match = bracketed or (TRAILING_YEAR.match(raw) if bare_year else None)
     if match:
         name, year = match.group("title").strip(), int(match.group("year"))
         if name and plausible_year(year) and (bracketed or name[-1].isalnum()):
@@ -314,7 +323,7 @@ def availability(item):
 def _unknown(files):
     """The verdict for files that could not be looked at: unknown, never missing."""
     return {"files": len(files), "missing_files": [], "store_offline": bool(files),
-            "all_missing": False, "some_missing": False}
+            "all_missing": False, "some_missing": False, "never_readable": False}
 
 
 # After a disk check has run out of time, others are not attempted for a while.
@@ -364,11 +373,12 @@ def files_state(files):
     answer holds up nobody. Everything on the request path goes through
     availability_of() instead.
     """
-    offline, checkable = [], []
+    offline, checkable, never = [], [], True
     for path in files:
         names = paths.store_for(path)
         if names and not any(paths.store_ready(name) for name in names):
             offline.append(path)
+            never = never and not paths.ever_answered(names)
             continue
         # Judge each copy at the path this app can actually reach, not the one
         # Plex happens to name.
@@ -385,6 +395,10 @@ def files_state(files):
         "all_missing": not offline and bool(checkable)
                        and len(missing) == len(checkable),
         "some_missing": bool(missing) and len(missing) < len(files),
+        # Every unreadable copy is on a store that has not once answered since
+        # this app started: more likely a folder this app is not allowed to
+        # read (or a Plex on another machine) than a drive that dropped out.
+        "never_readable": bool(offline) and never,
     }
 
 
@@ -537,7 +551,7 @@ def search_plex(title, token=None):
                     # The copy seen first cannot be played; this one may. A
                     # film is only as missing as its best copy.
                     state = availability(item)
-                    if not state["all_missing"] and not state["store_offline"]:
+                    if not state["all_missing"] and not _dropped(state):
                         kept.update(rating_key=str(item.ratingKey), file_missing=False,
                                     store_offline=False, missing_files=state["missing_files"])
                 continue
@@ -553,20 +567,32 @@ def search_plex(title, token=None):
                 "duration_ms": item.duration,
                 "libraries": [section.title],
                 "file_missing": state["all_missing"],
-                # On a drive that cannot be read just now: not missing, but not
-                # known to play either.
-                "store_offline": state["store_offline"],
+                # On a drive that answered before and cannot be read just now:
+                # not missing, but not known to play either.
+                "store_offline": _dropped(state),
                 "missing_files": state["missing_files"],
                 "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     scored = []
     for key, movie in collected.items():
+        movie["original_title"] = (originals.get(key) or "").strip()
         confidence = best_confidence(query, movie["title"], originals.get(key))
         if confidence:
             movie["confidence"] = confidence
             scored.append((confidence, movie))
     scored.sort(key=lambda row: (-row[0], row[1]["title"].lower(), row[1]["year"] or 0))
     return [movie for _confidence, movie in scored]
+
+
+def _dropped(state):
+    """Offline in the sense that matters: a drive that has answered before and does not now.
+
+    A store this app has never once been able to read is not treated as a
+    drive that dropped out - Plex, which can read it, is taken at its word, as
+    it always was. Otherwise an app that cannot see the files would never
+    tell anybody anything had arrived.
+    """
+    return bool(state.get("store_offline")) and not state.get("never_readable")
 
 
 def same_year(matches, year):
@@ -615,7 +641,7 @@ def answers(matches, title, year):
     if exact:
         return exact
     return [m for m in certain if m.get("year") and abs(m["year"] - year) <= 1
-            and same_name(title, m["title"])]
+            and (same_name(title, m["title"]) or same_name(title, m.get("original_title")))]
 
 
 def playable(match):
@@ -647,14 +673,17 @@ def not_filed_as_another(matches, tmdb_id):
     return [m for m in matches if filed.get(m["rating_key"]) in (None, str(tmdb_id))]
 
 
-def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
+def search_and_capture(db, query, capture=True, year=None, tmdb_id=None, name=None):
     """Search Plex; add the title to the wanted list when nothing matches.
 
     year and tmdb_id, when the caller knows them, are the film exactly - a
     button on a TMDb card knows both - and a year given this way is used as it
-    is rather than read back out of the title.
+    is rather than read back out of the title. name likewise: the film's own
+    name, as TMDb gives it, used as it is - reading one out of the query drops
+    anything in brackets, and "(500) Days of Summer" is not "Days of Summer".
     """
     title, said_year = parse_query(query)
+    title = name or title
     if year is None:
         year = said_year
     result = {
@@ -682,11 +711,16 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
         # Known exactly: whatever Plex files under that id is it, and a
         # same-name film Plex files under another id is not. This is the
         # same judgement arrived() makes, so asking and settling agree.
-        by_id = films_filed_as(tmdb_id, year) or []
-        full = {m["rating_key"]: m for m in everything}
-        ids = {m["rating_key"] for m in by_id}
-        certain = ([full.get(m["rating_key"], m) for m in by_id]
-                   + [m for m in not_filed_as_another(certain, tmdb_id) if m["rating_key"] not in ids])
+        by_key = {m["rating_key"]: m for m in everything}
+        by_name = {(m["title"].lower(), m["year"]): m for m in everything}
+        picked = []
+        for m in films_filed_as(tmdb_id, year) or []:
+            # search_plex's own entry where it has one: it is what this
+            # person's search saw, and one film in two libraries is one entry.
+            m = by_key.get(m["rating_key"]) or by_name.get((m["title"].lower(), m["year"])) or m
+            if m not in picked:
+                picked.append(m)
+        certain = picked + [m for m in not_filed_as_another(certain, tmdb_id) if m not in picked]
     result["matches"] = certain
     # Films of the same name from other years are worth naming for the same
     # reason - "the 2002 one is here, not the one you asked for" - and never
@@ -766,7 +800,8 @@ def arrived(entry):
         shows = answers(search_shows(title), title, year)
         season = entry["season"] if "season" in keys else None
         if season:
-            return [s for s in shows if season in seasons_held(s["rating_key"])]
+            return [s for s in shows
+                    if any(season in seasons_held(key) for key in s.get("rating_keys") or [s["rating_key"]])]
         # The whole series, or "the next season" of one that is partly here:
         # finding the series proves nothing when it was already on the shelf
         # when they asked, so it has to have been added since.

@@ -371,7 +371,9 @@ against it all the way through. If Plex drops out part way, nothing is lost:
 the check is made again a minute later, then at longer gaps up to half an hour,
 and the console's index panel says so in the meantime. Each entry is marked
 arrived before anybody is told, so the webhook and the index noticing the same
-film at once still send one "it's here".
+film at once still send one "it's here". A film on a drive that has dropped
+out is not "here" until the drive is back; if this machine has never been able
+to read a drive Plex uses, it takes Plex's word for what is on it.
 
 If the index is switched off, settle the list on a timer instead - say every
 couple of hours:

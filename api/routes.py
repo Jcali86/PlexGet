@@ -45,7 +45,7 @@ from api.request_assistant import (
     showcase,
     worth_asking,
 )
-from scanner.wanted_search import parse_query, parse_series, plausible_year
+from scanner.wanted_search import BRACKETED_YEAR, parse_query, parse_series, plausible_year, same_name
 from scanner.wanted_search import (
     PlexTokenDead,
     PlexUnavailable,
@@ -88,7 +88,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "arrivals-3"
+BUILD = "arrivals-4"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
@@ -104,6 +104,7 @@ FEATURES = [
     "newer-same-name",      # a title hit mentions a newer film of that name the shelves lack
     "settle-survives",      # an arrival waits in the index file until the wanted list is checked
     "more-of-a-series",     # asking for more of a series here waits for the next season
+    "tell-me-too",          # a second person can ask to be told about a film already on the list
 ]
 
 
@@ -1995,23 +1996,49 @@ def create_app():
             give_back()
         return jsonify({"picks": picks})
 
-    def ask_for_series(db, title, year, season):
+    def series_name(title, year):
+        """The series' name and year from what was sent.
+
+        A card sends the year on its own, so only a bracketed one is read out
+        of its title: "Reply 1988" and "Paris Police 1900" are whole names. A
+        typed name with a bare year after it - "Doctor Who 2005" - is split,
+        unless the whole of it is a series Plex or TMDb knows by that name.
+        """
+        named, said_year = parse_series(title, bare_year=year is None)
+        if year is None and said_year and not BRACKETED_YEAR.match(title):
+            whole = " ".join(title.split())
+            try:
+                known = [x["title"] for x in search_shows(whole)] + \
+                        [x["title"] for x in tmdb_lookup.suggest_shows(whole)]
+            except Exception:
+                known = []
+            if any(same_name(whole, name) for name in known):
+                return whole, None
+        return named, year or said_year
+
+    def ask_for_series(db, title, year, season, more, token):
         """Record a series, or one season of it, on the wanted list.
 
-        Recorded directly rather than searched for as a film. Asked for with
-        no season while the series is already here, it means "more of it", so
-        it is recorded as the next season - which is something that can be
-        seen to arrive. Recorded as the whole series it waited for the series
-        itself to be added again, which a new season never does.
+        Recorded directly rather than searched for as a film. "Ask for more"
+        of a series already here means its next season, so that is what is
+        recorded - something that can be seen to arrive, where a whole-series
+        row for a series already on the shelf never could. Asking for the
+        whole of a series that is here is answered "it's here". Both look with
+        the asker's own token: a library shared with somebody else is neither
+        counted nor given away.
         """
-        named, said_year = parse_series(title)
-        said_year = year or said_year
+        named, said_year = series_name(title, year)
         if season is None:
             try:
-                here = answers(search_shows(named), named, said_year)
-                held = seasons_held(here[0]["rating_key"]) if here else []
+                here = answers(search_shows(named, token), named, said_year)
+                held = sorted({n for x in here for key in x.get("rating_keys") or [x["rating_key"]]
+                               for n in seasons_held(key, token)})
             except PlexUnavailable:
-                held = []       # recorded as the whole series; nothing lost by that
+                here, held = [], []     # recorded as asked; nothing lost by that
+            if here and not more:
+                return {"found": True, "kind": "show", "season": None, "title": named,
+                        "year": said_year, "added_to_wanted": False, "already_wanted": False,
+                        "wanted": None, "matches": here}
             if held:
                 season = max(held) + 1
         row, created = db.insert_wanted(named, said_year, title, kind="show", season=season)
@@ -2031,13 +2058,18 @@ def create_app():
         person asks. Something marked arrived that nothing on the shelf
         answers - wrongly settled, or since deleted - goes back on the list,
         rather than "already picked up" forever with no notification to come.
+        If Plex cannot be asked, the row is left as it is.
         """
         existing = result.get("wanted") or {}
         if result.get("found") or existing.get("status") != "acquired":
             return
-        here = arrived_now(existing)
+        try:
+            here = arrived_now(existing)
+        except PlexUnavailable:
+            return
         if here:
-            result.update(found=True, matches=here, added_to_wanted=False, already_wanted=False)
+            result.update(found=True, matches=here, added_to_wanted=False, already_wanted=False,
+                          wanted=None)
             return
         row = db.set_wanted_status(existing["id"], "wanted")
         result.update(wanted=dict(row), added_to_wanted=True, already_wanted=False, reopened=True)
@@ -2072,18 +2104,25 @@ def create_app():
         db = Database()
         try:
             if kind == "show":
-                result = ask_for_series(db, title, year, season)
+                result = ask_for_series(db, title, year, season, body.get("more") is True,
+                                        (user or {}).get("plex_token"))
             else:
+                name = None
                 if tmdb_id:
                     named, said_year = parse_query(title)
-                    tmdb_id = tmdb_lookup.confirmed_id(tmdb_id, named, year or said_year)
-                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id)
+                    as_sent = BRACKETED_YEAR.match(title)
+                    film = tmdb_lookup.confirmed(
+                        tmdb_id, [as_sent.group("title") if as_sent else title, named], year or said_year)
+                    # Kept only when it is the film named; then TMDb's own
+                    # name is the one recorded.
+                    tmdb_id, name = (tmdb_id, film["title"]) if film else (None, None)
+                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id, name=name)
             reopen_if_wrongly_settled(db, result)
             wanted_row = result.get("wanted") or {}
             if user and wanted_row.get("id") and not result.get("found"):
                 # Everybody who asks is told when it arrives, not only the first.
-                now = db.add_requester(wanted_row["id"], user["id"], who)
-                if now == "acquired" and wanted_row.get("status") == "wanted":
+                now, listed = db.add_requester(wanted_row["id"], user["id"], who)
+                if now == "acquired" and wanted_row.get("status") == "wanted" and not listed:
                     # It arrived between the look above and noting this
                     # person down, so the arrival did not know to tell them.
                     try:
@@ -2157,6 +2196,11 @@ def create_app():
                 for guess in found:
                     row = db.find_wanted(guess["title"], guess.get("year"))
                     guess["wanted_status"] = row["status"] if row else None
+                    # Somebody else asking first is no reason this person
+                    # cannot be told as well.
+                    guess["you_asked"] = bool(row and user and (
+                        str(row["requested_by_id"] or "") == str(user["id"])
+                        or str(user["id"]) in {uid for uid, _name in db.requesters(row["id"])}))
             finally:
                 db.close()
         return jsonify({"query": query, "title": named or query, "newer": found})

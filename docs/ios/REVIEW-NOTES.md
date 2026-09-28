@@ -103,4 +103,9 @@ to exactly the same name, not a subtitled sequel; "it's here" needs a copy known
 offline drive); asking for more of a series already here records its next season; settling moved to
 `api/arrivals.py`, claims each row before telling anybody, and returns `failed` alongside `checked` and
 `settled`; and a settle the index owes is noted in the index file until one gets through the whole list.
-Film 2a gains `store_offline` (additive). 03 §4.3 and §4.19 carry the detail.
+Film 2a gains `store_offline` (additive). 03 §4.3 and §4.19 carry the detail. A verification of that
+change then tightened it: an id is checked against the title as the card sent it and the row takes TMDb's
+name; a series name ending in a number stays whole when a year is sent; `more: true` on a series ask is the
+only thing that means "next season", and asking for the whole of a series already here answers `found`;
+`/request/newer` items gain `you_asked`; Show 2c gains `rating_keys` and `original_title`, Film 2a
+`original_title`; all additive.

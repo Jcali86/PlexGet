@@ -26,7 +26,9 @@ RE_2002 = {"tmdb_id": 1576, "title": "Resident Evil", "year": 2002, "overview": 
 # What TMDb says each id is, for the check that an id sent with an ask is the film named.
 TMDB_FILMS = {1234: RE_2026, 1576: RE_2002,
               999: {"tmdb_id": 999, "title": "Resident Evil: Welcome Back", "year": 2025,
-                    "original_title": "Resident Evil: Welcome Back"}}
+                    "original_title": "Resident Evil: Welcome Back"},
+              19913: {"tmdb_id": 19913, "title": "(500) Days of Summer", "year": 2009,
+                      "original_title": "(500) Days of Summer"}}
 
 
 def six_films():
@@ -415,7 +417,7 @@ def test_a_series_is_settled_by_a_series_not_a_film_of_the_same_name(world):
 def test_asking_for_more_of_a_series_already_here_waits_for_the_next_one(world):
     world["tv"].items.append(series(302, "Blackadder", 1983, seasons={1: 6}, added=1_500_000_000))
     library_index.full_sync()
-    answer = ask(world["client"], title="Blackadder", kind="show", year=1983)
+    answer = ask(world["client"], title="Blackadder", kind="show", year=1983, more=True)
     assert answer["season"] == 2
     world["client"].post("/wanted/settle")
     assert arrivals(world) == []          # series 1 was here before they asked
@@ -577,3 +579,247 @@ def test_a_notifications_block_is_taken_as_written():
     merged = config_module._with_defaults({"plex": {"url": "u", "token": "t"},
                                            "notifications": {"arrived": {"title": "Here"}}})
     assert set(merged["notifications"]) == {"arrived", "message"}
+
+
+# ---- found by the second review ---------------------------------------------------------------
+
+def test_a_card_title_with_brackets_keeps_its_id_and_settles(world):
+    answer = ask(world["client"], title="(500) Days of Summer (2009)", year=2009, tmdb_id="19913")
+    assert answer["added_to_wanted"] is True
+    [row] = wanted_rows()
+    assert (row["title"], row["year"], row["tmdb_id"]) == ("(500) Days of Summer", 2009, 19913)
+    world["movies"].items.append(film(130, "(500) Days of Summer", 2009, tmdb=19913, added=1_900_000_000))
+    look_again()
+    library_index.deliver_arrivals()
+    assert [p["film"] for p in arrivals(world)] == ["(500) Days of Summer (2009)"]
+
+
+def test_a_series_whose_name_ends_in_a_number_keeps_it(world, monkeypatch):
+    from api import tmdb_lookup
+
+    ask(world["client"], title="Reply 1988", kind="show", year=2015, season=2)
+    ask(world["client"], title="Paris Police 1900", kind="show", year=2021, season=1)
+    # Typed, with no year sent: TMDb knows "Space: 1999" by that name.
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", lambda title, hint="", limit=5:
+                        [{"title": "Space: 1999", "year": 1975}] if "1999" in title else [])
+    ask(world["client"], title="Space 1999", kind="show", season=1)
+    assert {(r["title"], r["year"]) for r in wanted_rows()} == {
+        ("Reply 1988", 2015), ("Paris Police 1900", 2021), ("Space 1999", None)}
+
+
+def test_asking_for_the_whole_of_a_series_here_says_it_is_here(world):
+    world["tv"].items.append(series(302, "Blackadder", 1983, seasons={1: 6, 2: 6}))
+    library_index.full_sync()
+    answer = ask(world["client"], title="Blackadder", kind="show", year=1983)
+    assert (answer["found"], answer["season"], answer["added_to_wanted"]) == (True, None, False)
+    assert wanted_rows() == []
+
+
+def test_a_season_in_a_second_tv_library_is_an_arrival(world):
+    tv4k = world["plex"].add_section(4, "TV 4K", "show", [series(402, "Fargo", 2014, seasons={1: 10})])
+    world["tv"].items.append(series(401, "Fargo", 2014, seasons={1: 10}))
+    library_index.full_sync()
+    library_index.deliver_arrivals()
+    ask(world["client"], title="Fargo", kind="show", season=2, year=2014)
+    tv4k.items[0]["seasons"][2] = 10
+    look_again()
+    library_index.deliver_arrivals()
+    assert [p["film"] for p in arrivals(world)] == ["Fargo (2014), series 2"]
+
+
+def test_found_again_after_arriving_is_not_also_on_the_list(world, monkeypatch):
+    from api import tmdb_lookup
+
+    ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    world["movies"].items.append(film(107, "Biohazard", 2026, tmdb=1234, added=1_900_000_000))
+    look_again()
+    library_index.deliver_arrivals()
+    monkeypatch.setattr(tmdb_lookup, "movie", lambda tmdb_id: None)     # TMDb not answering this time
+    answer = ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    assert answer["found"] is True and answer["wanted"] is None
+
+
+def test_an_answer_by_tmdb_id_looks_like_any_other_and_is_listed_once(world):
+    world["movies"].items.append(film(107, "Biohazard", 2026, tmdb=1234, summary="The 2026 film."))
+    world["plex"].add_section(2, "Movies 4K", "movie", [film(207, "Biohazard", 2026, tmdb=1234)])
+    library_index.full_sync()
+    answer = ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    assert answer["found"] is True
+    [match] = answer["matches"]
+    assert (match["title"], match["summary"], sorted(match["libraries"])) == (
+        "Biohazard", "The 2026 film.", ["Movies", "Movies 4K"])
+    assert {"thumb", "content_rating", "duration_ms", "added_at", "missing_files"} <= set(match)
+
+
+def test_a_same_name_film_filed_under_another_id_is_not_it(world):
+    ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    world["movies"].items.append(film(107, "Resident Evil", 2026, tmdb=5555, added=1_900_000_000))
+    look_again()
+    library_index.deliver_arrivals()
+    assert arrivals(world) == []
+
+
+def test_a_series_marked_arrived_is_left_alone_when_plex_is_down(world):
+    from db import Database
+
+    # Series 1 is here, so the index cannot answer on its own: Plex must be asked.
+    world["tv"].items.append(series(301, "Resident Evil", 2021, seasons={1: 8}))
+    library_index.full_sync()
+    ask(world["client"], title="Resident Evil", kind="show", season=2)
+    db = Database()
+    db.set_wanted_status(wanted_rows()[0]["id"], "acquired")
+    db.close()
+    world["tv"].fail = True
+    answer = ask(world["client"], title="Resident Evil", kind="show", season=2)
+    assert answer["already_wanted"] is True and wanted_rows()[0]["status"] == "acquired"
+
+
+def test_plex_down_is_asked_once_and_what_the_index_knows_still_settles(world):
+    world["movies"].items.append(film(107, "Biohazard", 2026, tmdb=1234))
+    library_index.full_sync()
+    library_index.deliver_arrivals()
+    from db import Database
+    db = Database()
+    # Names the index holds films by, so only Plex can say whether these are here.
+    for title, year in (("Resident Evil", 2030), ("Resident Evil: Afterlife", 2031),
+                        ("Resident Evil: Extinction", 2032)):
+        db.insert_wanted(title, year, title)
+    db.insert_wanted("Resident Evil", 2026, "Resident Evil (2026)", tmdb_id=1234)
+    db.close()
+    with library_index._connect() as conn:
+        library_index._note_arrivals(conn)
+        conn.commit()
+    world["movies"].fail = True
+    world["plex"].calls.clear()
+    with pytest.raises(Exception):
+        library_index.deliver_arrivals()
+    assert len(world["plex"].searches()) <= 1
+    assert [p["film"] for p in arrivals(world)] == ["Resident Evil (2026)"]
+    assert library_index.arrivals_waiting() is True      # the other three are still owed a check
+
+
+def test_a_settle_by_the_webhook_is_not_repeated_by_the_worker(world):
+    ask(world["client"], title="Resident Evil (2026)", year=2026)
+    world["movies"].items.append(film(107, "Resident Evil", 2026, added=1_900_000_000))
+    payload = {"event": "library.new", "Metadata": {"ratingKey": "107", "type": "movie"}}
+    hook = world["client"].post("/plex/webhook", data={"payload": json.dumps(payload)}).get_json()
+    assert hook["settled"] == ["Resident Evil (2026)"]
+    assert library_index.arrivals_waiting() is False
+
+
+def test_somebody_already_waiting_is_not_told_twice(world, monkeypatch):
+    from api import routes
+    from db import Database
+
+    ask(world["client"], title="Resident Evil (2026)", year=2026)
+    real = routes.search_and_capture
+
+    def arrives_meanwhile(db, *args, **kwargs):
+        result = real(db, *args, **kwargs)
+        other = Database()
+        try:
+            row = other.claim_arrival(result["wanted"]["id"])
+            settling.web_push.tell_arrived(other, row, settling.label(row))
+        finally:
+            other.close()
+        return result
+
+    monkeypatch.setattr(routes, "search_and_capture", arrives_meanwhile)
+    ask(world["client"], title="Resident Evil (2026)", year=2026)      # Jules again
+    assert [p["to"] for p in arrivals(world)] == ["7"]
+
+
+def test_a_store_this_app_has_never_read_takes_plex_at_its_word(world, monkeypatch):
+    from scanner import paths
+
+    monkeypatch.setattr(paths, "store_for", lambda path: ("/Volumes/Media",))
+    monkeypatch.setattr(paths, "store_ready", lambda name: False)
+    monkeypatch.setattr(paths, "_answered", set())
+    ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    world["movies"].items.append(film(107, "Resident Evil", 2026, tmdb=1234,
+                                      files=["/Volumes/Media/Resident Evil (2026).mkv"], added=1_900_000_000))
+    look_again()
+    library_index.check_files()
+    library_index.deliver_arrivals()
+    assert [p["to"] for p in arrivals(world)] == ["7"]
+
+
+def test_a_sequel_a_year_off_is_not_held_by_the_search_page_or_discovery(world):
+    world["movies"].items.append(film(140, "Wicked: For Good", 2025, tmdb=967941))
+    library_index.full_sync()
+    search = world["client"].post("/request/search", json={"query": "Wicked (2024)"}).get_json()
+    assert not (search["kind"] == "title" and search.get("matches"))
+    assert library_index.owned([{"title": "Wicked", "year": 2024, "tmdb_id": 402431},
+                                {"title": "Wicked", "year": 2024}], "movie", ["1"]) == [False, False]
+    # The same film, dated a year apart by Plex and TMDb, is still held.
+    assert library_index.owned([{"title": "Wicked: For Good", "year": 2024}], "movie", ["1"]) == [True]
+
+
+def test_the_one_year_of_slack_counts_an_original_title(world):
+    world["movies"].items.append(film(150, "Amelie", 2002, original="Le Fabuleux Destin d'Amélie Poulain"))
+    library_index.full_sync()
+    answer = ask(world["client"], title="Le Fabuleux Destin d'Amelie Poulain (2001)")
+    assert answer["found"] is True
+
+
+def test_a_fix_match_under_the_same_key_is_an_arrival(world):
+    ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    world["movies"].items.append(film(107, "Resident Evil: Welcome Back", 2025, tmdb=999))
+    library_index.full_sync()
+    library_index.deliver_arrivals()
+    assert arrivals(world) == []
+    world["movies"].items[-1].update(title="Resident Evil", year=2026, tmdb=1234)   # the owner fixes the match
+    library_index.full_sync()
+    assert library_index.arrivals_waiting() is True
+    library_index.deliver_arrivals()
+    assert [p["to"] for p in arrivals(world)] == ["7"]
+
+
+def test_the_sync_script_tells_whoever_asked(world):
+    import sys
+
+    sys.path.insert(0, str(settling.__file__).rsplit("/api/", 1)[0] + "/scripts")
+    import sync_library
+
+    ask(world["client"], title="Resident Evil (2026)", year=2026)
+    world["movies"].items.append(film(107, "Resident Evil", 2026, added=1_900_000_000))
+    look_again()
+    sync_library.settle_arrivals()
+    assert [p["to"] for p in arrivals(world)] == ["7"]
+
+
+def test_a_second_member_can_ask_to_be_told_from_the_newer_card(world, monkeypatch):
+    import datetime as real
+
+    from api import request_assistant
+
+    class Today(real.date):
+        @classmethod
+        def today(cls):
+            return real.date(2026, 9, 28)
+
+    monkeypatch.setattr(request_assistant.datetime, "date", Today)
+    world["client"].set_cookie("plexops_session", "sess-sam")
+    ask(world["client"], title="Resident Evil (2026)", year=2026, tmdb_id="1234")
+    [mine] = world["client"].get("/request/newer?q=Resident Evil").get_json()["newer"]
+    assert (mine["wanted_status"], mine["you_asked"]) == ("wanted", True)
+    world["client"].set_cookie("plexops_session", "sess-jules")
+    [theirs] = world["client"].get("/request/newer?q=Resident Evil").get_json()["newer"]
+    assert (theirs["wanted_status"], theirs["you_asked"]) == ("wanted", False)
+
+
+def test_tmdb_confirms_a_card_from_its_own_recent_answer(monkeypatch):
+    from api import tmdb_lookup
+
+    monkeypatch.setattr(tmdb_lookup, "configured", lambda: True)
+    # A series with the same number is not the film: TMDb numbers them apart.
+    monkeypatch.setattr(tmdb_lookup, "_cache", {
+        ("tv", "biohazard", ""): (9e18, [{"tmdb_id": 1234, "title": "Biohazard", "year": 2020}]),
+        ("films", "resident evil", "", 2026): (9e18, [RE_2026])})
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("asked TMDb again for a film it had just described")
+
+    monkeypatch.setattr(tmdb_lookup.requests, "get", no_network)
+    assert tmdb_lookup.confirmed(1234, ["Resident Evil"], 2026)["year"] == 2026
+    assert tmdb_lookup.confirmed(1234, ["Resident Evil: Apocalypse"], 2026) is None

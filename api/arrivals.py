@@ -29,22 +29,36 @@ def settle(db):
 
     One entry that cannot be checked - Plex timing out on its search - does not
     stop the rest: an entry known by its TMDb id is answered from the index
-    without asking Plex at all. The failures are counted and returned so the
-    caller can try again; if every entry failed, Plex is down, and that is
+    without asking Plex at all. Once Plex has failed, it is not asked again in
+    the same check - each try can wait out a 20-second timeout, and a list of
+    thirty would hold the check for ten minutes - so only entries the index
+    can answer by id are looked at. The failures are counted and returned so
+    the caller can try again; if every entry failed, Plex is down, and that is
     raised as it always was.
 
     Each entry is claimed before anybody is told (Database.claim_arrival), so
-    of two checks that both see it arrive, only one sends "it's here".
+    of two checks that both see it arrive, only one sends "it's here". A check
+    that got through every entry tells the index so, whoever made it, and the
+    worker does not repeat it.
     """
+    from scanner import library_index
+
     with _lock:
+        epoch = library_index.arrivals_epoch()
         entries = db.get_wanted("wanted")
-        settled, failed, first_error = [], 0, None
+        settled, failed, first_error, plex_down = [], 0, None, False
         for entry in entries:
             try:
-                matches = ws.arrived(entry)
-            except Exception as e:
-                failed += 1
+                matches = _by_id_only(entry) if plex_down else ws.arrived(entry)
+            except ws.PlexUnavailable as e:
+                plex_down = True
+                matches = None
                 first_error = first_error or e
+            except Exception as e:
+                matches = None
+                first_error = first_error or e
+            if matches is None:
+                failed += 1
                 continue
             if not matches:
                 continue
@@ -57,7 +71,18 @@ def settle(db):
             web_push.tell_arrived(db, row, name)
     if entries and failed == len(entries) and isinstance(first_error, ws.PlexUnavailable):
         raise first_error
+    if not failed:
+        library_index.arrivals_checked(epoch)
     return {"checked": len(entries), "settled": settled, "failed": failed}
+
+
+def _by_id_only(entry):
+    """What the index alone says has arrived for an entry; None when it cannot say without Plex."""
+    keys = entry.keys()
+    if (entry["kind"] if "kind" in keys else "film") == "show":
+        return None
+    tmdb_id = entry["tmdb_id"] if "tmdb_id" in keys else None
+    return ws.films_filed_as(tmdb_id, entry["year"]) or None
 
 
 def settle_now():

@@ -907,11 +907,16 @@ def _holds(conn, suggestion, kind, keys):
             f"SELECT * FROM items WHERE tmdb_id = ? AND kind = ? AND section_key IN ({_marks(keys)})",
             [str(tmdb), kind] + keys).fetchall()
     if not rows:
+        # By name: the same rule as answering a request (ws.answers) - the year
+        # asked for, or one either side for exactly the same name, and never
+        # something filed under a different TMDb id. Wicked: For Good (2025)
+        # does not hold Wicked (2024).
         title, year = suggestion.get("title") or "", suggestion.get("year")
         found, _complete = _candidate_rows(conn, title, kind, keys)
-        rows = [r for r in found
-                if ws.best_confidence(title, r["title"], r["original_title"]) == 2
-                and (not year or (r["year"] and abs(r["year"] - year) <= 1))]
+        named = [dict(r, confidence=ws.best_confidence(title, r["title"], r["original_title"]))
+                 for r in found if not tmdb or r["tmdb_id"] in (None, str(tmdb))]
+        held = {m["rating_key"] for m in ws.answers(named, title, year)}
+        rows = [r for r in found if r["rating_key"] in held]
     if kind == "movie":
         rows = [r for r in rows if r["file_verdict"] != "missing"]
     return bool(rows)
@@ -1133,18 +1138,35 @@ def films_by_tmdb(tmdb_id):
                 "WHERE i.tmdb_id = ? AND i.kind = 'movie'", (str(tmdb_id),)).fetchall()
     except (IndexUnavailable, sqlite3.Error):
         return None
-    found = []
+    found = {}
     for r in rows:
         if r["file_verdict"] is None:
             state = ws.availability_of(json.loads(r["files"] or "[]"))
-            if state["all_missing"] or state["store_offline"]:
+            if state["all_missing"] or ws._dropped(state):
+                continue
+        elif r["file_verdict"] == "unknown":
+            # Unreadable from here. Only a drive that has dropped out stops
+            # it counting; a store this app has never been able to read is
+            # Plex's word against nobody's.
+            if ws._dropped(json.loads(r["file_state"] or "{}") or {"store_offline": True}):
                 continue
         elif r["file_verdict"] != "ok":
             continue
-        found.append({"title": r["title"], "year": r["year"], "rating_key": r["rating_key"],
-                      "libraries": [r["library"]] if r["library"] else [], "file_missing": False,
-                      "store_offline": False, "confidence": 2})
-    return found
+        # One film in two libraries is one answer, as search_plex gives it.
+        key = ((r["title"] or "").lower(), r["year"])
+        if key in found:
+            if r["library"] and r["library"] not in found[key]["libraries"]:
+                found[key]["libraries"].append(r["library"])
+            continue
+        # The same shape search_plex gives (Film 2a), so a caller cannot tell
+        # which of them answered.
+        found[key] = {"title": r["title"], "year": r["year"], "rating_key": r["rating_key"],
+                      "original_title": r["original_title"] or "", "thumb": r["thumb"],
+                      "summary": r["summary"] or "", "content_rating": r["content_rating"] or "",
+                      "duration_ms": r["duration_ms"], "libraries": [r["library"]] if r["library"] else [],
+                      "file_missing": False, "store_offline": False, "missing_files": [],
+                      "added_at": r["added_at"] or 0, "confidence": 2}
+    return list(found.values())
 
 
 def tmdb_of(rating_keys):
@@ -1195,6 +1217,36 @@ def arrivals_waiting():
         return None
 
 
+def arrivals_epoch():
+    """How many arrivals the index has noted so far, for a check to say it covered them. None if unknown."""
+    try:
+        with _connect() as conn:
+            return int(_meta(conn, "arrivals_epoch") or 0)
+    except (IndexUnavailable, sqlite3.Error):
+        return None
+
+
+def arrivals_checked(epoch):
+    """A check of the whole wanted list, begun when the count was epoch, got through.
+
+    Whoever made it - the worker, the webhook, the owner's button, the script
+    - so none of the others repeats it, and a failure noted earlier is over.
+    """
+    if epoch is None:
+        return
+    _arrivals.update(failures=0, failed_epoch=None, retry_at=0.0)
+    _worker.settle_error = None
+    try:
+        with _connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Only forward: another process may have checked a later round.
+            if int(_meta(conn, "arrivals_settled") or 0) < epoch:
+                _set_meta(conn, "arrivals_settled", epoch)
+            conn.commit()
+    except (IndexUnavailable, sqlite3.Error):
+        pass
+
+
 def deliver_arrivals(force=False):
     """Check the wanted list if anything arrived since the last complete check.
 
@@ -1229,13 +1281,7 @@ def deliver_arrivals(force=False):
             _arrivals["retry_at"] = time.time() + min(
                 RETRY_FIRST * 2 ** (_arrivals["failures"] - 1), RETRY_MOST)
             raise
-        _arrivals.update(failures=0, failed_epoch=None, retry_at=0.0)
-        with _connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            # Only forward: another process may have checked a later round.
-            if int(_meta(conn, "arrivals_settled") or 0) < epoch:
-                _set_meta(conn, "arrivals_settled", epoch)
-            conn.commit()
+        arrivals_checked(epoch)
         return True
 
 

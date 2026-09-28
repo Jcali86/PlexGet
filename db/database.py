@@ -454,16 +454,24 @@ class Database:
         with reading its status, so an arrival settled a moment earlier cannot
         slip between the two: either this person is on the list before the
         arrival reads it, or the status returned is 'acquired' and the caller
-        tells them itself. Returns the entry's status as it stood, or None.
+        tells them itself - unless they were on the list already, in which
+        case the arrival has told them. Returns (status, already_listed);
+        status is None when there is no such entry.
         """
         if not user_id:
-            return None
+            return None, False
         if self.conn.in_transaction:
             self.conn.commit()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
-            row = self.conn.execute("SELECT status FROM wanted WHERE id = ?", (wanted_id,)).fetchone()
+            row = self.conn.execute("SELECT status, requested_by_id FROM wanted WHERE id = ?",
+                                    (wanted_id,)).fetchone()
             status = row["status"] if row else None
+            listed = bool(row) and (
+                str(row["requested_by_id"] or "") == str(user_id)
+                or self.conn.execute(
+                    "SELECT 1 FROM wanted_requesters WHERE wanted_id = ? AND user_id = ?",
+                    (wanted_id, str(user_id))).fetchone() is not None)
             if status == "wanted":
                 self.conn.execute(
                     "INSERT OR IGNORE INTO wanted_requesters (wanted_id, user_id, username) "
@@ -474,7 +482,7 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
-        return status
+        return status, listed
 
     def requesters(self, wanted_id):
         """Everybody waiting on an entry, first asker first: [(user_id, username)]."""

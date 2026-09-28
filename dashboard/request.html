@@ -1390,7 +1390,8 @@ function showCard(x) {
   if (gaps) {
     chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
   } else {
-    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="next">Ask for more</button>`);
+    // "More" of a series that is here: the server records its next season.
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="more">Ask for more</button>`);
   }
   return `<div class="show">${poster}
       <div><h3>${esc(x.title)}</h3>
@@ -1413,7 +1414,8 @@ async function askShow(title, season, seasons, quiet, year) {
     return;
   }
   const body = {title, kind: 'show'};
-  if (season && season !== 'next' && season !== 'all') body.season = Number(season);
+  if (season === 'more') body.more = true;
+  else if (season && season !== 'next' && season !== 'all') body.season = Number(season);
   if (year) body.year = Number(year);
   try {
     const res = await fetch('/request/wanted', {
@@ -1426,10 +1428,17 @@ async function askShow(title, season, seasons, quiet, year) {
     // is here comes back as the next one.
     const what = d.season ? `${esc(title)}, series ${d.season}` : esc(title);
     if (d.found) { status('good', `${what} is here already.`, "It's on the shelf now."); return; }
+    const waiting = d.added_to_wanted || (d.wanted && d.wanted.status === 'wanted');
     status('good', `Asked for ${what}.`,
       d.added_to_wanted ? "It's on the list — you'll hear when it arrives."
-        : (d.wanted && d.wanted.status === 'wanted') ? "It was already on the list — you'll hear when it arrives too."
+        : waiting ? "It was already on the list — you'll hear when it arrives too."
         : 'It was already on the list.');
+    if (waiting) {
+      const card = out.firstElementChild;
+      notifyHint().then(hint => {
+        if (hint && card && card.isConnected) card.insertAdjacentHTML('beforeend', hint);
+      });
+    }
   } catch (e) { alert(e.message); }
 }
 
@@ -1675,8 +1684,13 @@ function guessCard(g) {
   const notYet = g.release_state === 'cinema' || g.release_state === 'unreleased';
   const exact = `data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}"
     data-year="${esc(g.year || '')}" data-tmdb="${esc(g.tmdb_id || '')}"`;
-  const button = g.wanted_status === 'wanted'
+  // On the list because this person asked: nothing to press. Somebody else
+  // asked: they can still ask to be told too.
+  const button = g.wanted_status === 'wanted' && g.you_asked !== false
     ? `<button disabled>On the list \u2713</button>`
+    : g.wanted_status === 'wanted'
+      ? `<button class="ghost" data-act="ask" data-notyet="${notYet ? '1' : ''}"
+           data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me too</button>`
     : notYet
       ? `<button class="ghost" data-act="ask" data-notyet="1"
            data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me when it lands</button>`
@@ -2019,7 +2033,7 @@ async function ask(title, btn) {
 
     // The card that said we hadn't got it, and the button that asked, are both
     // out of date now - say so rather than leaving the old instruction standing.
-    if (d.added_to_wanted || d.wanted) {
+    if (!d.found && (d.added_to_wanted || d.wanted)) {
       const miss = document.getElementById('missing');
       if (miss) {
         miss.className = 'card good';
