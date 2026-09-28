@@ -96,3 +96,11 @@ table `wanted_requesters` records everybody who asked, `recheck()` became `arriv
 year, series among series), `settle_wanted()` tells every requester, and a new household route
 `GET /request/newer` offers a newer film of the same name after a title hit (03 §4.3a). Show items gain
 `added_at`, TMDb guesses `release_date`, discovery items `tmdb_id`; all additive. 07 Phase 2 notes what is left.
+
+A third change, from a review of the second: a `tmdb_id` sent with an ask is kept only when TMDb confirms it
+is a film of that name and year, since settling trusts it over the name; the one year of slack applies only
+to exactly the same name, not a subtitled sequel; "it's here" needs a copy known to play (not a file on an
+offline drive); asking for more of a series already here records its next season; settling moved to
+`api/arrivals.py`, claims each row before telling anybody, and returns `failed` alongside `checked` and
+`settled`; and a settle the index owes is noted in the index file until one gets through the whole list.
+Film 2a gains `store_offline` (additive). 03 §4.3 and §4.19 carry the detail.

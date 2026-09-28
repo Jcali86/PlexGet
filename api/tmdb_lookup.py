@@ -106,6 +106,61 @@ def availability(tmdb_id):
     return state
 
 
+def movie(tmdb_id):
+    """One film by its TMDb id: {tmdb_id, title, original_title, year}, or None."""
+    if not configured() or not tmdb_id:
+        return None
+    cache_key = ("movie", str(tmdb_id))
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    try:
+        r = requests.get(
+            f"{config['tmdb']['base_url']}/movie/{int(tmdb_id)}",
+            params={"api_key": config["tmdb"]["api_key"],
+                    "language": config["tmdb"].get("language", "en-US")},
+            timeout=12,
+        )
+        if r.status_code == 404:
+            found = None
+        else:
+            r.raise_for_status()
+            item = r.json()
+            released = (item.get("release_date") or "")[:4]
+            found = {
+                "tmdb_id": item.get("id"),
+                "title": (item.get("title") or "").strip(),
+                "original_title": (item.get("original_title") or "").strip(),
+                "year": int(released) if released.isdigit() else None,
+            }
+    except Exception:
+        return None     # not cached: TMDb being awkward is not an answer
+    _cache[cache_key] = (time.time(), found)
+    return found
+
+
+def confirmed_id(tmdb_id, title, year=None):
+    """tmdb_id if TMDb says it is a film of this name and year, else None.
+
+    The wanted list trusts a TMDb id over a name when it decides something has
+    arrived - that is the point of having one - so an id is only kept when it
+    is the film named. Sent by anybody in the household, an id for some other
+    film already on the shelf would otherwise settle the request, tell
+    everybody who asked "it's here", and do it again every time it was asked
+    for. Without TMDb there is nothing to check it against, so it is dropped.
+    """
+    from scanner.wanted_search import same_name
+
+    found = movie(tmdb_id)
+    if not found:
+        return None
+    if not any(same_name(title, name) for name in (found["title"], found["original_title"]) if name):
+        return None
+    if year and found["year"] and abs(found["year"] - year) > 1:
+        return None
+    return int(tmdb_id)
+
+
 def suggest(title, hint="", year=None, limit=5):
     """Films this might be, best guess first."""
     if not configured() or not (title or "").strip():

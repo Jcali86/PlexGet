@@ -362,7 +362,16 @@ rest is noise.
 Webhooks are a Plex Pass feature. Without one, nothing extra is needed: the
 library index (next section) looks at what each library added every few
 minutes, and when it finds something new it checks the wanted list and tells
-whoever asked. The webhook only makes that immediate.
+whoever asked. That covers a new film, a new season of a series already here,
+a file put back, and a Fix Match that turns an item into the film somebody
+asked for. The webhook only makes it immediate.
+
+What arrived is noted in the index file until the wanted list has been checked
+against it all the way through. If Plex drops out part way, nothing is lost:
+the check is made again a minute later, then at longer gaps up to half an hour,
+and the console's index panel says so in the meantime. Each entry is marked
+arrived before anybody is told, so the webhook and the index noticing the same
+film at once still send one "it's here".
 
 If the index is switched off, settle the list on a timer instead - say every
 couple of hours:
@@ -420,7 +429,9 @@ asking Plex, library by library, whether it has something; a lookup in the
 index takes a millisecond or two on any SSD, internal or external.
 
 **If the app's own worker is switched off** (`index.background: false`), run
-the script on a schedule instead:
+the script on a schedule instead. Each run also checks the wanted list against
+anything that has arrived and sends the notifications, which is the worker's
+other job:
 
 ```
 */5 * * * * cd /path/to/plexget && venv/bin/python scripts/sync_library.py --recent >/dev/null

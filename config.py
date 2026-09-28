@@ -50,7 +50,10 @@ DEFAULTS = {
     # Every notification has a default wording, the same as the example
     # file's, so a config.yaml written by hand without a notifications block
     # still sends them. Without these, "it's here" was silently never sent to
-    # anybody on such a config. Each can still be reworded or switched off.
+    # anybody on such a config. A config.yaml that has a notifications block
+    # gets exactly what it lists, plus the message below (see
+    # _with_defaults): leaving an event out of the block has always been how
+    # it is switched off, and an upgrade must not switch it back on.
     "notifications": {
         "arrived": {
             "enabled": True,
@@ -128,7 +131,12 @@ def _with_defaults(raw):
     """
     merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
     for key, value in raw.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+        if key == "notifications" and isinstance(value, dict):
+            # The owner's own list, as written. Only the message the household
+            # sends from the app is added if missing, because a config.yaml
+            # written before that existed could not have listed it.
+            merged[key] = {"message": DEFAULTS[key]["message"], **value}
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key].update(value)
         else:
             merged[key] = value
