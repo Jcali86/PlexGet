@@ -1,8 +1,78 @@
 # Plan: a named film with a year the shelf does not hold
 
-Status: plan only, nothing implemented. Written for a local session to carry
-out. Read CONTRIBUTING.md first; it sets the house style and the manual test
-paths, and there is no test suite.
+Status: done, though not as written. The two places the work departed from
+the plan were settled by the owner on 28 September 2026. The next section
+says what was done; everything after it is the plan as it was written, kept
+for its reasoning. Its line numbers are `main` at 0eccf42, before any of
+this, when there was no test suite.
+
+## What was done
+
+Commits ab91a5d and 715c0ef for steps 1 and 2, with the TMDb path from
+5b66775; the reading of the year itself was reworked afterwards in 5ef6f00
+and e6d8f91.
+
+**Step 1, a typed year is a constraint.** `narrow_by_year` is gone.
+`same_year()` in `scanner/wanted_search.py` replaces it everywhere it was
+used: the title search, `close_matches`, `search_and_capture`, the arrival
+check behind recheck and settle, and the importer. It returns the matches
+from the year named, or failing that from one year either side, and
+otherwise nothing, never every match. The plan wanted the other-year films
+kept as confidence-1 maybes; instead the two callers that need them put them
+back themselves (`close_matches`, and the `close` list from
+`search_and_capture`), so "the 2002 one is here" is still said without
+being claimed.
+
+**Plus or minus one year: kept.** The plan recommended an exact year. The
+code allows one either side, because Plex and TMDb disagree on a film's year
+often enough: a festival premiere against the release, one country against
+another. The owner chose to keep it. The consequence the plan pointed at
+stands: "Inception 2011" answers "We have that" with Inception (2010), not
+the missing card.
+
+**Step 2, no model for a missing title with a year.** Done another way.
+Rather than `search_by_title` returning `title_missing` itself,
+`request_search` asks `names_a_film()` once the title and person lookups
+have missed, and TMDb says whether the words name a real film, of that year
+when one was typed. If they do, the answer comes from `title_missing()` and
+is filled in by `describe_missing()`, the helper the plan called
+`explain_missing_title`, used on both the free path and the model path. No
+model call, no allowance spent.
+
+**Without a TMDb key: left, by choice.** Because step 2 goes through TMDb, a
+server with no TMDb key still sends "Resident evil 2026" down the model path.
+It takes an allowance, handed back if the model is not used, and the answer
+lists the older films as "well-rated crowd-pleasers". The plan's version
+would have answered it without TMDb. The owner left it, as their server has
+a key; it affects only installs without one.
+
+**Step 3, the checkbox on a title hit.** Not done, as the plan allowed.
+
+**Persisting `available_from`.** Not done. Wanted rows now carry `tmdb_id`,
+which the arrival check matches first, but not the due date.
+
+**A number that is part of the name.** Not in the plan, found afterwards. A
+bare trailing year was always read as a year, so "Wonder Woman 1984", "Death
+Race 2000" and "Class of 1984" were searched as the shorter name from that
+year. `split_query()` now says where a year came from, and `name_or_year()`
+asks the shelf, then TMDb for a film the shelf lacks, whether the whole
+string is a name before taking the number as a year.
+
+### The checklist, now
+
+The tests and checks below run against a fake Plex and a stand-in for TMDb.
+Walking the list against the real ones is still worth doing.
+
+| Item | Result | Checked by |
+|---|---|---|
+| "Resident evil 2026" | `title_missing`; the 2026 film first, in the cinema; the older films as near matches; no model call | `tests/test_library_index.py::test_a_film_we_lack_is_answered_without_the_model` |
+| "Resident evil" | six matches, "6 things here match that name." | once through the route, no test kept |
+| "Resident evil 2002" | one match, "We have that" | once through the route, no test kept |
+| "Taxi (French)" | Taxi, with "French" kept as the hint | `tests/test_parse_query.py::test_split_query` |
+| "Tell me when it lands" | a wanted row for Resident Evil, 2026 | `tests/test_wanted_arrivals.py::test_tell_me_when_it_lands_puts_the_2026_film_on_the_list` |
+| Recheck afterwards | the 2026 row stays wanted | `tests/test_wanted_arrivals.py::test_the_old_films_never_settle_the_new_one` (settle, which runs recheck) |
+| "Inception 2011" | "We have that", Inception (2010), by the plus-or-minus-one decision | once through the route, no test kept |
+| Asking as household | as above | the tests in `tests/test_wanted_arrivals.py` sign in as a shared member |
 
 ## The symptom
 
