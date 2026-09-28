@@ -47,16 +47,43 @@ def _tmdb_get(path, params=None):
 FUZZY_THRESHOLD = 85
 
 
-def _title_owned(tmdb_title, tmdb_original_title, owned_titles):
-    """Check if a TMDb title matches any owned title (exact or fuzzy).
+def _year_of(release_date):
+    """The year of a TMDb release date, or None for a film with no date yet."""
+    try:
+        return int((release_date or "")[:4])
+    except ValueError:
+        return None
 
-    Uses multiple fuzz strategies to catch number-vs-word variants
-    (e.g. '101 Dalmatians' vs 'One Hundred and One Dalmatians').
+
+def _title_owned(tmdb_title, tmdb_original_title, tmdb_year, owned_films):
+    """Check if a TMDb film matches any owned (title, year) pair.
+
+    The year is what tells a remake from the film it remakes. Both
+    token_set_ratio and partial_ratio score 100 whenever one title is
+    contained in the other, so on titles alone holding Halloween (1978) meant
+    Halloween (2018) and Halloween Kills were never reported missing. A year
+    more than one apart is therefore a different film whatever the title says;
+    one apart is allowed because TMDb dates a film by its first release and a
+    filename often by its local one.
+
+    partial_ratio is kept for number-vs-word variants ('101 Dalmatians' vs
+    'One Hundred and One Dalmatians'), but only when both years are known and
+    agree, since otherwise it matches any title that contains a held one. With
+    a year missing on either side the title alone decides.
+
+    A title that ends in a number, 'Blade Runner 2049.mkv', has that number
+    read as its year, so the title and the year together are tried as a title
+    before the years are allowed to rule anything out.
     """
     candidates = [tmdb_title]
     if tmdb_original_title:
         candidates.append(tmdb_original_title)
-    for owned in owned_titles:
+    for owned, owned_year in owned_films:
+        if owned_year is not None and f"{owned} {owned_year}" in candidates:
+            return True
+        years_known = tmdb_year is not None and owned_year is not None
+        if years_known and abs(tmdb_year - owned_year) > 1:
+            continue
         for cand in candidates:
             if cand == owned:
                 return True
@@ -64,7 +91,7 @@ def _title_owned(tmdb_title, tmdb_original_title, owned_titles):
                 return True
             if fuzz.token_set_ratio(cand, owned) >= FUZZY_THRESHOLD:
                 return True
-            if fuzz.partial_ratio(cand, owned) >= FUZZY_THRESHOLD:
+            if years_known and fuzz.partial_ratio(cand, owned) >= FUZZY_THRESHOLD:
                 return True
     return False
 
@@ -109,6 +136,7 @@ def _parse_movie_title(file_path):
     Handles patterns like:
       <library>/Batman v. Superman-Dawn of Justice 2016 ...mkv
       <library>/500 Days of Summer.mkv
+      <library>/Halloween (1978).mkv
     """
     basename = re.split(r"[\\/]", file_path)[-1]
     # Remove extension
@@ -116,8 +144,9 @@ def _parse_movie_title(file_path):
     # Strip common release tags from the right
     name = re.split(r"[\.\s](?:\d{3,4}p|BluRay|BRRip|WEB-DL|WEBRip|REMUX|HDTV|BDRip|AMZN|NF|PCOK|WEB\b)", name, flags=re.IGNORECASE)[0]
     name = name.replace(".", " ").strip()
-    # Try to pull out year
-    year_match = re.search(r"[\s\.](\d{4})$", name)
+    # The year in brackets is Plex's own naming, and the importer's. Without
+    # it the franchise check has no year to tell a remake by.
+    year_match = re.search(r"[\s\.]\(?(\d{4})\)?$", name)
     year = int(year_match.group(1)) if year_match else None
     if year_match:
         name = name[:year_match.start()].strip()
@@ -184,9 +213,10 @@ def analyze_tv_show(show_name, owned_episodes, library, db, tmdb_id=None):
     return gap_count
 
 
-def analyze_movie_franchise(title, year, library, db, owned_titles=None):
+def analyze_movie_franchise(title, year, library, db, owned_films=None):
     """Check if a movie belongs to a collection and find missing entries.
 
+    owned_films: set of (lowercased title, year or None) pairs
     Returns count of gaps found.
     """
     gap_count = 0
@@ -214,8 +244,8 @@ def analyze_movie_franchise(title, year, library, db, owned_titles=None):
     for part in coll_data.get("parts", []):
         part_title = part["title"].lower()
         part_orig = (part.get("original_title") or "").lower()
-        # Check exact match or fuzzy match (>= 85) against owned titles
-        if owned_titles and _title_owned(part_title, part_orig, owned_titles):
+        part_year = _year_of(part.get("release_date"))
+        if owned_films and _title_owned(part_title, part_orig, part_year, owned_films):
             continue
         # Not in our collection of owned titles
         db.insert_gap(
@@ -395,12 +425,13 @@ def run_movie_analysis(db, libraries=None, limit=None):
     for lib in libraries:
         rows = db.get_all_media(lib)
 
-        # Build set of owned titles (lowercased) for franchise matching
-        owned_titles = set()
+        # The year travels with each title so that a collection part sharing
+        # a held film's name, a remake or a reboot, is still seen as missing.
+        owned_films = set()
         parsed = []
         for row in rows:
             title, year = _parse_movie_title(row["file_path"])
-            owned_titles.add(title.lower())
+            owned_films.add((title.lower(), year))
             parsed.append((title, year))
 
         print(f"  [{lib}] {len(parsed)} movies found")
@@ -409,7 +440,7 @@ def run_movie_analysis(db, libraries=None, limit=None):
             if limit and i >= limit:
                 break
             try:
-                fgaps = analyze_movie_franchise(title, year, lib, db, owned_titles)
+                fgaps = analyze_movie_franchise(title, year, lib, db, owned_films)
                 total_franchise_gaps += fgaps
 
                 agaps = analyze_alternate_versions(title, year, lib, db)
