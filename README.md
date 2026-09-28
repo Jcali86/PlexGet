@@ -86,10 +86,12 @@ What they get:
 
 ### For you
 
-- **The wanted list**, with who asked and when. Plex's `library.new` webhook
-  settles entries the moment the file lands and tells whoever asked. Webhooks
-  are a Plex Pass feature; without one, `POST /wanted/recheck` does the same
-  job on a schedule.
+- **The wanted list**, with who asked and when. When a film or series on it
+  lands, everybody who asked for it is told. Plex's `library.new` webhook (a
+  Plex Pass feature) does that the moment the file lands; without it, the
+  library index notices new arrivals within a few minutes and does the same.
+  An entry is only ever settled by the film asked for - Resident Evil (2026)
+  is not answered by the 2002 film of the same name.
 - **A push when somebody asks for something**, and another when a search turns
   up a film Plex lists but can no longer play — a file that has quietly gone
   missing puts itself back on the wanted list.

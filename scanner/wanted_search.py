@@ -123,6 +123,7 @@ def search_shows(title, token=None):
                 "libraries": [section.title],
                 "confidence": confidence,
                 "kind": "show",
+                "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     ordered = sorted(found.values(), key=lambda m: (-m["confidence"], m["title"].lower()))
     return ordered
@@ -539,17 +540,33 @@ def search_plex(title, token=None):
     return [movie for _confidence, movie in scored]
 
 
-def narrow_by_year(matches, year):
-    """When the user gave a year and something matches it exactly, trust it."""
+def same_year(matches, year):
+    """The matches from the year that was named, allowing one either side.
+
+    A year given is a year meant. The rule this replaces trusted a year only
+    when something matched it and otherwise handed back every match, so
+    "Resident Evil (2026)" was answered with the 2002 film: asking for the new
+    one was told "we already have that", and a request for it would have been
+    settled - "it's here" - by the old one. One year of slack, because Plex and
+    TMDb disagree on a film's year often enough: a festival premiere against
+    the release, one country against another.
+    """
     if not year:
         return matches
-    exact = [m for m in matches if m["year"] == year]
-    return exact or matches
+    exact = [m for m in matches if m.get("year") == year]
+    return exact or [m for m in matches if m.get("year") and abs(m["year"] - year) <= 1]
 
 
-def search_and_capture(db, query, capture=True):
-    """Search Plex; add the title to the wanted list when nothing matches."""
-    title, year = parse_query(query)
+def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
+    """Search Plex; add the title to the wanted list when nothing matches.
+
+    year and tmdb_id, when the caller knows them, are the film exactly - a
+    button on a TMDb card knows both - and a year given this way is used as it
+    is rather than read back out of the title.
+    """
+    title, said_year = parse_query(query)
+    if year is None:
+        year = said_year
     result = {
         "query": (query or "").strip(),
         "title": title,
@@ -563,7 +580,8 @@ def search_and_capture(db, query, capture=True):
     if not title:
         return result
 
-    matches = narrow_by_year(search_plex(title), year)
+    everything = search_plex(title)
+    matches = same_year(everything, year)
     # Only certainty answers "we have that" - the same bar search_by_title
     # holds. A confidence of 1 is the making-of documentary, or Taxi Driver
     # turning up for "Taxi": worth mentioning, never worth claiming, and
@@ -572,8 +590,13 @@ def search_and_capture(db, query, capture=True):
     # of an Epic", and never gets the film they wanted.
     certain = [m for m in matches if m.get("confidence", 2) >= 2]
     result["matches"] = certain
-    result["close"] = [m for m in matches
-                       if m.get("confidence") == 1 and not m["file_missing"]]
+    # Films of the same name from other years are worth naming for the same
+    # reason - "the 2002 one is here, not the one you asked for" - and never
+    # worth claiming.
+    kept = {m["rating_key"] for m in matches}
+    result["close"] = ([m for m in matches if m.get("confidence") == 1 and not m["file_missing"]]
+                       + [m for m in everything if m["rating_key"] not in kept
+                          and m.get("confidence", 2) >= 2 and not m["file_missing"]])
 
     # Plex still lists a film after its file disappears. If every copy of every
     # match is gone, the library cannot actually play it, so it belongs on the
@@ -587,14 +610,14 @@ def search_and_capture(db, query, capture=True):
         gone = certain[0]
         note = "Plex lists this but the file is missing from disk"
         row, created = db.insert_wanted(
-            gone["title"], gone["year"], (query or "").strip(), notes=note
+            gone["title"], gone["year"], (query or "").strip(), notes=note, tmdb_id=tmdb_id
         )
         result["added_to_wanted"] = created
         result["already_wanted"] = not created
         result["wanted"] = dict(row)
         return result
 
-    row, created = db.insert_wanted(title, year, (query or "").strip())
+    row, created = db.insert_wanted(title, year, (query or "").strip(), tmdb_id=tmdb_id)
     result["added_to_wanted"] = created
     result["already_wanted"] = not created
     result["wanted"] = dict(row)
@@ -604,26 +627,67 @@ def search_and_capture(db, query, capture=True):
 def recheck(db):
     """Re-search every wanted entry and report the ones Plex now has.
 
-    Nothing is reclassified automatically - marking something acquired stays a
-    deliberate, manual step.
+    Nothing is reclassified here; settle_wanted in api/routes.py does that,
+    and marking something acquired by hand stays possible from the console.
     """
     now_in_plex = []
     entries = db.get_wanted("wanted")
     for entry in entries:
-        matches = narrow_by_year(search_plex(entry["title"]), entry["year"])
-        # Plex keeps listing a title after its file is gone - which is often
-        # exactly why the title is on this list. Only a copy that can actually
-        # be played means it has arrived; otherwise announcing "it's here" is a
-        # lie, and it would flip straight back on the next check. The same
-        # goes for a companion piece: the making-of arriving is not the film
-        # arriving, however alike the names.
-        playable = [m for m in matches
-                    if not m["file_missing"] and m.get("confidence", 2) >= 2]
-        if playable:
+        matches = arrived(entry)
+        if matches:
             found = dict(entry)
-            found["matches"] = playable
+            found["matches"] = matches
             now_in_plex.append(found)
     return {"checked": len(entries), "now_in_plex": now_in_plex}
+
+
+def _asked_at(entry):
+    """When an entry was added, as a Unix time. SQLite writes it in UTC."""
+    try:
+        return datetime.datetime.strptime(str(entry["added_at"])[:19], "%Y-%m-%d %H:%M:%S") \
+            .replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def arrived(entry):
+    """What in Plex now answers this wanted entry; empty while it has not arrived.
+
+    A film by the same name from another year is not it: this is the check
+    that sends "it's here", and it once sent that for Resident Evil (2026) on
+    the strength of the 2002 film. A series is looked for among the series -
+    the film libraries hold nothing that answers it - and a season among that
+    series' seasons.
+    """
+    keys = entry.keys()
+    kind = (entry["kind"] if "kind" in keys else None) or "film"
+    title, year = entry["title"], entry["year"]
+
+    if kind == "show":
+        shows = [s for s in same_year(search_shows(title), year) if s.get("confidence", 2) >= 2]
+        season = entry["season"] if "season" in keys else None
+        if season:
+            return [s for s in shows if season in seasons_held(s["rating_key"])]
+        # The whole series, or "the next season" of one that is partly here:
+        # finding the series proves nothing when it was already on the shelf
+        # when they asked, so it has to have been added since.
+        asked = _asked_at(entry)
+        return [s for s in shows if asked and (s.get("added_at") or 0) > asked]
+
+    tmdb_id = entry["tmdb_id"] if "tmdb_id" in keys else None
+    if tmdb_id:
+        from scanner import library_index
+        by_id = library_index.films_by_tmdb(tmdb_id)
+        if by_id:
+            return by_id
+    films = same_year(search_plex(title), year)
+    # Plex keeps listing a title after its file is gone - which is often
+    # exactly why the title is on this list. Only a copy that can actually be
+    # played means it has arrived; otherwise announcing "it's here" is a lie,
+    # and it would flip straight back on the next check. The same goes for a
+    # companion piece: the making-of arriving is not the film arriving,
+    # however alike the names.
+    return [m for m in films if not m["file_missing"] and m.get("confidence", 2) >= 2]
 
 
 def export_line(title, year):

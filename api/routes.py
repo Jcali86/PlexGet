@@ -35,6 +35,7 @@ from api.ai import has_api_key
 from api.request_assistant import (
     describe_missing,
     names_a_film,
+    newer_same_name,
     title_missing as title_missing_answer,
     off_topic,
     search as mood_search,
@@ -43,7 +44,7 @@ from api.request_assistant import (
     showcase,
     worth_asking,
 )
-from scanner.wanted_search import parse_query
+from scanner.wanted_search import BRACKETED_YEAR, parse_query, plausible_year
 from scanner.wanted_search import (
     PlexTokenDead,
     PlexUnavailable,
@@ -82,7 +83,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "library-index-1"
+BUILD = "arrivals-2"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
@@ -93,6 +94,9 @@ FEATURES = [
     "year-in-title",        # "Resident Evil 2026" is no longer answered with the 2002 film
     "report-a-problem",     # the household can tell the owner something is wrong, from the page
     "library-index",        # searches ask the local catalogue first; a miss asks Plex nothing
+    "ask-by-year",          # asking for Resident Evil (2026) is not answered by the 2002 film
+    "arrival-by-year",      # "it's here" only for the film asked for, told to everybody who asked
+    "newer-same-name",      # a title hit mentions a newer film of that name the shelves lack
 ]
 
 
@@ -659,24 +663,11 @@ def create_app():
             if row is None:
                 continue
             name = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
+            if entry.get("season"):
+                name += f", series {entry['season']}"
             settled.append(name)
-            # Whoever asked hears about it; if nobody is recorded against the
-            # row it was captured by a search, so the owner is told instead.
-            # Whoever asked hears about it. If their id is unknown or stale -
-            # older rows predate it being recorded - the owner is told rather
-            # than the arrival passing in silence.
-            owner = web_push.owner_id()
-            for target in (entry.get("requested_by_id"), owner):
-                if not target:
-                    continue
-                try:
-                    sent = web_push.send_event(db, "arrived", target,
-                                               url="/request",
-                                               tag=f"arrived-{entry['id']}", film=name)
-                except Exception:
-                    sent = None
-                if sent and sent.get("sent"):
-                    break
+            # Everybody who asked hears about it; the owner if none of them does.
+            web_push.tell_arrived(db, row, name)
         return {"checked": result.get("checked", 0), "settled": settled}
 
     @app.route("/wanted/settle", methods=["POST"])
@@ -2025,6 +2016,12 @@ def create_app():
         kind = "show" if body.get("kind") == "show" else "film"
         season = body.get("season")
         season = int(season) if str(season).isdigit() and 0 < int(season) < 100 else None
+        # A card that knows the film sends its year and TMDb id as they are,
+        # rather than folded into the title for the server to read back out.
+        year = body.get("year")
+        year = int(year) if str(year).isdigit() and plausible_year(int(year)) else None
+        tmdb_id = str(body.get("tmdb_id") or "")
+        tmdb_id = tmdb_id if tmdb_id.isdigit() else None
         user = current_user()
         who = user["username"] if user else (body.get("who") or "").strip()[:40]
         if not title:
@@ -2043,10 +2040,13 @@ def create_app():
         try:
             if kind == "show":
                 # A series is not looked up as a film, and a season request is
-                # about one season, so it is recorded directly.
-                named, said_year = parse_query(title)
+                # about one season, so it is recorded directly. Only a
+                # bracketed year is read out of the name: Space: 1999 is a
+                # series, not "Space:" from 1999.
+                named, said_year = parse_query(title) if BRACKETED_YEAR.match(title) else (title, None)
+                said_year = year or said_year
                 row, created = db.insert_wanted(
-                    named or title, said_year, title, kind="show", season=season
+                    named or title, said_year, title, kind="show", season=season, tmdb_id=tmdb_id
                 )
                 result = {
                     "found": False, "kind": "show", "season": season,
@@ -2055,7 +2055,20 @@ def create_app():
                     "wanted": dict(row), "matches": [],
                 }
             else:
-                result = search_and_capture(db, title)
+                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id)
+                existing = result.get("wanted") or {}
+                if not result.get("found") and existing.get("status") == "acquired":
+                    # Marked as arrived, yet nothing on the shelf plays - wrongly
+                    # settled, or since deleted. Asking again puts it back on
+                    # the list, rather than answering "already picked up"
+                    # forever with no notification ever to come.
+                    row = db.set_wanted_status(existing["id"], "wanted")
+                    result.update(wanted=dict(row), added_to_wanted=True,
+                                  already_wanted=False, reopened=True)
+            wanted_row = result.get("wanted") or {}
+            if user and wanted_row.get("id") and wanted_row.get("status") != "dismissed":
+                # Everybody who asks is told when it arrives, not only the first.
+                db.add_requester(wanted_row["id"], user["id"], who)
             if result.get("added_to_wanted") and who:
                 db.conn.execute(
                     "UPDATE wanted SET notes = ?, requested_by = ?, requested_by_id = ? WHERE id = ?",
@@ -2087,6 +2100,33 @@ def create_app():
         finally:
             db.close()
         return jsonify(result)
+
+    @app.route("/request/newer")
+    def request_newer():
+        """A newer film by exactly the name searched for, that the shelves lack.
+
+        Asked by the page after a title search that found something, so the
+        answer it already drew is not held up by a round trip to TMDb. Always
+        answers 200; a failure is simply no newer film.
+        """
+        user = current_user()
+        query = " ".join((request.args.get("q") or "").split())[:200]
+        if not query:
+            return jsonify({"error": "which film?"}), 400
+        named, _year = parse_query(query)
+        try:
+            found = newer_same_name(query, (user or {}).get("plex_token"))
+        except Exception:
+            found = []
+        if found:
+            db = Database()
+            try:
+                for guess in found:
+                    row = db.find_wanted(guess["title"], guess.get("year"))
+                    guess["wanted_status"] = row["status"] if row else None
+            finally:
+                db.close()
+        return jsonify({"query": query, "title": named or query, "newer": found})
 
     @app.route("/request/wanted/list")
     def request_wanted_list():
@@ -2149,6 +2189,18 @@ def create_app():
             headers={"Cache-Control": "public, max-age=86400"},
         )
 
+    # When the index finds something new on the shelves, check the wanted list
+    # against it: that is how "it's here" reaches somebody without Plex Pass,
+    # whose server never sends the library.new webhook. Runs on the index's
+    # own thread, never inside a search.
+    def settle_after_arrivals(rating_keys):
+        db = Database()
+        try:
+            settle_wanted(db)
+        finally:
+            db.close()
+
+    library_index.on_arrivals(settle_after_arrivals)
     # Keeps the library index fresh from now on; see scanner/library_index.py.
     library_index.start_background()
 

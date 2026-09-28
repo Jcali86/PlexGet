@@ -149,6 +149,9 @@ def suggest(title, hint="", year=None, limit=5):
             "language": item.get("original_language", ""),
             "popularity": item.get("popularity", 0),
             "original_title": (item.get("original_title") or "").strip(),
+            # The day, not just the year: "is this the new one?" needs to know
+            # whether it came out last month or last December.
+            "release_date": (item.get("release_date") or "")[:10] or None,
         })
 
     def rank(film):
@@ -381,6 +384,8 @@ def discover(filters, exclude_titles=(), limit=8):
             continue
         released = (item.get("release_date") or "")[:4]
         found.append({
+            # The film exactly, for the library's own check and for the ask.
+            "tmdb_id": item.get("id"),
             "title": name,
             "year": int(released) if released.isdigit() else None,
             "overview": (item.get("overview") or "").strip(),
@@ -523,6 +528,7 @@ def discover_shows(filters, exclude_titles=(), limit=8):
             continue
         first = (item.get("first_air_date") or "")[:4]
         found.append({
+            "tmdb_id": item.get("id"),
             "title": name,
             "year": int(first) if first.isdigit() else None,
             "overview": (item.get("overview") or "").strip(),

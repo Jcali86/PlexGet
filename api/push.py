@@ -206,6 +206,38 @@ def send_event(db, key, plex_user_id, url="/", tag="", **fields):
     return send_to_user(db, plex_user_id, title, body, url=url, tag=tag or key)
 
 
+def tell_arrived(db, row, label):
+    """Tell everybody waiting on a wanted entry that it has arrived.
+
+    Each person who asked is told - not only the first, which is all the
+    single requested_by_id column could hold, so a second person pressing
+    "tell me when it lands" on the same film was never told. If none of them
+    is reached - nobody recorded, or no device of theirs subscribed - the
+    owner is told instead, so an arrival never passes in silence. Returns
+    whether anybody who asked was reached.
+    """
+    targets = [str(uid) for uid, _name in db.requesters(row["id"])]
+    first = row["requested_by_id"] if "requested_by_id" in row.keys() else None
+    if first and str(first) not in targets:
+        targets.insert(0, str(first))
+    tag = f"arrived-{row['id']}"
+    reached = False
+    for target in targets:
+        try:
+            sent = send_event(db, "arrived", target, url="/request", tag=tag, film=label)
+        except Exception:
+            sent = None
+        reached = reached or bool(sent and sent.get("sent"))
+    if not reached:
+        owner = owner_id()
+        if owner and str(owner) not in targets:
+            try:
+                send_event(db, "arrived", owner, url="/request", tag=tag, film=label)
+            except Exception:
+                pass
+    return reached
+
+
 def send_to_user(db, plex_user_id, title, body, url="/", tag=""):
     """Notify one person on every device they have signed in on."""
     ensure_table(db)

@@ -366,9 +366,9 @@ def _words(*names):
 
 
 def _store(conn, rows):
-    """Write rows, and their words wherever a name changed."""
+    """Write rows, and their words wherever a name changed. Returns the keys that are new."""
     if not rows:
-        return
+        return []
     keys = [row["rating_key"] for row in rows]
     before = {}
     for start in range(0, len(keys), 500):
@@ -385,6 +385,7 @@ def _store(conn, rows):
     conn.executemany("INSERT OR IGNORE INTO words (word, rating_key) VALUES (?, ?)",
                      [(word, row["rating_key"]) for row in renamed
                       for word in _words(row["title"], row["original_title"])])
+    return [row["rating_key"] for row in rows if row["rating_key"] not in before]
 
 
 def _drop(conn, where, params):
@@ -519,7 +520,7 @@ def _sync_section(section, generation):
     key = str(section.key)
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        _store(conn, rows)
+        fresh = _store(conn, rows)
         _drop(conn, "section_key = ? AND generation < ?", (key, generation))
         if kind == "show":
             conn.execute("DELETE FROM seasons WHERE rating_key IN "
@@ -541,6 +542,7 @@ def _sync_section(section, generation):
             (key, section.title, kind, len(rows), now, now))
         _bump(conn)
         conn.commit()
+    _announce(fresh)
     return len(rows)
 
 
@@ -598,15 +600,17 @@ def recent_sync(section_keys=None):
                 looked.append(outcome)
 
     now = time.time()
+    fresh = []
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         for key, rows, pairs in looked:
-            _store(conn, rows)
+            fresh.extend(_store(conn, rows))
             conn.executemany("INSERT OR IGNORE INTO seasons (rating_key, season) VALUES (?, ?)", pairs)
             conn.execute("UPDATE sections SET recent_checked_at = ? WHERE section_key = ?", (now, key))
         if looked:
             _bump(conn)
         conn.commit()
+    _announce(fresh)
     return {key for key, _rows, _pairs in looked}
 
 
@@ -1059,6 +1063,62 @@ def status():
     return report
 
 
+def films_by_tmdb(tmdb_id):
+    """Films on the shelves filed under this TMDb id, for the arrival check.
+
+    Exact where a name and year are not: the film asked for by its TMDb id is
+    the film Plex filed under that id, whatever either of them calls it. A film
+    whose files are all gone does not count. None when the index cannot say.
+    """
+    try:
+        with _connect() as conn:
+            if not _recent_enough(conn):
+                return None
+            rows = conn.execute(
+                "SELECT i.*, s.title AS library FROM items i "
+                "LEFT JOIN sections s ON s.section_key = i.section_key "
+                "WHERE i.tmdb_id = ? AND i.kind = 'movie'", (str(tmdb_id),)).fetchall()
+    except (IndexUnavailable, sqlite3.Error):
+        return None
+    return [{"title": r["title"], "year": r["year"], "rating_key": r["rating_key"],
+             "libraries": [r["library"]] if r["library"] else [], "file_missing": False,
+             "confidence": 2}
+            for r in rows if r["file_verdict"] != "missing"]
+
+
+# ---- telling the app about new arrivals ---------------------------------------
+
+_arrivals = {"callback": None, "pending": set()}
+_arrivals_lock = threading.Lock()
+
+
+def on_arrivals(callback):
+    """callback(rating_keys) runs on the worker's thread when new items reach the index.
+
+    One callback: the app registers its wanted-list check here. Without the
+    webhook, which needs Plex Pass, this is how a film arriving is noticed.
+    """
+    _arrivals["callback"] = callback
+
+
+def _announce(rating_keys):
+    if not rating_keys:
+        return
+    with _arrivals_lock:
+        _arrivals["pending"].update(rating_keys)
+    _worker.poke()
+
+
+def deliver_arrivals():
+    """Hand anything newly arrived to the callback. The worker does this after each round."""
+    with _arrivals_lock:
+        keys, _arrivals["pending"] = _arrivals["pending"], set()
+    callback = _arrivals["callback"]
+    if keys and callback:
+        callback(sorted(keys))
+    return len(keys)
+
+
 # ---- the background worker ---------------------------------------------------
 
 def _describe(error):
@@ -1099,6 +1159,8 @@ class _Worker:
         while True:
             try:
                 self.tick()
+                self.busy = "checking the wanted list against new arrivals"
+                deliver_arrivals()
                 self.last_error = None
             except Exception as e:
                 self.last_error = _describe(e)
@@ -1168,6 +1230,7 @@ def request_sync(full=False):
                 check_files()
             else:
                 recent_sync()
+            deliver_arrivals()
             _worker.last_error = None
         except Exception as e:
             _worker.last_error = _describe(e)

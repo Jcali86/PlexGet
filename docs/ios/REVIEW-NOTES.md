@@ -89,3 +89,10 @@ arrive with `translated_by: "title"` and empty `matches` when TMDb names the fil
 table), and the Phase 0 test harness in this repository already exists (07 §5 Phase 0 and prompts/phase-0.md
 carry a note saying what to check rather than create). The new routes `GET /index/status` and `POST
 /index/sync` are owner-tier console routes the app does not call.
+
+A second change since the review, prompted by a request for Resident Evil (2026) being answered by the 2002
+film: `POST /request/wanted` takes `year` and `tmdb_id`, the table `wanted` has `tmdb_id` (integer) and a new
+table `wanted_requesters` records everybody who asked, `recheck()` became `arrived()` (TMDb id, then title and
+year, series among series), `settle_wanted()` tells every requester, and a new household route
+`GET /request/newer` offers a newer film of the same name after a title hit (03 §4.3a). Show items gain
+`added_at`, TMDb guesses `release_date`, discovery items `tmdb_id`; all additive. 07 Phase 2 notes what is left.

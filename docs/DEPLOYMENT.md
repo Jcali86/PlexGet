@@ -359,18 +359,21 @@ Plex Media Server posts it from the same machine, which is why the loopback
 rule lets it through without a session. Only `library.new` is acted on; the
 rest is noise.
 
-Webhooks are a Plex Pass feature. Without one, ask the app to check for itself
-on a timer — say every couple of hours:
+Webhooks are a Plex Pass feature. Without one, nothing extra is needed: the
+library index (next section) looks at what each library added every few
+minutes, and when it finds something new it checks the wanted list and tells
+whoever asked. The webhook only makes that immediate.
+
+If the index is switched off, settle the list on a timer instead - say every
+couple of hours:
 
 ```
-0 */2 * * * curl -fsS -X POST http://127.0.0.1:5050/wanted/recheck >/dev/null
+0 */2 * * * curl -fsS -X POST http://127.0.0.1:5050/wanted/settle >/dev/null
 ```
 
-It only reports; marking something acquired stays a deliberate step.
-
-The webhook also brings the new arrival into the library index (next section)
-at once. Without it, the index notices new additions within a few minutes by
-itself.
+`/wanted/settle` marks what has arrived and sends the notifications.
+`/wanted/recheck` is only the report behind it: it lists what looks arrived
+and changes nothing.
 
 ---
 

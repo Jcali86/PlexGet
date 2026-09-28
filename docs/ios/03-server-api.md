@@ -226,6 +226,7 @@ The Kit has one `Film` type whose shape-2a-only fields (`duration_ms`, `librarie
 | `libraries` | [str] | |
 | `confidence` | int | |
 | `kind` | str | always `"show"` |
+| `added_at` | int | Unix seconds Plex added it; from `search_shows` only (additive; the arrival check compares it with when the request was made) |
 | `held_seasons` | [int] | present only on `shows` of the title path (`api/request_assistant.py:947-948`) and as `[]` from `_show_dict` (TV-mood path); absent from `search_shows` output, from shows inside `close` (`close_matches()`, `api/request_assistant.py:1081-1097`) and from `wanted.recheck.json` show hits; Kit field optional |
 | `content_rating` | str\|null | only from `_show_dict`; absent from `search_shows` and from shows inside `close`; Kit field optional |
 | `all_seasons` | [int] | from TMDb; present only on `result["shows"]` after `add_season_detail` (`api/routes.py:1339-1354`), `[]` when TMDb is unconfigured or errors; absent inside `close` and on `wanted.recheck.json` show hits; Kit field optional |
@@ -245,6 +246,7 @@ The Kit has one `Film` type whose shape-2a-only fields (`duration_ms`, `librarie
 | `language` | str | ISO 639-1 |
 | `popularity` | float | |
 | `original_title` | str | |
+| `release_date` | str\|null | `YYYY-MM-DD`, additive; what `GET /request/newer` measures its one-year window by |
 | `release_state` | str | `"out"`, `"cinema"` or `"unreleased"`; only on the first three guesses (`api/routes.py:1486-1492`) |
 | `available_from` | str\|null | `YYYY-MM-DD`; same three guesses |
 
@@ -273,6 +275,7 @@ The Kit has one `Film` type whose shape-2a-only fields (`duration_ms`, `librarie
 | `year` | int\|null | |
 | `overview` | str | |
 | `poster` | str | |
+| `tmdb_id` | int | additive; the ask sends it so the wanted row is the film exactly |
 | `rating` | float | one decimal place |
 | `kind` | str | `"show"` only from `discover_shows`; absent for films |
 
@@ -693,10 +696,11 @@ Request JSON:
 
 | Field | Type | Required | Limits |
 |---|---|---|---|
-| `title` | str | yes | collapsed, cut to 200; the app sends `"Title (Year)"` so the year parses (`request.html:1763`) |
+| `title` | str | yes | collapsed, cut to 200; the web page still sends `"Title (Year)"` as well as `year`, and a year in brackets is read out of the title when `year` is absent |
 | `kind` | str | no | exactly `"show"` → show; anything else → film |
 | `season` | int | no | kept only when `0 < season < 100`; ignored for films |
-| `tmdb_id` | int | no | GAP: Phase 2 addition; stored on the row so `recheck()` can match by `Guid` (ADR §4 "Arrival matching"). Sent when the request came from a `did_you_mean`, `did_you_mean_shows` or `missing` item |
+| `year` | int | no | the film's or series' year, used as it is and in preference to any year in `title`; ignored unless plausible (1888 to five years ahead). A year given is a year meant: the 2002 film does not answer a request for 2026 (one year of slack either side) |
+| `tmdb_id` | int | no | stored on the row (`wanted.tmdb_id`); the arrival check matches the library's TMDb id first. Sent when the request came from a `did_you_mean`, `did_you_mean_shows`, `missing` or `newer` item |
 
 Film path (`search_and_capture`, `scanner/wanted_search.py:351-402`) searches Plex with the owner's token and inserts a row only when nothing playable was found. Response `200`:
 
@@ -706,10 +710,11 @@ Film path (`search_and_capture`, `scanner/wanted_search.py:351-402`) searches Pl
 | `title` | str | |
 | `year` | int\|null | |
 | `found` | bool | |
-| `matches` | [Film 2a] | confidence 2 only |
-| `close` | [Film 2a] | confidence 1 with a file; absent when the title parses to nothing |
+| `matches` | [Film 2a] | confidence 2 only, of the year asked for (within one) |
+| `close` | [Film 2a] | confidence 1 with a file, then confidence-2 films of the same name from other years ("the 2002 one is here, not the one you asked for"); absent when the title parses to nothing |
 | `file_missing` | bool | listed in Plex, every file gone; absent as `close` |
-| `added_to_wanted` | bool | |
+| `added_to_wanted` | bool | also true when an `acquired` row with nothing playable on the shelf is put back to `wanted` |
+| `reopened` | bool | present and true only in that case |
 | `already_wanted` | bool | |
 | `wanted` | WantedRow\|null | the row before the requester update; `requested_by`/`requested_by_id` read `null` here (`api/routes.py:2023`) |
 
@@ -718,6 +723,13 @@ Show path (`api/routes.py:2005-2016`): no Plex search; `200 {"found": false, "ki
 Errors: `400 {"error": "which film?"}`; `429` (§1.7); `503`. Side effects when `added_to_wanted`: `notes` set to `"Requested by <username>"`, `requested_by` and `requested_by_id` set, a `requested` push to the owner unless the requester is the owner (`api/routes.py:2017-2045`). The app shows "we already have that" on `found`, "asked for" on `added_to_wanted`, else a line keyed on `wanted.status` (`request.html:1907-1958`).
 
 Example: `POST /request/wanted {"title": "Chef (2014)", "tmdb_id": 212778}` → `200 {"query": "Chef (2014)", "title": "Chef", "year": 2014, "found": false, "matches": [], "close": [], "file_missing": false, "added_to_wanted": true, "already_wanted": false, "wanted": {"id": 42, "title": "Chef", "year": 2014, "search_query": "Chef (2014)", "status": "wanted", "notes": "Requested by jules", "added_at": "2026-09-21 08:12:03", "requested_by_id": null, "requested_by": null, "kind": "film", "season": null, "tmdb_id": 212778}}`.
+
+
+### 4.3a `GET /request/newer` (household; `api/routes.py` `request_newer`; `api/request_assistant.py` `newer_same_name`)
+
+Asked after a title search that found films on the shelves (`kind == "title"`, `translated_by == "title"`, `matches` not empty), so a newer film of exactly that name - "Resident Evil" today, when the shelves hold the 2002 one - can be offered without holding up the title answer. `?q=<the query as typed>`; blank `q` → `400 {"error": "which film?"}`. Always `200` otherwise; any failure is an empty list.
+
+`200 {"query": str, "title": str, "newer": [FilmGuess 2d + {"release_date": str|null, "release_state": str, "available_from": str|null, "wanted_status": "wanted"|"acquired"|"dismissed"|null}]}`, at most two, newest first. Empty when a year was typed, when TMDb is not configured, or when nothing qualifies: an exact name (a subtitle is another film), released within 365 days either side of today, newer than any film of that exact name on the shelves, not held by TMDb id or by name and year in a library the person can see. `wanted_status: "wanted"` means the page shows it as already on the list. Fixture: `request.newer.json` (to be recorded in Phase 1).
 
 ### 4.4 `GET /request/wanted/list` (household; `api/routes.py:2052-2075`; household-api.md §3.3)
 
@@ -814,7 +826,7 @@ Body `{"status": "acquired" | "dismissed" | "wanted"}`. `200` is the updated `Wa
 
 ### 4.19 `GET|POST /wanted/recheck` and `POST /wanted/settle` (owner; `api/routes.py:697-707, 658-667`; owner-api.md §2)
 
-`/wanted/recheck`: `200 {"checked": int, "now_in_plex": [WantedRow + {"matches": [Film 2a | Show 2c]}]}`; no side effects; `503`. Phase 2: `recheck()` matches by `Guid` (`tmdb://`, `imdb://`, `tvdb://`) before folded title and year, searches show sections for `kind == "show"` rows and checks the season is present (ADR §2), so `matches` for a show row is in shape 2c. `/wanted/settle`: runs `recheck`, marks each hit `acquired`, sends `arrived` to `requested_by_id` and then to every device kind before falling back to the owner (ADR §2 "settle_wanted() loop fix"); `200 {"checked": int, "settled": ["Title (Year)"]}`. Both are synchronous and slow (§1.9); the app calls `/wanted/settle` from the Requests screen and never on a timer, because the settle scheduler does that (ADR §2).
+`/wanted/recheck`: `200 {"checked": int, "now_in_plex": [WantedRow + {"matches": [Film 2a | Show 2c]}]}`; no side effects; `503`. Done ahead of Phase 2 (`scanner/wanted_search.py` `arrived()`): a film row matches the library index's TMDb id first, then a confidence-2 title of the same year (within one, never another year); a `kind == "show"` row searches show sections only, a row with a `season` needs that season held, and a row without one needs the series to have been added after the row was, so asking for more of a series already here is not settled at once. `matches` for a show row is in shape 2c. Still Phase 2: `imdb://` and `tvdb://` matching. `/wanted/settle`: runs `recheck`, marks each hit `acquired`, sends `arrived` to every person who asked (table `wanted_requesters`, not only `requested_by_id`), and to the owner only when none of them was reached (`api/push.py` `tell_arrived()`); `200 {"checked": int, "settled": ["Title (Year)" or "Title, series N"]}`. The library index's worker also runs it whenever it finds new arrivals, which is the settle scheduler for servers without Plex Pass. Phase 2 still adds delivery to every device kind. Both are synchronous and slow (§1.9); the app calls `/wanted/settle` from the Requests screen and never on a timer, because the settle scheduler does that (ADR §2).
 
 ### 4.20 `GET /messages?unread=1` and `POST /messages/<int:id>/read` (owner; `api/routes.py:1904-1929`; owner-api.md §2)
 

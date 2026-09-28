@@ -14,6 +14,7 @@ page works either way: "romcom" still resolves, "something gentle after a long
 week" does not.
 """
 
+import datetime
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from api import persona
 from config import config
 from api import tmdb_lookup
 from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
+from scanner.wanted_search import same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -908,23 +910,6 @@ def find_matches(filters, limit=MAX_MATCHES, token=None, age=0):
     return [], filters.genres, unavailable
 
 
-def _same_year(matches, year):
-    """The matches from the year that was named, allowing one either side.
-
-    A year given is a year meant. narrow_by_year treats it as a tiebreaker and
-    hands back everything when nothing matches, which answered "Resident Evil
-    2026" with six Resident Evil films from other decades and the words "we
-    have these" - so the one actually wanted was never offered for the wanted
-    list. One year of slack, because Plex and TMDb disagree on a film's year
-    often enough: the regional release against the premiere.
-    """
-    if not year:
-        return matches
-    exact = [m for m in matches if m.get("year") == year]
-    return exact or [m for m in matches
-                     if m.get("year") and abs(m["year"] - year) <= 1]
-
-
 def search_by_title(request_text, token=None):
     """Look the request up as the name of a film or a series. No model involved.
 
@@ -935,9 +920,9 @@ def search_by_title(request_text, token=None):
     title, year = parse_query(request_text)
     if not title:
         return None
-    shows = _same_year(search_shows(title, token), year)
+    shows = same_year(search_shows(title, token), year)
     certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = _same_year(title_lookup(title, token), year)
+    exact = same_year(title_lookup(title, token), year)
     playable = [m for m in exact if not m["file_missing"]]
     # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
     # and answering a maybe with "yes, we have that" is how someone ends up
@@ -1093,7 +1078,7 @@ def close_matches(request_text, token=None):
     if not title:
         return []
     films = title_lookup(title, token)
-    fitting = _same_year(films, year)
+    fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
     if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
         # The same name from another year is not the film asked for, but it
@@ -1186,6 +1171,62 @@ def title_missing(request_text):
         "matches": [],
         "unavailable": [],
     }
+
+
+# How far either side of today a film of the same name counts as the new one.
+# Long enough to cover the trailers before release, the run in cinemas and the
+# months after while it reaches digital and streaming, which is when a bare
+# name most likely means it; after a year, "Resident Evil" means the old one
+# again and pointing at the other would be noise.
+NEWER_WINDOW_DAYS = 365
+
+
+def newer_same_name(request_text, token=None):
+    """A newer film by exactly this name that the shelves do not have yet.
+
+    Somebody types "Resident Evil" with no year. The library holds the 2002
+    film, so the title search rightly answers "we have that" - and says
+    nothing about the one in cinemas now, which may well be the one they
+    meant. Only asked for with no year typed, only an exact name (a subtitle is
+    a different film), only something released within a year either side of
+    today, newer than anything of that name already here, and not on the
+    shelves. At most two, newest first.
+    """
+    title, year = parse_query(request_text)
+    if not title or year or not tmdb_lookup.configured():
+        return []
+    wanted = fold(without_article(title))
+    held = [m for m in title_lookup(title, token) if fold(without_article(m["title"])) == wanted]
+    newest_held = max([m["year"] or 0 for m in held], default=0)
+    today = datetime.date.today()
+    picks = []
+    for guess in tmdb_lookup.suggest(title):
+        names = {fold(without_article(guess.get("title"))), fold(without_article(guess.get("original_title")))}
+        if wanted not in names or not guess.get("year") or (guess.get("popularity") or 0) < 1:
+            continue
+        try:
+            released = datetime.date.fromisoformat(guess.get("release_date") or "")
+        except ValueError:
+            continue
+        if abs((released - today).days) > NEWER_WINDOW_DAYS or guess["year"] <= newest_held:
+            continue
+        picks.append(guess)
+    if not picks:
+        return []
+    # Owned already, by TMDb id or name and year, in a library this person can see.
+    from scanner import library_index
+    verdicts = library_index.owned(picks, "movie", [s.key for s in visible_sections(token)])
+    if verdicts is None:
+        verdicts = [any(m["year"] and abs(m["year"] - guess["year"]) <= 1 for m in held) for guess in picks]
+    picks = [guess for guess, owned in zip(picks, verdicts) if not owned]
+    picks.sort(key=lambda g: g.get("release_date") or "", reverse=True)
+    picks = picks[:2]
+    for guess in picks:
+        try:
+            guess["release_state"], guess["available_from"] = tmdb_lookup.availability(guess.get("tmdb_id"))
+        except Exception:
+            guess["release_state"], guess["available_from"] = "out", None
+    return picks
 
 
 def describe_missing(request_text, token=None):

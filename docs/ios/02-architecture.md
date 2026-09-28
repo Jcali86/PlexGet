@@ -245,7 +245,7 @@ tests both.
    "asked for" on `added_to_wanted`, else a note keyed on `wanted.status` (household-api.md §3.2).
    WantedList refreshes `GET /request/wanted/list` and groups by `status` as Waiting / Arrived / Set aside.
 
-GAP: `POST /request/wanted` must accept an optional `tmdb_id: int` so the app can pass the guess's id; the
+Resolved: `POST /request/wanted` accepts an optional `tmdb_id: int` (and `year`), stored as `wanted.tmdb_id`. Formerly GAP: the
 ADR says `wanted.tmdb_id` is "set from did-you-mean and discover guesses" but no body field exists today
 (household-api.md §3.2). 03-server-api.md defines it; Phase 2 adds it with a test.
 
