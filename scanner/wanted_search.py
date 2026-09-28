@@ -28,7 +28,7 @@ BRACKETED_YEAR = re.compile(
 # "Chef 2014" - a bare trailing year, trusted only inside a plausible range so
 # that titles like "Blade Runner 2049" keep their number. Inside that range it
 # is still a guess - Wonder Woman 1984 is a name, not a year - which is why
-# shelf_reading asks the shelf both ways.
+# name_or_year asks the shelf, and TMDb, both ways.
 TRAILING_YEAR = re.compile(r"^\s*(?P<title>.+?)\s+(?P<year>\d{4})\s*$")
 # What parted a name from its year, "Resident Evil - 2026" or "Resident Evil,
 # 2026", is not part of the name; kept, it made a wanted row of its own.
@@ -260,7 +260,7 @@ def split_query(query):
 
     "film" is the Wikipedia form, "Resident Evil (2026 film)". Only a bare
     trailing year is a guess, and a caller searching the shelf should try it
-    both ways - see shelf_reading.
+    both ways - see name_or_year.
     """
     raw = QUALIFIER.sub(" ", (query or "")).strip()
     if not raw:
@@ -524,17 +524,17 @@ def named_exactly(name, matches):
     return any(fold(without_article(m.get("title"))) == wanted for m in matches)
 
 
-def shelf_reading(query, *lookups):
-    """(title, year, found): what to look for on the shelf, a bare trailing year read both ways.
+def name_or_year(query, *lookups):
+    """(title, year, found): what was asked for, a bare trailing year read both ways.
 
     "Chef 2014" is Chef from 2014, but Wonder Woman 1984 is the whole of a
     film's name, and so are Death Race 2000 and Class of 1984. Read as a year,
     the number found the 2017 Wonder Woman instead, or nothing, and a film on
     the shelf looked missing. The words cannot tell the two apart; the shelf
-    can. Each lookup is asked for the whole of it, and if anything is called
-    exactly that, the number was part of the name. found is then what each
-    lookup returned, so the caller need not ask again; otherwise it is None and
-    the year stands.
+    can, and for a film the shelf lacks, TMDb can. Each lookup is asked for the
+    whole of it, and if anything is called exactly that, the number was part of
+    the name. found is then what each lookup returned, so the caller need not
+    ask again; otherwise it is None and the year stands.
     """
     title, year, source = split_query(query)
     if source == "trailing":
@@ -619,7 +619,19 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
     button on a TMDb card knows both - and a year given this way is used as it
     is rather than read back out of the title.
     """
-    title, said_year, found = shelf_reading(query, search_plex)
+    title, said_year, found = name_or_year(query, search_plex)
+    everything = found[0] if found else search_plex(title)
+    if found is None and split_query(query)[2] == "trailing":
+        # Neither reading is on the shelf, so the shelf cannot say which was
+        # meant, and "Wonder Woman 1984" went on the list as Wonder Woman from
+        # 1984. TMDb can say, but only once the shelf has had its turn: a film
+        # held under the year's reading is still the answer.
+        held = same_year(everything, said_year if year is None else year)
+        if not any(m.get("confidence", 2) >= 2 for m in held):
+            from api import tmdb_lookup
+            whole = f"{title} {said_year}"
+            if named_exactly(whole, tmdb_lookup.well_known(whole)):
+                title, said_year, everything = whole, None, search_plex(whole)
     if year is None:
         year = said_year
     result = {
@@ -635,7 +647,6 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
     if not title:
         return result
 
-    everything = found[0] if found else search_plex(title)
     matches = same_year(everything, year)
     # Only certainty answers "we have that" - the same bar search_by_title
     # holds. A confidence of 1 is the making-of documentary, or Taxi Driver

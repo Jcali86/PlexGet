@@ -208,3 +208,93 @@ def test_one_film_asked_for_three_ways_is_one_row(library):
     assert capture("Resident Evil (2026 film)")["already_wanted"] is True
     assert capture("Resident Evil (2026) 4K")["already_wanted"] is True
     assert wanted_rows() == [("Resident Evil", 2026)]
+
+
+# ---- not on the shelf: TMDb decides -------------------------------------------------------------
+
+def guess(tmdb_id, title, year, popularity):
+    return {"tmdb_id": tmdb_id, "title": title, "year": year, "overview": "", "poster": "",
+            "language": "en", "popularity": popularity, "original_title": title,
+            "release_date": f"{year}-06-01"}
+
+
+FILMS = [
+    guess(464052, "Wonder Woman 1984", 2020, 40.0),
+    guess(297762, "Wonder Woman", 2017, 60.0),
+    guess(212778, "Chef", 2014, 20.0),
+    guess(900001, "Chef 2014", 2014, 0.2),           # an obscure short: no reason to doubt the year
+    guess(900002, "Hamlet 2000", 1999, 5.0),         # made up, to put TMDb at odds with the shelf
+]
+SHOWS = [guess(1981, "Galactica 1980", 1980, 8.0)]
+
+
+def catalogue(entries):
+    def search(title, hint="", year=None, limit=5):
+        wanted = wanted_search.fold(title)
+        return [g for g in entries if wanted_search.fold(g["title"]).startswith(wanted)
+                and (not year or g["year"] == year)][:limit]
+    return search
+
+
+@pytest.fixture
+def elsewhere(plex, client, monkeypatch, tmp_path):
+    """A shelf without Wonder Woman 1984 or Galactica 1980, TMDb with both, and a spy on the model path."""
+    from api import plex_auth, routes, tmdb_lookup
+
+    monkeypatch.setitem(config, "database", {"path": str(tmp_path / "ops.db")})
+    plex.add_section(1, "Movies", "movie", [film(201, "Wonder Woman", 2017), film(211, "Hamlet", 2000)])
+    plex.add_section(3, "TV", "show", [])
+    library_index.full_sync()
+
+    monkeypatch.setattr(tmdb_lookup, "configured", lambda: True)
+    monkeypatch.setattr(tmdb_lookup, "suggest", catalogue(FILMS))
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", catalogue(SHOWS))
+    monkeypatch.setattr(tmdb_lookup, "availability", lambda tmdb_id: ("out", None))
+    monkeypatch.setattr(tmdb_lookup, "seasons_that_exist", lambda title, year=None: [])
+    monkeypatch.setattr(plex_auth, "session_user", lambda db, token:
+                        {"id": "7", "username": "Jules", "role": "shared", "plex_token": "t7"})
+    client.set_cookie("plexops_session", "sess-jules")
+
+    modelled = []
+    real = routes.mood_search
+    monkeypatch.setattr(routes, "mood_search", lambda query, **kw: modelled.append(query) or real(query, **kw))
+    return {"client": client, "modelled": modelled}
+
+
+def search_for(world, query):
+    return world["client"].post("/request/search", json={"query": query}).get_json()
+
+
+def test_a_film_we_lack_is_named_whole_and_costs_no_model_call(elsewhere):
+    body = search_for(elsewhere, "Wonder Woman 1984")
+    assert (body["kind"], body["playlist_name"]) == ("title_missing", "Wonder Woman 1984")
+    assert titled(body["did_you_mean"])[:1] == [("Wonder Woman 1984", 2020)]
+    assert elsewhere["modelled"] == []
+
+
+def test_a_series_we_lack_is_named_whole(elsewhere):
+    # Not Space: 1999, whose "space" reads as a mood for science fiction before the name is looked at.
+    body = search_for(elsewhere, "Galactica 1980")
+    assert titled(body["did_you_mean_shows"])[:1] == [("Galactica 1980", 1980)]
+    assert elsewhere["modelled"] == []
+
+
+def test_a_year_still_reads_as_a_year_unless_the_whole_name_is_well_known(elsewhere):
+    body = search_for(elsewhere, "Chef 2014")
+    assert titled(body["did_you_mean"])[:1] == [("Chef", 2014)]
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({}, ("Wonder Woman 1984", None)),
+    ({"year": 2020}, ("Wonder Woman 1984", 2020)),   # a year sent alongside a title typed bare
+])
+def test_asking_for_a_film_we_lack_records_its_whole_name(elsewhere, kwargs, expected):
+    result = capture("Wonder Woman 1984", **kwargs)
+    assert (result["found"], result["added_to_wanted"]) == (False, True)
+    assert wanted_rows() == [expected]
+
+
+def test_the_shelf_answers_before_tmdb(elsewhere):
+    result = capture("Hamlet 2000")
+    assert (result["found"], titled(result["matches"])) == (True, [("Hamlet", 2000)])
+    assert wanted_rows() == []
