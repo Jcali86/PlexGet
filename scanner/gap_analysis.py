@@ -6,7 +6,7 @@ from config import config
 from db import Database
 from scanner import paths
 from scanner.libraries import keys_of_kind
-from scanner.wanted_search import plausible_year
+from scanner.wanted_search import fold, plausible_year
 
 _TMDB = config.get("tmdb") or {}
 TMDB_BASE = _TMDB.get("base_url") or "https://api.themoviedb.org/3"
@@ -218,18 +218,41 @@ def analyze_tv_show(show_name, owned_episodes, library, db, tmdb_id=None):
     return gap_count
 
 
-def _resolve_movie(title, year):
-    """TMDb's id for a held film, or None when the search finds nothing.
-
-    A title with no year takes TMDb's first answer, the same one the
-    collection is looked up from, so a bare 'Halloween.mkv' is whichever
-    Halloween TMDb ranks first.
-    """
+def _search_movie(title, year):
     params = {"query": title}
     if year:
         params["year"] = year
-    hits = _tmdb_get("/search/movie", params).get("results", [])
-    return hits[0]["id"] if hits else None
+    return _tmdb_get("/search/movie", params).get("results", [])
+
+
+def _named(hits, title, year):
+    """The id of the hit called exactly this, nearest the year; else None."""
+    same = [h for h in hits
+            if fold(title) in (fold(h.get("title")), fold(h.get("original_title")))]
+    if year:
+        apart = lambda h: abs((_year_of(h.get("release_date")) or 0) - year)
+        same = sorted((h for h in same if apart(h) <= 1), key=apart)
+    return same[0]["id"] if same else None
+
+
+def _resolve_movie(title, year):
+    """TMDb's id for a held film, or None when the search finds nothing.
+
+    TMDb ranks by popularity and its year filter takes any release, so its
+    first answer for Halloween from 2018 can be the 1978 film, re-released
+    that year. A hit with the file's own title and the nearest year is taken
+    over it. A title ending in a believable year, 'Class of 1999', is asked
+    for whole when nothing turns up under the shorter title. Failing both,
+    TMDb's first answer stands, so a bare 'Halloween.mkv' is whichever
+    Halloween TMDb ranks first.
+    """
+    hits = _search_movie(title, year)
+    found = _named(hits, title, year)
+    if found is None and year:
+        found = _named(_search_movie(f"{title} {year}", None), f"{title} {year}", None)
+    if found is None and hits:
+        found = hits[0]["id"]
+    return found
 
 
 def analyze_movie_franchise(movie_id, library, db, owned_ids, seen_collections,
@@ -243,15 +266,15 @@ def analyze_movie_franchise(movie_id, library, db, owned_ids, seen_collections,
     held (lowercased title, year) pairs TMDb could not find, which would
     otherwise be reported missing from their own collection.
 
-    seen_collections: collection ids already reported, added to here, so each
-    collection is fetched and reported once however many of it are held.
+    seen_collections: collection ids already reported, added to here once the
+    report is written, so each collection is reported once however many of it
+    are held, and one that failed is tried again by the next film in it.
     Returns count of gaps found.
     """
     details = _tmdb_get(f"/movie/{movie_id}")
     collection = details.get("belongs_to_collection")
     if not collection or collection["id"] in seen_collections:
         return 0
-    seen_collections.add(collection["id"])
 
     coll_data = _tmdb_get(f"/collection/{collection['id']}")
     coll_name = coll_data.get("name", "Unknown Collection")
@@ -275,6 +298,7 @@ def analyze_movie_franchise(movie_id, library, db, owned_ids, seen_collections,
         )
         gap_count += 1
 
+    seen_collections.add(collection["id"])
     return gap_count
 
 
@@ -417,37 +441,46 @@ def run_tv_analysis(db, libraries=None, limit=None):
 def run_movie_analysis(db, libraries=None, limit=None):
     """Analyze movie franchise gaps and alternate versions.
 
-    limit: if set, only analyze this many movies (for testing).
+    limit: if set, only analyze this many movies (for testing). Every held
+    film is still looked up on TMDb first, so it saves less than it used to.
     """
     if libraries is None:
         films = set(keys_of_kind("movie"))
         libraries = [l for l in db.get_non_manual_libraries() if l in films]
 
-    db.clear_gaps(gap_type="missing_franchise_entry")
-    db.clear_gaps(gap_type="alternate_version_available")
-
     total_franchise_gaps = 0
     total_alt_versions = 0
     movies_analyzed = 0
 
+    held = {}
     for lib in libraries:
         rows = db.get_all_media(lib)
-        parsed = sorted({_parse_movie_title(row["file_path"]) for row in rows},
-                        key=lambda x: (x[0], x[1] or 0))
-
+        held[lib] = sorted({_parse_movie_title(row["file_path"]) for row in rows},
+                           key=lambda x: (x[0], x[1] or 0))
         print(f"  [{lib}] {len(rows)} movies found")
 
-        # Every held film is looked up before any collection is judged, limit
-        # or no limit, because a part counts as held only if its id is among
-        # them. A limited run is therefore not much quicker than a full one.
-        ids, failed = {}, set()
-        for title, year in parsed:
+    # Every held film is looked up before any collection is judged, limit or
+    # no limit, because a part counts as held only if its id is among them. A
+    # lookup that fails is tried once more: left failed, the film falls back
+    # to the title match, which is how a held Saw III passes for Saw II.
+    ids, failed = {}, set()
+    for title, year in sorted(set().union(*held.values()), key=lambda x: (x[0], x[1] or 0)):
+        for attempt in (1, 2):
             try:
                 ids[(title, year)] = _resolve_movie(title, year)
+                break
             except Exception as e:
-                print(f"    {title}: ERROR - {e}")
-                failed.add((title, year))
-        owned_ids = {i for i in ids.values() if i}
+                if attempt == 2:
+                    print(f"    {title}: ERROR - {e}")
+                    failed.add((title, year))
+
+    # Cleared only now: the lookups take minutes on a large library, and the
+    # last report is better than an empty one while they run, or if they fail.
+    db.clear_gaps(gap_type="missing_franchise_entry")
+    db.clear_gaps(gap_type="alternate_version_available")
+
+    for lib, parsed in held.items():
+        owned_ids = {ids[f] for f in parsed if ids.get(f)}
         unresolved = {(t.lower(), y) for (t, y) in parsed if not ids.get((t, y))}
         seen_collections = set()
 

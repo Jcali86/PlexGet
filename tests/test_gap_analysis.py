@@ -12,6 +12,7 @@ import re
 import pytest
 
 from scanner import gap_analysis
+from scanner.wanted_search import fold
 
 
 def part(tmdb_id, title, release_date):
@@ -66,15 +67,16 @@ ALL_FILMS = [
 class Gaps:
     """Just enough of the database for the analysis to write gaps into."""
 
-    def __init__(self, files=()):
+    def __init__(self, files=(), log=None):
         self.files = [{"file_path": f} for f in files]
         self.rows = []
+        self.log = log if log is not None else []
 
     def get_all_media(self, library):
         return self.files
 
     def clear_gaps(self, gap_type=None):
-        pass
+        self.log.append("clear")
 
     def insert_gap(self, **fields):
         self.rows.append(fields)
@@ -84,27 +86,33 @@ class Gaps:
                       if g["gap_type"] == "missing_franchise_entry")
 
 
-def fold(title):
-    return re.sub(r"\s+", " ", title.replace(":", "")).strip().lower()
-
-
 @pytest.fixture
 def tmdb(monkeypatch):
     """TMDb as one collection, searched by title and, when given, year.
 
-    Returns the list of paths asked for, so a test can count them.
+    install() returns the list of paths asked for, a search logged as
+    '/search/movie?<query>'. answers replaces the results for a (query, year)
+    with these part ids in this order, the way TMDb ranks by popularity, and
+    each path in fail raises the first time it is asked for.
     """
     calls = []
 
-    def install(collection):
+    def install(collection, answers=None, fail=()):
         parts = {p["id"]: p for p in collection["parts"]}
+        failing = set(fail)
 
         def get(path, params=None):
-            calls.append(path)
+            asked = f"{path}?{params['query']}" if path == "/search/movie" else path
+            calls.append(asked)
+            if asked in failing:
+                failing.discard(asked)
+                raise RuntimeError(f"TMDb timed out: {asked}")
             if path == "/search/movie":
                 year = params.get("year")
+                if answers and (params["query"], year) in answers:
+                    return {"results": [parts[i] for i in answers[(params["query"], year)]]}
                 return {"results": [
-                    {"id": p["id"]} for p in collection["parts"]
+                    p for p in collection["parts"]
                     if fold(p["title"]) == fold(params["query"])
                     and (year is None or p["release_date"][:4] == str(year))]}
             movie = re.fullmatch(r"/movie/(\d+)(/release_dates|/keywords)?", path)
@@ -188,14 +196,66 @@ def test_a_title_ending_in_an_impossible_year_is_searched_for_whole(tmdb):
 
 
 def test_a_film_tmdb_cannot_find_still_hides_its_own_entry(tmdb):
-    tmdb(WONDER_WOMAN)
-    # Read as Wonder Woman from 1984, which TMDb has no film for.
-    db = Gaps([
-        "/media/Movies/Wonder.Woman.2017.1080p.BluRay.mkv",
-        "/media/Movies/Wonder Woman 1984.mkv",
-    ])
+    tmdb(SAW)
+    # Dated a year after TMDb's release, so no search finds it.
+    db = Gaps(["/media/Movies/Saw (2004).mkv", "/media/Movies/Saw III (2007).mkv"])
 
-    assert analyse(db) == []
+    assert analyse(db) == [
+        ("Saw II", "Release: 2005-10-28"),
+        ("Saw XI", "Release: TBA"),
+    ]
+
+
+def test_a_title_ending_in_a_believable_year_is_asked_for_whole(tmdb):
+    tmdb(WONDER_WOMAN)
+    db = Gaps(["/media/Movies/Wonder Woman 1984.mkv"])
+
+    assert analyse(db) == [("Wonder Woman", "Release: 2017-05-30")]
+
+
+def test_the_film_named_in_the_file_beats_tmdbs_first_answer(tmdb):
+    # The 1978 film was re-released in 2018 and is the more popular answer.
+    tmdb(HALLOWEEN, answers={("Halloween", 2018): [948, 424139]})
+    db = Gaps(["/media/Movies/Halloween (2018).mkv"])
+
+    assert analyse(db) == [
+        ("Halloween", "Release: 1978-10-25"),
+        ("Halloween Ends", "Release: 2022-10-12"),
+        ("Halloween Kills", "Release: 2021-10-14"),
+    ]
+
+
+def test_a_lookup_that_fails_once_is_tried_again(tmdb):
+    tmdb(SAW, fail=["/search/movie?Saw III"])
+    db = Gaps(["/media/Movies/Saw (2004).mkv", "/media/Movies/Saw III (2006).mkv"])
+
+    assert analyse(db) == [
+        ("Saw II", "Release: 2005-10-28"),
+        ("Saw XI", "Release: TBA"),
+    ]
+
+
+def test_a_collection_that_fails_once_is_reported_by_the_next_film(tmdb):
+    tmdb(SAW, fail=[f"/collection/{SAW['id']}"])
+    db = Gaps(["/media/Movies/Saw (2004).mkv", "/media/Movies/Saw III (2006).mkv"])
+
+    result = gap_analysis.run_movie_analysis(db, libraries=["Movies"])
+
+    assert db.missing() == [
+        ("Saw II", "Release: 2005-10-28"),
+        ("Saw XI", "Release: TBA"),
+    ]
+    assert result["movies_analyzed"] == 1
+
+
+def test_the_last_report_stands_until_every_film_is_looked_up(tmdb):
+    calls = tmdb(RESIDENT_EVIL)
+    db = Gaps(ALL_FILMS, log=calls)
+
+    analyse(db)
+
+    last_search = max(i for i, c in enumerate(calls) if c.startswith("/search/movie"))
+    assert calls.index("clear") > last_search
 
 
 @pytest.mark.parametrize("path, expected", [
