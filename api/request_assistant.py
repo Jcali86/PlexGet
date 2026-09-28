@@ -27,7 +27,7 @@ from api import persona
 from config import config
 from api import tmdb_lookup
 from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
-from scanner.wanted_search import same_year, without_article
+from scanner.wanted_search import same_year, shelf_reading, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -917,12 +917,14 @@ def search_by_title(request_text, token=None):
     naming a film should always work, even for someone who has used up their
     searching for the day.
     """
-    title, year = parse_query(request_text)
+    title, year, found = shelf_reading(request_text, lambda name: search_shows(name, token),
+                                       lambda name: title_lookup(name, token))
     if not title:
         return None
-    shows = same_year(search_shows(title, token), year)
+    shows, films = found or (search_shows(title, token), title_lookup(title, token))
+    shows = same_year(shows, year)
     certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = same_year(title_lookup(title, token), year)
+    exact = same_year(films, year)
     playable = [m for m in exact if not m["file_missing"]]
     # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
     # and answering a maybe with "yes, we have that" is how someone ends up
@@ -1074,10 +1076,11 @@ def search_by_person(request_text, token=None):
 
 def close_matches(request_text, token=None):
     """Films and series that might be what was meant, without being certain."""
-    title, year = parse_query(request_text)
+    title, year, found = shelf_reading(request_text, lambda name: title_lookup(name, token),
+                                       lambda name: search_shows(name, token))
     if not title:
         return []
-    films = title_lookup(title, token)
+    films, shows = found or (title_lookup(title, token), search_shows(title, token))
     fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
     if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
@@ -1087,7 +1090,7 @@ def close_matches(request_text, token=None):
         kept = {m.get("rating_key") for m in fitting}
         maybe += [m for m in films
                   if m.get("rating_key") not in kept and not m["file_missing"]]
-    maybe += [x for x in search_shows(title, token) if x["confidence"] == 1]
+    maybe += [x for x in shows if x["confidence"] == 1]
     if not maybe:
         maybe = misspelt(title, token)
     return maybe
