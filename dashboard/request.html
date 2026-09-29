@@ -146,8 +146,10 @@
     width: 17px; height: 17px; stroke: var(--dim); fill: none;
     stroke-width: 2; stroke-linecap: round; pointer-events: none;
   }
+  /* min-width: 0, or a text box will not shrink below the width of twenty
+     characters, and on a phone that pushes the button beside it off the edge. */
   input[type=text] {
-    flex: 1; padding: 13px 14px; font-size: 16px; color: var(--text);
+    flex: 1; min-width: 0; padding: 13px 14px; font-size: 16px; color: var(--text);
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   }
   .searchbar input[type=text] { padding-left: 40px; }
