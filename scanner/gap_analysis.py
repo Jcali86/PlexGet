@@ -6,6 +6,7 @@ from config import config
 from db import Database
 from scanner import paths
 from scanner.libraries import keys_of_kind
+from scanner.wanted_search import fold, plausible_year
 
 _TMDB = config.get("tmdb") or {}
 TMDB_BASE = _TMDB.get("base_url") or "https://api.themoviedb.org/3"
@@ -71,9 +72,9 @@ def _title_owned(tmdb_title, tmdb_original_title, tmdb_year, owned_films):
     agree, since otherwise it matches any title that contains a held one. With
     a year missing on either side the title alone decides.
 
-    A title that ends in a number, 'Blade Runner 2049.mkv', has that number
-    read as its year, so the title and the year together are tried as a title
-    before the years are allowed to rule anything out.
+    A title that ends in a believable year, 'Wonder Woman 1984.mkv', has that
+    number read as its year, so the title and the year together are tried as a
+    title before the years are allowed to rule anything out.
     """
     candidates = [tmdb_title]
     if tmdb_original_title:
@@ -147,6 +148,10 @@ def _parse_movie_title(file_path):
     # The year in brackets is Plex's own naming, and the importer's. Without
     # it the franchise check has no year to tell a remake by.
     year_match = re.search(r"[\s\.]\(?(\d{4})\)?$", name)
+    # 'Blade Runner 2049' ends in a number no film has come out in, so it is
+    # the title and it is what TMDb has to be asked for.
+    if year_match and not plausible_year(int(year_match.group(1))):
+        year_match = None
     year = int(year_match.group(1)) if year_match else None
     if year_match:
         name = name[:year_match.start()].strip()
@@ -213,69 +218,96 @@ def analyze_tv_show(show_name, owned_episodes, library, db, tmdb_id=None):
     return gap_count
 
 
-def analyze_movie_franchise(title, year, library, db, owned_films=None):
-    """Check if a movie belongs to a collection and find missing entries.
-
-    owned_films: set of (lowercased title, year or None) pairs
-    Returns count of gaps found.
-    """
-    gap_count = 0
+def _search_movie(title, year):
     params = {"query": title}
     if year:
         params["year"] = year
-    results = _tmdb_get("/search/movie", params)
-    hits = results.get("results", [])
-    if not hits:
-        return 0
+    return _tmdb_get("/search/movie", params).get("results", [])
 
-    movie = hits[0]
-    movie_id = movie["id"]
 
-    # Get full details for collection info
+def _named(hits, title, year):
+    """The id of the hit called exactly this, nearest the year; else None."""
+    same = [h for h in hits
+            if fold(title) in (fold(h.get("title")), fold(h.get("original_title")))]
+    if year:
+        apart = lambda h: abs((_year_of(h.get("release_date")) or 0) - year)
+        same = sorted((h for h in same if apart(h) <= 1), key=apart)
+    return same[0]["id"] if same else None
+
+
+def _resolve_movie(title, year):
+    """TMDb's id for a held film, or None when the search finds nothing.
+
+    TMDb ranks by popularity and its year filter takes any release, so its
+    first answer for Halloween from 2018 can be the 1978 film, re-released
+    that year. A hit with the file's own title and the nearest year is taken
+    over it. A title ending in a believable year, 'Class of 1999', is asked
+    for whole when nothing turns up under the shorter title. Failing both,
+    TMDb's first answer stands, so a bare 'Halloween.mkv' is whichever
+    Halloween TMDb ranks first.
+    """
+    hits = _search_movie(title, year)
+    found = _named(hits, title, year)
+    if found is None and year:
+        found = _named(_search_movie(f"{title} {year}", None), f"{title} {year}", None)
+    if found is None and hits:
+        found = hits[0]["id"]
+    return found
+
+
+def analyze_movie_franchise(movie_id, library, db, owned_ids, seen_collections,
+                            unresolved=None):
+    """Report the parts of this film's collection that are not held.
+
+    A part is held when its TMDb id is one of owned_ids. Titles cannot do this
+    job: a sequel's title contains the first film's, and a remake's is the
+    same, so no fuzzy threshold separates Saw from Saw II or one Halloween
+    from another. The title match survives only for films in unresolved, the
+    held (lowercased title, year) pairs TMDb could not find, which would
+    otherwise be reported missing from their own collection.
+
+    seen_collections: collection ids already reported, added to here once the
+    report is written, so each collection is reported once however many of it
+    are held, and one that failed is tried again by the next film in it.
+    Returns count of gaps found.
+    """
     details = _tmdb_get(f"/movie/{movie_id}")
     collection = details.get("belongs_to_collection")
-    if not collection:
+    if not collection or collection["id"] in seen_collections:
         return 0
 
-    # Fetch collection
     coll_data = _tmdb_get(f"/collection/{collection['id']}")
     coll_name = coll_data.get("name", "Unknown Collection")
 
+    gap_count = 0
     for part in coll_data.get("parts", []):
-        part_title = part["title"].lower()
-        part_orig = (part.get("original_title") or "").lower()
-        part_year = _year_of(part.get("release_date"))
-        if owned_films and _title_owned(part_title, part_orig, part_year, owned_films):
+        if part["id"] in owned_ids:
             continue
-        # Not in our collection of owned titles
+        if unresolved and _title_owned(part["title"].lower(),
+                                       (part.get("original_title") or "").lower(),
+                                       _year_of(part.get("release_date")),
+                                       unresolved):
+            continue
         db.insert_gap(
             title=part["title"],
             library=library,
             gap_type="missing_franchise_entry",
             tmdb_id=part["id"],
             collection_name=coll_name,
-            detail=f"Release: {part.get('release_date', 'TBA')}",
+            detail=f"Release: {part.get('release_date') or 'TBA'}",
         )
         gap_count += 1
 
+    seen_collections.add(collection["id"])
     return gap_count
 
 
-def analyze_alternate_versions(title, year, library, db):
+def analyze_alternate_versions(title, movie_id, library, db):
     """Check for alternate versions (IMAX, Director's Cut, etc.).
 
     Returns count of findings.
     """
     gap_count = 0
-    params = {"query": title}
-    if year:
-        params["year"] = year
-    results = _tmdb_get("/search/movie", params)
-    hits = results.get("results", [])
-    if not hits:
-        return 0
-
-    movie_id = hits[0]["id"]
 
     # Check release_dates for different release types.
     #
@@ -409,41 +441,64 @@ def run_tv_analysis(db, libraries=None, limit=None):
 def run_movie_analysis(db, libraries=None, limit=None):
     """Analyze movie franchise gaps and alternate versions.
 
-    limit: if set, only analyze this many movies (for testing).
+    limit: if set, only analyze this many movies (for testing). Every held
+    film is still looked up on TMDb first, so it saves less than it used to.
     """
     if libraries is None:
         films = set(keys_of_kind("movie"))
         libraries = [l for l in db.get_non_manual_libraries() if l in films]
 
-    db.clear_gaps(gap_type="missing_franchise_entry")
-    db.clear_gaps(gap_type="alternate_version_available")
-
     total_franchise_gaps = 0
     total_alt_versions = 0
     movies_analyzed = 0
 
+    held = {}
     for lib in libraries:
         rows = db.get_all_media(lib)
+        held[lib] = sorted({_parse_movie_title(row["file_path"]) for row in rows},
+                           key=lambda x: (x[0], x[1] or 0))
+        print(f"  [{lib}] {len(rows)} movies found")
 
-        # The year travels with each title so that a collection part sharing
-        # a held film's name, a remake or a reboot, is still seen as missing.
-        owned_films = set()
-        parsed = []
-        for row in rows:
-            title, year = _parse_movie_title(row["file_path"])
-            owned_films.add((title.lower(), year))
-            parsed.append((title, year))
+    # Every held film is looked up before any collection is judged, limit or
+    # no limit, because a part counts as held only if its id is among them. A
+    # lookup that fails is tried once more: left failed, the film falls back
+    # to the title match, which is how a held Saw III passes for Saw II.
+    ids, failed = {}, set()
+    for title, year in sorted(set().union(*held.values()), key=lambda x: (x[0], x[1] or 0)):
+        for attempt in (1, 2):
+            try:
+                ids[(title, year)] = _resolve_movie(title, year)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"    {title}: ERROR - {e}")
+                    failed.add((title, year))
 
-        print(f"  [{lib}] {len(parsed)} movies found")
+    # Cleared only now: the lookups take minutes on a large library, and the
+    # last report is better than an empty one while they run, or if they fail.
+    db.clear_gaps(gap_type="missing_franchise_entry")
+    db.clear_gaps(gap_type="alternate_version_available")
 
-        for i, (title, year) in enumerate(sorted(set(parsed), key=lambda x: (x[0], x[1] or 0))):
+    for lib, parsed in held.items():
+        owned_ids = {ids[f] for f in parsed if ids.get(f)}
+        unresolved = {(t.lower(), y) for (t, y) in parsed if not ids.get((t, y))}
+        seen_collections = set()
+
+        for i, (title, year) in enumerate(parsed):
             if limit and i >= limit:
                 break
+            if (title, year) in failed:
+                continue
+            movie_id = ids[(title, year)]
+            if not movie_id:
+                movies_analyzed += 1
+                continue
             try:
-                fgaps = analyze_movie_franchise(title, year, lib, db, owned_films)
+                fgaps = analyze_movie_franchise(movie_id, lib, db, owned_ids,
+                                                seen_collections, unresolved)
                 total_franchise_gaps += fgaps
 
-                agaps = analyze_alternate_versions(title, year, lib, db)
+                agaps = analyze_alternate_versions(title, movie_id, lib, db)
                 total_alt_versions += agaps
 
                 movies_analyzed += 1
