@@ -555,6 +555,20 @@ def named_exactly(name, matches):
     return any(same_name(name, m.get("title")) for m in matches)
 
 
+def at_once(*jobs):
+    """Run each of these at the same time and return their answers in order.
+
+    A title search asks the series libraries and the film libraries, and each
+    is a request to Plex of its own. Asked one after the other they cost the
+    sum of the two waits rather than the longer of them.
+    """
+    if len(jobs) == 1:
+        return [jobs[0]()]
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = [pool.submit(job) for job in jobs]
+        return [future.result() for future in futures]
+
+
 def name_or_year(query, *lookups):
     """(title, year, found): what was asked for, a bare trailing year read both ways.
 
@@ -570,7 +584,7 @@ def name_or_year(query, *lookups):
     title, year, source = split_query(query)
     if source == "trailing":
         whole = f"{title} {year}"
-        found = [lookup(whole) for lookup in lookups]
+        found = at_once(*[lambda lookup=lookup: lookup(whole) for lookup in lookups])
         if any(named_exactly(whole, matches) for matches in found):
             return whole, None, found
     return title, year, None

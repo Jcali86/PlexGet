@@ -93,6 +93,22 @@ def test_a_title_the_library_lacks_is_answered_without_asking_plex(plex):
     assert plex.searches() == []
 
 
+def test_a_title_search_asks_the_series_and_film_libraries_at_once(plex):
+    from api import request_assistant
+
+    # Not synced, so the index cannot answer and Plex is asked. Each library
+    # waits here for the other: asked one after the other, neither arrives.
+    movies, _kids, tv = shelves(plex)
+    both = threading.Barrier(2, timeout=2)
+    for section in (movies, tv):
+        def meet(*args, plain=section.search, **kwargs):
+            both.wait()
+            return plain(*args, **kwargs)
+        section.search = meet
+    found = request_assistant.search_by_title("Blackadder")
+    assert titles(found["shows"]) == ["Blackadder"]
+
+
 def test_a_title_it_holds_is_confirmed_only_where_it_is_held(plex):
     synced(plex)
     assert titles(wanted_search.search_plex("resident evil")) == ["Resident Evil", "Resident Evil: Afterlife"]

@@ -26,7 +26,7 @@ from api import ai
 from api import persona
 from config import config
 from api import tmdb_lookup
-from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
+from scanner.wanted_search import PlexUnavailable, at_once, availability, fold, listed, parse_query, query_hint
 from scanner.wanted_search import answers, name_or_year, same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
@@ -921,7 +921,8 @@ def search_by_title(request_text, token=None):
                                       lambda name: title_lookup(name, token))
     if not title:
         return None
-    shows, films = found or (search_shows(title, token), title_lookup(title, token))
+    shows, films = found or at_once(lambda: search_shows(title, token),
+                                    lambda: title_lookup(title, token))
     # Only certainty claims a hit, and only of the year named - the same rule
     # as asking for it (answers()). "Taxi" turning up "Taxi Driver" is a
     # maybe, and Wicked: For Good (2025) is not Wicked (2024); answering either
@@ -1080,7 +1081,8 @@ def close_matches(request_text, token=None):
                                       lambda name: search_shows(name, token))
     if not title:
         return []
-    films, shows = found or (title_lookup(title, token), search_shows(title, token))
+    films, shows = found or at_once(lambda: title_lookup(title, token),
+                                    lambda: search_shows(title, token))
     fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
     if year and not any(not m["file_missing"] for m in answers(films, title, year)):
