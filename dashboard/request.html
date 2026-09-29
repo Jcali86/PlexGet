@@ -1809,9 +1809,9 @@ async function find(query) {
   document.getElementById('hero').innerHTML = '';
   document.getElementById('shelf').innerHTML = ''; shelfTurn++;
   const stopThinking = startThinking(query, isMoodish(query) ? 'mood' : 'title');
-  let d;
+  let d, res = null;
   try {
-    const res = await fetch('/request/search', {
+    res = await fetch('/request/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({query,
                             include_missing: document.getElementById('alsomissing').checked}),
@@ -1828,6 +1828,18 @@ async function find(query) {
     }
   } catch (e) {
     stopThinking();
+    if (res) {
+      // An answer came, just not one the page can read: the server's own
+      // error page, or a proxy in front of it giving up on a search that ran
+      // too long. Calling that a dropped connection sent people looking at
+      // their signal when the thing to look at was the server.
+      out.innerHTML = `<div class="card bad"><b>PlexGet could not finish that search${
+          res.ok ? '' : ` (error ${res.status})`}.</b>
+        <div class="sub">The server ran into a problem or took too long. Try again; if it
+          keeps happening, the server's log will say why.</div>
+        <button class="primary" data-act="look" data-value="${esc(query)}">Search again</button></div>`;
+      return;
+    }
     // A failed fetch on iOS reads "Load failed", which explains nothing. It
     // is nearly always the connection dying under a slow answer - and the
     // answer that took too long is cached now, so the retry is quick. Say
