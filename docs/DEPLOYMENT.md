@@ -101,10 +101,11 @@ journalctl -u plexget -f
 
 There is no log file to rotate — everything goes to the journal.
 
-To pick up code changes:
+To pick up code changes (and see [Updating](#updating) for how to tell it
+worked):
 
 ```bash
-sudo -u plexget git -C /opt/plexget pull
+sudo -u plexget git -C /opt/plexget pull --ff-only
 sudo -u plexget /opt/plexget/venv/bin/pip install -r /opt/plexget/requirements.txt
 sudo systemctl restart plexget
 ```
@@ -442,6 +443,47 @@ other job:
 
 ---
 
+## Updating
+
+However it runs, an update is the same four steps, in the folder the running
+app was started from - which is not always the folder you last cloned into.
+`systemctl cat plexget` or the plist names it.
+
+```bash
+git status                 # must list no modified files, and be on main
+git pull --ff-only
+venv/bin/pip install -r requirements.txt    # not in Docker: the build does it
+```
+
+Then restart it the way it was started: `systemctl restart`, `launchctl
+kickstart -k`, `docker compose up -d --build`, or Ctrl-C and `python main.py`
+again. A pull on its own is not enough. The household page is read from disk
+on every request, so it changes at once, but the Python behind it is the
+version that was loaded at start - a page with the new buttons giving the old
+answers is a server that was pulled and never restarted.
+
+**Check the build.** `/health` names the build the running process loaded:
+
+```bash
+curl -s localhost:5050/health
+```
+
+It is the one reliable answer to "is it running the new code?". Open it on a
+phone as well, at the same address the app uses; the service worker never
+answers for it, so what it says is the server.
+
+`config.yaml`, the database and `data/` are gitignored, so a pull never touches
+them. New tables and columns are added to the database when the app starts, and
+sessions carry over, so nobody signs in again. A config written for an older
+version keeps working: every block added since has a default, the library index
+included.
+
+If `git status` lists files you have changed, the pull stops rather than
+overwrite them. `git stash` puts them aside; `git stash pop` brings them back
+afterwards, if you still want them.
+
+---
+
 ## Backups
 
 Three things, and they are all small:
@@ -484,6 +526,12 @@ the project directory, or `ProtectSystem=strict` is on without a matching
 app, not merely an open page. Check `/push/key` returns something, and that the
 person actually pressed the bell.
 
-**The page has not changed after a deploy** — the service worker caches the
-shell. A hard reload, or removing the home-screen app and adding it again, gets
-a fresh copy.
+**The page has not changed after a deploy** — look at `/health` first. An old
+build there is the server, not the phone: see [Updating](#updating). A new
+build there means the phone painted the copy of the page its service worker
+holds, which it does only when the server takes more than about a second to
+answer; the fresh copy is saved for the next launch as it arrives. An installed
+home-screen app has no reload and is not reloaded by switching back to it, so
+close it from the app switcher, open it, give it a few seconds, and do the same
+once more. Removing the home-screen app and adding it again is the last resort:
+it throws away that app's sign-in, so add it from Safari while signed in there.
