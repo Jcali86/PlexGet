@@ -1166,9 +1166,14 @@ def names_a_film(request_text):
         return (guess.get("popularity") or 0) >= 1
 
     hint = query_hint(request_text)
-    if any(same(g) for g in tmdb_lookup.suggest(title, hint=hint, year=year)):
-        return True
-    return any(same(g) for g in tmdb_lookup.suggest_shows(title, hint=hint))
+    # Films and series are two searches at TMDb, so both go at once rather
+    # than the second waiting on the first to miss. A title that turns out to
+    # be missing has its series searched again straight after, for the page,
+    # and finds this answer cached.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        films = pool.submit(tmdb_lookup.suggest, title, hint=hint, year=year)
+        shows = pool.submit(tmdb_lookup.suggest_shows, title, hint=hint)
+        return any(same(g) for g in films.result()) or any(same(g) for g in shows.result())
 
 
 def title_missing(request_text):

@@ -11,6 +11,7 @@ here fetches anything.
 import datetime
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from thefuzz import fuzz
@@ -295,7 +296,12 @@ def well_known(title):
     be called "Chef 2014" is no reason to stop reading 2014 as a year. The bar
     is the one names_a_film sets for a bare name.
     """
-    return [g for g in suggest(title) + suggest_shows(title) if (g.get("popularity") or 0) >= 1]
+    # Two searches at TMDb, asked together: this is on the way to answering
+    # somebody who typed a number, and the second need not wait on the first.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        films, shows = pool.submit(suggest, title), pool.submit(suggest_shows, title)
+        found = films.result() + shows.result()
+    return [g for g in found if (g.get("popularity") or 0) >= 1]
 
 
 def seasons_that_exist(title, year=None):

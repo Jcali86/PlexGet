@@ -354,6 +354,27 @@ def test_a_mood_is_not_mistaken_for_a_film_of_the_same_name(monkeypatch):
     assert request_assistant.names_a_film("something to make me laugh") is False
 
 
+def test_tmdb_is_asked_for_films_and_series_at_once(monkeypatch):
+    from api import request_assistant, tmdb_lookup
+
+    # Each search waits here for the other: asked one after the other, neither arrives.
+    both = threading.Barrier(2, timeout=2)
+
+    def films(title, hint="", year=None, limit=5):
+        both.wait()
+        return [{"tmdb_id": 9001, "title": "The Odyssey", "year": 2026, "popularity": 150.0,
+                 "original_title": "The Odyssey"}]
+
+    def shows(title, hint="", limit=5):
+        both.wait()
+        return []
+
+    monkeypatch.setattr(tmdb_lookup, "suggest", films)
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", shows)
+    assert request_assistant.names_a_film("The odyssey") is True
+    assert [g["title"] for g in tmdb_lookup.well_known("The Odyssey")] == ["The Odyssey"]
+
+
 def test_a_mood_search_after_a_title_miss_does_not_search_by_title_again(monkeypatch):
     from api import request_assistant
 
