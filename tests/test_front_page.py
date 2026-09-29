@@ -22,3 +22,18 @@ def test_the_shelf_asks_plex_once_per_row_and_never_once_per_poster(plex):
     # Three film rows and one of series: one search each, and nothing else.
     assert [call[0] for call in plex.calls] == ["search"] * 4
 
+
+def test_playlist_counts_come_from_the_listing_not_a_request_per_list(monkeypatch):
+    from types import SimpleNamespace
+
+    from api import user_library
+
+    class Listed:
+        playlistType, leafCount, title = "video", 3, "Friday Films"
+
+        def items(self):
+            raise AssertionError("a request to Plex for every playlist")
+
+    monkeypatch.setattr(user_library, "as_user",
+                        lambda token: SimpleNamespace(playlists=lambda: [Listed()]))
+    assert user_library.playlists_for("someone") == [{"title": "Friday Films", "items": 3}]

@@ -44,10 +44,15 @@ def playlists_for(token):
     for playlist in server.playlists():
         if getattr(playlist, "playlistType", "") != "video":
             continue
-        try:
-            count = len(playlist.items())
-        except Exception:
-            count = 0
+        # The listing already says how many each list holds. Fetching the
+        # items as well was one more request to Plex per playlist, every one
+        # of them before the page's list picker could be filled.
+        count = playlist.leafCount
+        if count is None:
+            try:
+                count = len(playlist.items())
+            except Exception:
+                count = 0
         out.append({"title": playlist.title, "items": count})
     return sorted(out, key=lambda p: p["title"].lower())
 
