@@ -1447,12 +1447,18 @@ def showcase(per_row=14, token=None):
     they can actually press play on tonight.
     """
     rows = []
+    # Asked once for all three film rows: each ask is a request to Plex, and
+    # the rows are fetched one after another while the front page waits.
+    films_in = movie_sections(token)
 
     def collect(getter):
         found, seen = [], set()
-        for section in movie_sections(token):
+        for section in films_in:
             try:
-                items = getter(section)
+                # listed(): a film listed without a tagline, backdrop or rating
+                # otherwise makes plexapi fetch it again in full, one request
+                # per poster, before the front page can show any of them.
+                items = listed(getter(section))
             except Exception:
                 continue
             for movie in items:
@@ -1486,7 +1492,7 @@ def showcase(per_row=14, token=None):
     seen_shows = set()
     for section in show_sections(token):
         try:
-            items = section.search(sort="addedAt:desc", maxresults=per_row)
+            items = listed(section.search(sort="addedAt:desc", maxresults=per_row))
         except Exception:
             continue
         for item in items:
