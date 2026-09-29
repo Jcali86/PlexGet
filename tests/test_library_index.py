@@ -1,6 +1,7 @@
 """The library index, and the searches that ask it before they ask Plex."""
 
 import json
+import threading
 
 import pytest
 
@@ -285,6 +286,33 @@ def test_a_film_we_lack_is_answered_without_the_model(plex, client, member, monk
     assert body["matches"] == []
     assert body["did_you_mean"][0]["release_state"] == "cinema"
     assert titles(body["close"]) == ["Resident Evil", "Resident Evil: Afterlife"]
+
+
+def test_suggestions_are_checked_together_while_the_index_cannot_answer(plex, client, member, monkeypatch):
+    from api import routes, tmdb_lookup
+
+    shelves(plex)   # never synced, so every suggestion is a title search of its own
+    lacking = [{"tmdb_id": 7000 + n, "title": f"Not Held {n}", "year": 2010 + n} for n in range(4)]
+    monkeypatch.setattr(tmdb_lookup, "suggest", lambda *a, **k: [])
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", lambda *a, **k: [])
+    monkeypatch.setattr(tmdb_lookup, "genre_ids", lambda: {"comedy": 35})
+    monkeypatch.setattr(tmdb_lookup, "discover", lambda filters, exclude_titles=(), limit=8: list(lacking))
+
+    # Each check waits here for the others: asked one at a time, none arrives.
+    together = threading.Barrier(len(lacking), timeout=2)
+    plain = routes.search_by_title
+
+    def search_by_title(text, token=None):
+        if text.startswith("Not Held"):
+            together.wait()
+            return None
+        return plain(text, token)
+
+    monkeypatch.setattr(routes, "search_by_title", search_by_title)
+    response = client.post("/request/search", json={"query": "something funny", "include_missing": True})
+    body = response.get_json()
+    assert response.status_code == 200, body
+    assert titles(body["missing"]) == [f"Not Held {n}" for n in range(4)]
 
 
 def test_a_mood_is_not_mistaken_for_a_film_of_the_same_name(monkeypatch):

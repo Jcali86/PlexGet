@@ -3,7 +3,9 @@ from pathlib import Path
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from plexapi.exceptions import Unauthorized
@@ -1398,23 +1400,33 @@ def create_app():
         verdicts = held_verdicts(candidates or [], token, as_shows)
         if verdicts is not None:
             return [item for item, held in zip(candidates, verdicts) if not held]
-        keep = []
-        for item in candidates or []:
+
+        gone = threading.Event()
+
+        def held(item):
+            if gone.is_set():
+                return False
             title, year = item.get("title"), item.get("year")
             try:
                 if as_shows:
-                    if search_shows(title, token):
-                        continue
-                elif search_by_title(f"{title} ({year})" if year else title, token):
-                    continue
+                    return bool(search_shows(title, token))
+                return bool(search_by_title(f"{title} ({year})" if year else title, token))
             except PlexUnavailable:
                 # Plex went away mid-check. Offering a film somebody may
                 # already own beats failing the search, and asking for one
-                # twice is caught on the wanted list anyway.
-                keep.extend(candidates[len(keep):])
-                break
-            keep.append(item)
-        return keep
+                # twice is caught on the wanted list anyway. The rest are not
+                # asked, so a dead Plex is waited on once, not once each.
+                gone.set()
+                return False
+
+        # Only reached while the index cannot answer - the first minutes after
+        # a restart, or a sync that failed - and then each suggestion is a
+        # title search of its own. Eight of them one after another was the
+        # slowest part of ticking "include ones we haven't got"; a few at a
+        # time keeps that to two rounds without piling every one onto Plex.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            verdicts = list(pool.map(held, candidates or []))
+        return [item for item, owned in zip(candidates or [], verdicts) if not owned]
 
     @app.route("/request/search", methods=["POST"])
     def request_search():
