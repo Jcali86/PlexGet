@@ -498,6 +498,16 @@
     line-height: 1.3; max-height: 2.6em; overflow: hidden;
   }
   .poster:active img { outline: 2px solid var(--accent); }
+  /* Held in the shelf's place while Plex is asked, so the space below the card
+     reads as on its way rather than as the page having nothing to show. */
+  .shelfwait .reel { overflow: hidden; }
+  .shelfwait i {
+    flex: 0 0 auto; width: 96px; height: 144px; border-radius: var(--poster-radius);
+    background: var(--surface2); animation: shelfpulse 1.4s ease-in-out infinite;
+  }
+  @keyframes shelfpulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .shelfwait i { animation: none; } }
+  .shelfnote { margin: 22px 0 4px; font-size: 13.5px; color: var(--dim); }
 
   .show {
     display: flex; gap: 12px; align-items: flex-start; padding: 11px;
@@ -1345,6 +1355,7 @@ const ACTIONS = {
   bell:  () => openBell(),
   tournext: () => nextTourStep(),
   tourskip: () => endTour(),
+  shelf: () => showShelf(),
   tour:  () => { document.getElementById('help').close(); startTour(); },
   skin:  (btn) => applySkin(btn.dataset.value, true),
   unlook: async (btn) => {
@@ -1796,7 +1807,7 @@ async function find(query) {
   picked.clear(); refreshBar();
   clearInterval(heroTimer); clearInterval(driftTimer);
   document.getElementById('hero').innerHTML = '';
-  document.getElementById('shelf').innerHTML = '';
+  document.getElementById('shelf').innerHTML = ''; shelfTurn++;
   const stopThinking = startThinking(query, isMoodish(query) ? 'mood' : 'title');
   let d;
   try {
@@ -2116,7 +2127,7 @@ let giftFilms = [];
 async function showGift() {
   clearInterval(heroTimer); clearInterval(driftTimer); clearInterval(thinkingTimer);
   document.getElementById('hero').innerHTML = '';
-  document.getElementById('shelf').innerHTML = '';
+  document.getElementById('shelf').innerHTML = ''; shelfTurn++;
   picked.clear(); refreshBar();
   giftFor = ''; giftFilms = [];
 
@@ -2993,15 +3004,41 @@ function startDrift(reel) {
   }, 40);
 }
 
+// Which visit to the front page the shelf belongs to. A search or the gift page
+// clears the shelf, and an answer arriving after that must not paint posters
+// and a backdrop underneath whatever replaced it.
+let shelfTurn = 0;
+const SHELF_WAITING = `<div class="row shelfwait" aria-hidden="true"><h4>On the shelf</h4>
+  <div class="reel">${'<i></i>'.repeat(4)}</div></div>`;
+
 async function showShelf() {
+  const turn = ++shelfTurn;
+  const shelf = document.getElementById('shelf');
+  shelf.innerHTML = SHELF_WAITING;
+  // Bounded: a Plex that has stopped answering holds the request for as long
+  // as the server's own timeouts allow, and a placeholder that never resolves
+  // is the blank space again by another name.
+  const patience = new AbortController();
+  const timer = setTimeout(() => patience.abort(), 40000);
+  let d = null;
   try {
-    const d = await (await fetch('/request/showcase')).json();
-    if (!d.rows || !d.rows.length) return;
-    document.getElementById('shelf').innerHTML = d.rows.map(posterRow).join('');
-    startHero(d.rows[0].films);
-    const first = document.querySelector('#shelf .reel');
-    if (first) startDrift(first);
-  } catch (e) { /* the shelf is a bonus, never a blocker */ }
+    d = await (await fetch('/request/showcase', {signal: patience.signal})).json();
+  } catch (e) { /* said below, in the shelf's own space */ }
+  finally { clearTimeout(timer); }
+  if (turn !== shelfTurn) return;
+  if (!d || !d.rows || !d.rows.length) {
+    // Still a bonus, never a blocker - but said, because an empty space here
+    // cannot be told apart from a page still loading. A library with nothing
+    // to show and no complaint simply leaves the space empty.
+    shelf.innerHTML = d && d.rows && !d.error ? '' : `<div class="shelfnote">
+        The posters did not come through from Plex just now.
+        <button class="linkbtn" data-act="shelf" type="button">Try again</button></div>`;
+    return;
+  }
+  shelf.innerHTML = d.rows.map(posterRow).join('');
+  startHero(d.rows[0].films);
+  const first = document.querySelector('#shelf .reel');
+  if (first) startDrift(first);
 }
 
 async function askAnnouncement() {
