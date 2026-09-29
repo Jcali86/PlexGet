@@ -94,14 +94,24 @@
     background: var(--top); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 10;
   }
+  /* The row up here has to fit a phone on one line, and the door out is the
+     last thing in it, so it is the first thing a crowded row pushes off the
+     edge. The name of the person signed in gives way first, with an
+     ellipsis; a long app name gives way only past the 222px the owner's five
+     buttons, their gaps and the header gap need. */
   header h1 {
     margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .3px;
     cursor: pointer; user-select: none;
+    flex: none; max-width: calc(100% - 222px);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   header h1:active { opacity: .7; }
   header h1:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
   header h1 span { color: var(--accent); }
-  .who { margin-left: auto; font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .who { margin-left: auto; min-width: 0; font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .who .me { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Squeezed to nothing, the name leaves a stray dot of ellipsis. */
+  @media (max-width: 340px) { .who .me { display: none; } }
   /* Every control up here is one fixed circle: emoji have wildly different
      widths, and "Sign out" as words was a two-line box among a row of neat
      little buttons. Filled circles are the look the owner chose to keep from
@@ -2497,7 +2507,7 @@ async function testPush(btn) {
 
 // ---- sign in ----
 function showSignedIn() {
-  whoami.innerHTML = `${esc(me.username)}
+  whoami.innerHTML = `<span class="me">${esc(me.username)}</span>
     ${me.role === 'owner'
       ? '<button class="icon-btn" data-act="announce" title="Tell the household">\u{1F4E3}</button>' : ''}
     <button class="icon-btn" data-act="wanted" title="The wanted list">📋</button>
