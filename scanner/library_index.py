@@ -609,27 +609,45 @@ def recent_sync(section_keys=None):
     server = _owner_server()
     targets = [s for s in server.library.sections() if str(s.key) in wanted and str(s.key) in known]
 
-    def look(section):
+    def newest(section):
         kind = known[str(section.key)]
-        rows = [_row(item._data, kind, section.key, generation)
+        return [_row(item._data, kind, section.key, generation)
                 for item in _listing(section, kind, sort="addedAt:desc", limit=RECENT_WINDOW)
                 if item._data.attrib.get("ratingKey")]
-        pairs = []
-        if kind == "show":
-            # A new season of a series already here does not make the series
-            # itself recent; its newest episodes do.
-            for episode in _listing(section, "episode", sort="addedAt:desc", limit=RECENT_WINDOW):
-                attrib = episode._data.attrib
-                show, number = attrib.get("grandparentRatingKey"), _int(attrib.get("parentIndex"))
-                if show and number is not None:
-                    pairs.append((str(show), number))
-        return str(section.key), rows, pairs
 
+    def newest_episodes(section):
+        # A new season of a series already here does not make the series
+        # itself recent; its newest episodes do.
+        pairs = []
+        for episode in _listing(section, "episode", sort="addedAt:desc", limit=RECENT_WINDOW):
+            attrib = episode._data.attrib
+            show, number = attrib.get("grandparentRatingKey"), _int(attrib.get("parentIndex"))
+            if show and number is not None:
+                pairs.append((str(show), number))
+        return pairs
+
+    # Every listing is a request of its own, so all of them go at once. A TV
+    # library's two used to follow one another, and a search that found the
+    # look stale waited for both before it could say anything.
+    jobs = [(section, False) for section in targets]
+    jobs += [(section, True) for section in targets if known[str(section.key)] == "show"]
+
+    def look(job):
+        section, episodes = job
+        return newest_episodes(section) if episodes else newest(section)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(jobs), 8))) as pool:
+        answers = dict(zip([(str(section.key), episodes) for section, episodes in jobs],
+                           pool.map(_quietly(look), jobs)))
     looked = []
-    with ThreadPoolExecutor(max_workers=max(1, min(len(targets), 8))) as pool:
-        for outcome in pool.map(_quietly(look), targets):
-            if outcome is not None:
-                looked.append(outcome)
+    for section in targets:
+        key = str(section.key)
+        rows = answers.get((key, False))
+        pairs = answers.get((key, True)) if known[key] == "show" else []
+        # Half a look is no look: a library counts only when every listing
+        # asked of it came back.
+        if rows is not None and pairs is not None:
+            looked.append((key, rows, pairs))
 
     now = time.time()
     arrived = False
@@ -789,13 +807,21 @@ def trusted(section_keys, kind):
     if not _recent_lock.acquire(timeout=10):
         return False
     try:
+        cutoff = time.time() - CONFIRM_SECONDS
         with _connect() as conn:
             fresh = {r["section_key"] for r in conn.execute(
                 f"SELECT section_key FROM sections WHERE section_key IN ({_marks(stale)}) "
-                f"AND recent_checked_at > ?", stale + [time.time() - CONFIRM_SECONDS])}
+                f"AND recent_checked_at > ?", stale + [cutoff])}
+            # The other kind's libraries come along when theirs is as old. A
+            # title search asks about series and then about films, and each
+            # found the look stale in turn: two waits on Plex, one after the
+            # other, before either had been searched.
+            also = [r["section_key"] for r in conn.execute(
+                "SELECT section_key FROM sections WHERE recent_checked_at IS NULL "
+                "OR recent_checked_at <= ?", (cutoff,)) if r["section_key"] not in stale]
         remaining = [key for key in stale if key not in fresh]
         if remaining:
-            looked = recent_sync(remaining)
+            looked = recent_sync(remaining + also)
             if set(remaining) - looked:
                 return False
         return True

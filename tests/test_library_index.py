@@ -125,6 +125,19 @@ def test_something_added_a_moment_ago_is_looked_for_before_a_miss_is_believed(pl
     assert any(kind == "list" and "sort=addedAt:desc" in key for kind, _library, key in plex.calls)
 
 
+def test_a_stale_look_takes_in_every_library_at_once(plex):
+    synced(plex)
+    age_recent_look()
+    assert wanted_search.search_shows("Paddington 2") == []
+    looks = [(library, key) for kind, library, key in plex.calls if kind == "list"]
+    assert {library for library, _key in looks} == {"Movies", "Kids", "TV"}
+    assert any("type=4" in key for library, key in looks if library == "TV")
+    # The film half of the same title search finds the look already fresh.
+    plex.calls.clear()
+    assert wanted_search.search_plex("Paddington 2") == []
+    assert plex.calls == []
+
+
 def test_an_index_that_cannot_confirm_a_miss_lets_plex_answer(plex):
     movies, _kids, _tv = synced(plex)
     age_recent_look()
