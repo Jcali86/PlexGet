@@ -27,7 +27,7 @@ from api import persona
 from config import config
 from api import tmdb_lookup
 from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
-from scanner.wanted_search import answers, same_year, without_article
+from scanner.wanted_search import answers, name_or_year, same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -917,16 +917,18 @@ def search_by_title(request_text, token=None):
     naming a film should always work, even for someone who has used up their
     searching for the day.
     """
-    title, year = parse_query(request_text)
+    title, year, found = name_or_year(request_text, lambda name: search_shows(name, token),
+                                      lambda name: title_lookup(name, token))
     if not title:
         return None
+    shows, films = found or (search_shows(title, token), title_lookup(title, token))
     # Only certainty claims a hit, and only of the year named - the same rule
     # as asking for it (answers()). "Taxi" turning up "Taxi Driver" is a
     # maybe, and Wicked: For Good (2025) is not Wicked (2024); answering either
     # with "yes, we have that" is how someone ends up never asking for the
     # film they actually wanted.
-    certain_shows = answers(search_shows(title, token), title, year)
-    exact = answers(title_lookup(title, token), title, year)
+    certain_shows = answers(shows, title, year)
+    exact = answers(films, title, year)
     certain = [m for m in exact if not m["file_missing"]]
     if not certain and not certain_shows:
         return None
@@ -1074,10 +1076,11 @@ def search_by_person(request_text, token=None):
 
 def close_matches(request_text, token=None):
     """Films and series that might be what was meant, without being certain."""
-    title, year = parse_query(request_text)
+    title, year, found = name_or_year(request_text, lambda name: title_lookup(name, token),
+                                      lambda name: search_shows(name, token))
     if not title:
         return []
-    films = title_lookup(title, token)
+    films, shows = found or (title_lookup(title, token), search_shows(title, token))
     fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
     if year and not any(not m["file_missing"] for m in answers(films, title, year)):
@@ -1087,7 +1090,7 @@ def close_matches(request_text, token=None):
         kept = {m.get("rating_key") for m in maybe}
         maybe += [m for m in films
                   if m.get("rating_key") not in kept and not m["file_missing"]]
-    maybe += [x for x in search_shows(title, token) if x["confidence"] == 1]
+    maybe += [x for x in shows if x["confidence"] == 1]
     if not maybe:
         maybe = misspelt(title, token)
     return maybe
@@ -1113,6 +1116,17 @@ def misspelt(title, token=None):
     return found
 
 
+def tmdb_reading(request_text):
+    """(title, year) to ask TMDb with, a bare trailing year read both ways as on the shelf.
+
+    Asked about a film the shelf has not got, so the shelf cannot say whether
+    the number in "Wonder Woman 1984" is a year. Asked for "Wonder Woman" from
+    1984, TMDb knew nothing of the kind, and the request went to the model.
+    """
+    title, year, _found = name_or_year(request_text, tmdb_lookup.well_known)
+    return title, year
+
+
 def names_a_film(request_text):
     """Is this plainly the name of one film or series - just not one of ours?
 
@@ -1133,7 +1147,7 @@ def names_a_film(request_text):
     lowered = (request_text or "").lower()
     if any(re.search(pattern, lowered) for pattern, _rule in _FALLBACK_RULES):
         return False
-    title, year = parse_query(request_text)
+    title, year = tmdb_reading(request_text)
     wanted = fold(title)
     if len(wanted) < 2:
         return False
@@ -1157,7 +1171,7 @@ def names_a_film(request_text):
 
 def title_missing(request_text):
     """The answer for a named title the library lacks, in the same shape the model path gives."""
-    named, _year = parse_query(request_text)
+    named, _year = tmdb_reading(request_text)
     filters = MovieFilters(is_title=True, interpretation="That is a title the library does not have.",
                            playlist_name=(named or request_text)[:40])
     return {
@@ -1237,7 +1251,7 @@ def describe_missing(request_text, token=None):
     These are separate lookups on separate services, so they run at once rather
     than one after another.
     """
-    named, said_year = parse_query(request_text)
+    named, said_year = tmdb_reading(request_text)
     name, hint = named or request_text, query_hint(request_text)
 
     def close():

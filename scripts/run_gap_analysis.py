@@ -24,7 +24,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tv", action="store_true", help="TV gaps only")
     parser.add_argument("--movies", action="store_true", help="movie gaps only")
-    parser.add_argument("--limit", type=int, help="only analyse this many (for testing)")
+    parser.add_argument("--limit", type=int,
+                        help="only analyse this many (for testing); every film is still looked up first")
     args = parser.parse_args()
 
     key = ((config.get("tmdb") or {}).get("api_key") or "").strip()

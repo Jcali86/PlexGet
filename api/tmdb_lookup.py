@@ -287,6 +287,17 @@ def suggest_shows(title, hint="", limit=5):
     return found
 
 
+def well_known(title):
+    """Films and series by this name that people have heard of.
+
+    For telling whether a number at the end of a name is part of it: Wonder
+    Woman 1984 is a film everybody has heard of, while a short that happens to
+    be called "Chef 2014" is no reason to stop reading 2014 as a year. The bar
+    is the one names_a_film sets for a bare name.
+    """
+    return [g for g in suggest(title) + suggest_shows(title) if (g.get("popularity") or 0) >= 1]
+
+
 def seasons_that_exist(title, year=None):
     """Which seasons of a series exist in the world, per TMDb.
 

@@ -18,11 +18,21 @@ from plexapi.server import PlexServer
 from config import config
 from scanner import paths
 
-# "Chef (2014)" / "Chef [2014]" - an explicit, bracketed year.
-BRACKETED_YEAR = re.compile(r"^\s*(?P<title>.+?)\s*[\(\[]\s*(?P<year>\d{4})\s*[\)\]]\s*$")
+# "Chef (2014)" / "Chef [2014]" - an explicit, bracketed year - and "Resident
+# Evil (2026 film)", the way Wikipedia tells apart films of one name. A few
+# words after the brackets describe the copy rather than name the film -
+# "Resident Evil (2026) 4K" - so they are let go rather than costing the year.
+BRACKETED_YEAR = re.compile(
+    r"^\s*(?P<title>.+?)\s*[\(\[]\s*(?P<year>\d{4})(?:\s+(?P<film>film|movie))?\s*[\)\]]"
+    r"(?:\s+[^\(\)\[\]]{1,24})?\s*$", re.I)
 # "Chef 2014" - a bare trailing year, trusted only inside a plausible range so
-# that titles like "Blade Runner 2049" keep their number.
+# that titles like "Blade Runner 2049" keep their number. Inside that range it
+# is still a guess - Wonder Woman 1984 is a name, not a year - which is why
+# name_or_year asks the shelf, and TMDb, both ways.
 TRAILING_YEAR = re.compile(r"^\s*(?P<title>.+?)\s+(?P<year>\d{4})\s*$")
+# What parted a name from its year, "Resident Evil - 2026" or "Resident Evil,
+# 2026", is not part of the name; kept, it made a wanted row of its own.
+DANGLING = re.compile(r"(?:\s+[-–—]+|\s*,)\s*$")
 
 _server = None
 _as_user = {}
@@ -226,7 +236,12 @@ def plausible_year(year):
     return 1888 <= year <= datetime.date.today().year + 5
 
 
-QUALIFIER = re.compile(r"\s*[\(\[]\s*(?!(?:19|20)\d{2}\s*[\)\]])[^\)\]]{1,24}[\)\]]\s*")
+# An aside comes after the name it qualifies, never first. A name can open
+# with brackets of its own, and taking them for an aside cost "(500) Days of
+# Summer" its number and "[REC]" the whole of its name.
+QUALIFIER = re.compile(
+    r"(?<=\S)\s*[\(\[]\s*(?!(?:19|20)\d{2}(?:\s+(?:film|movie))?\s*[\)\]])[^\)\]]{1,24}[\)\]]\s*",
+    re.I)
 
 
 def query_hint(query):
@@ -242,25 +257,38 @@ def parse_query(query):
     (original)" - is how people qualify a half-remembered title. It is not part
     of the name, so it is dropped before searching and kept as a hint.
     """
+    title, year, _source = split_query(query)
+    return title, year
+
+
+def split_query(query):
+    """parse_query, and where the year came from: "bracketed", "film", "trailing" or None.
+
+    "film" is the Wikipedia form, "Resident Evil (2026 film)". Only a bare
+    trailing year is a guess, and a caller searching the shelf should try it
+    both ways - see name_or_year.
+    """
     raw = QUALIFIER.sub(" ", (query or "")).strip()
     if not raw:
-        return "", None
+        return "", None, None
 
     match = BRACKETED_YEAR.match(raw)
     if match:
         year = int(match.group("year"))
-        title = match.group("title").strip()
+        title = DANGLING.sub("", match.group("title").strip())
         if title:
-            return title, (year if plausible_year(year) else None)
+            if not plausible_year(year):
+                return title, None, None
+            return title, year, ("film" if match.group("film") else "bracketed")
 
     match = TRAILING_YEAR.match(raw)
     if match:
         year = int(match.group("year"))
-        title = match.group("title").strip()
+        title = DANGLING.sub("", match.group("title").strip())
         if title and plausible_year(year):
-            return title, year
+            return title, year, "trailing"
 
-    return raw, None
+    return DANGLING.sub("", raw), None, None
 
 
 def parse_series(text, bare_year=True):
@@ -522,6 +550,33 @@ def without_article(name):
     return _ARTICLE.sub("", (name or "").strip())
 
 
+def named_exactly(name, matches):
+    """Is any of these called exactly this, rather than merely starting with it?"""
+    wanted = fold(without_article(name))
+    return any(fold(without_article(m.get("title"))) == wanted for m in matches)
+
+
+def name_or_year(query, *lookups):
+    """(title, year, found): what was asked for, a bare trailing year read both ways.
+
+    "Chef 2014" is Chef from 2014, but Wonder Woman 1984 is the whole of a
+    film's name, and so are Death Race 2000 and Class of 1984. Read as a year,
+    the number found the 2017 Wonder Woman instead, or nothing, and a film on
+    the shelf looked missing. The words cannot tell the two apart; the shelf
+    can, and for a film the shelf lacks, TMDb can. Each lookup is asked for the
+    whole of it, and if anything is called exactly that, the number was part of
+    the name. found is then what each lookup returned, so the caller need not
+    ask again; otherwise it is None and the year stands.
+    """
+    title, year, source = split_query(query)
+    if source == "trailing":
+        whole = f"{title} {year}"
+        found = [lookup(whole) for lookup in lookups]
+        if any(named_exactly(whole, matches) for matches in found):
+            return whole, None, found
+    return title, year, None
+
+
 def search_plex(title, token=None):
     """Search every movie library for a title.
 
@@ -682,8 +737,24 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None, name=No
     name, as TMDb gives it, used as it is - reading one out of the query drops
     anything in brackets, and "(500) Days of Summer" is not "Days of Summer".
     """
-    title, said_year = parse_query(query)
-    title = name or title
+    if name:
+        # A card TMDb has confirmed: its name is the film's, as it stands.
+        title, said_year = name, parse_query(query)[1]
+        everything = search_plex(title)
+    else:
+        title, said_year, found = name_or_year(query, search_plex)
+        everything = found[0] if found else search_plex(title)
+        if found is None and split_query(query)[2] == "trailing":
+            # Neither reading is on the shelf, so the shelf cannot say which was
+            # meant, and "Wonder Woman 1984" went on the list as Wonder Woman from
+            # 1984. TMDb can say, but only once the shelf has had its turn: a film
+            # held under the year's reading is still the answer.
+            held = answers(everything, title, said_year if year is None else year)
+            if not held:
+                from api import tmdb_lookup
+                whole = f"{title} {said_year}"
+                if named_exactly(whole, tmdb_lookup.well_known(whole)):
+                    title, said_year, everything = whole, None, search_plex(whole)
     if year is None:
         year = said_year
     result = {
@@ -699,7 +770,6 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None, name=No
     if not title:
         return result
 
-    everything = search_plex(title)
     # Only certainty answers "we have that" - the same bar search_by_title
     # holds. A confidence of 1 is the making-of documentary, or Taxi Driver
     # turning up for "Taxi": worth mentioning, never worth claiming, and
