@@ -90,7 +90,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "arrivals-4"
+BUILD = "arrivals-5"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
