@@ -94,20 +94,31 @@
     background: var(--top); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 10;
   }
+  /* The row up here has to fit a phone on one line, and the door out is the
+     last thing in it, so it is the first thing a crowded row pushes off the
+     edge. The name of the person signed in gives way first, with an
+     ellipsis; a long app name gives way only past the 222px the owner's five
+     buttons, their gaps and the header gap need. */
   header h1 {
     margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .3px;
     cursor: pointer; user-select: none;
+    flex: none; max-width: calc(100% - 222px);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   header h1:active { opacity: .7; }
   header h1:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
   header h1 span { color: var(--accent); }
-  .who { margin-left: auto; font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
-  /* Every control up here is one square: emoji have wildly different widths,
-     and "Sign out" as words was a two-line box among a row of neat little
-     buttons. A fixed square makes them a set. */
+  .who { margin-left: auto; min-width: 0; font-size: 13px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .who .me { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Squeezed to nothing, the name leaves a stray dot of ellipsis. */
+  @media (max-width: 340px) { .who .me { display: none; } }
+  /* Every control up here is one fixed circle: emoji have wildly different
+     widths, and "Sign out" as words was a two-line box among a row of neat
+     little buttons. Filled circles are the look the owner chose to keep from
+     when the gift picker's styles leaked in here. */
   .icon-btn {
-    background: transparent; border: 1px solid var(--border); color: var(--dim);
-    border-radius: 8px; padding: 0; font-size: 15px; line-height: 1;
+    background: var(--surface); border: 1px solid var(--border); color: var(--dim);
+    border-radius: 50%; padding: 0; font-size: 15px; line-height: 1;
     width: 34px; height: 34px; flex: none;
     display: inline-grid; place-items: center; cursor: pointer;
   }
@@ -135,8 +146,10 @@
     width: 17px; height: 17px; stroke: var(--dim); fill: none;
     stroke-width: 2; stroke-linecap: round; pointer-events: none;
   }
+  /* min-width: 0, or a text box will not shrink below the width of twenty
+     characters, and on a phone that pushes the button beside it off the edge. */
   input[type=text] {
-    flex: 1; padding: 13px 14px; font-size: 16px; color: var(--text);
+    flex: 1; min-width: 0; padding: 13px 14px; font-size: 16px; color: var(--text);
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   }
   .searchbar input[type=text] { padding-left: 40px; }
@@ -194,15 +207,17 @@
   .giftlead b { display: block; font-size: 15px; margin-bottom: 4px; }
   .giftstep { font-size: 12px; font-weight: 700; letter-spacing: .16em;
     text-transform: uppercase; color: var(--dim); margin: 18px 2px 8px; }
-  .who { display: flex; flex-wrap: wrap; gap: 8px; }
-  .who button {
+  /* Its own name, not .who: that is the header's, and sharing it turned the
+     header's square buttons into these padded pills, and let its row wrap. */
+  .giftwho { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .giftwho button {
     display: flex; align-items: center; gap: 8px; padding: 10px 14px;
     font-size: 14px; color: var(--text); background: var(--surface);
     border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
   }
-  .who button.on { border-color: var(--accent);
+  .giftwho button.on { border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
-  .who button .seen { font-size: 11.5px; color: var(--dim); }
+  .giftwho button .seen { font-size: 11.5px; color: var(--dim); }
   .giftask { display: flex; gap: 8px; margin-top: 4px; }
   .giftask input { flex: 1; }
   .doorbtn {
@@ -483,6 +498,16 @@
     line-height: 1.3; max-height: 2.6em; overflow: hidden;
   }
   .poster:active img { outline: 2px solid var(--accent); }
+  /* Held in the shelf's place while Plex is asked, so the space below the card
+     reads as on its way rather than as the page having nothing to show. */
+  .shelfwait .reel { overflow: hidden; }
+  .shelfwait i {
+    flex: 0 0 auto; width: 96px; height: 144px; border-radius: var(--poster-radius);
+    background: var(--surface2); animation: shelfpulse 1.4s ease-in-out infinite;
+  }
+  @keyframes shelfpulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .shelfwait i { animation: none; } }
+  .shelfnote { margin: 22px 0 4px; font-size: 13.5px; color: var(--dim); }
 
   .show {
     display: flex; gap: 12px; align-items: flex-start; padding: 11px;
@@ -1330,6 +1355,7 @@ const ACTIONS = {
   bell:  () => openBell(),
   tournext: () => nextTourStep(),
   tourskip: () => endTour(),
+  shelf: () => showShelf(),
   tour:  () => { document.getElementById('help').close(); startTour(); },
   skin:  (btn) => applySkin(btn.dataset.value, true),
   unlook: async (btn) => {
@@ -1390,7 +1416,8 @@ function showCard(x) {
   if (gaps) {
     chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="all" data-seasons="${esc((x.missing_seasons || []).join(','))}">Ask for all ${gaps} missing</button>`);
   } else {
-    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="next">Ask for more</button>`);
+    // "More" of a series that is here: the server records its next season.
+    chips.push(`<button data-act="askshow" data-value="${esc(x.title)}" data-year="${esc(x.year || '')}" data-season="more">Ask for more</button>`);
   }
   return `<div class="show">${poster}
       <div><h3>${esc(x.title)}</h3>
@@ -1413,7 +1440,8 @@ async function askShow(title, season, seasons, quiet, year) {
     return;
   }
   const body = {title, kind: 'show'};
-  if (season && season !== 'next' && season !== 'all') body.season = Number(season);
+  if (season === 'more') body.more = true;
+  else if (season && season !== 'next' && season !== 'all') body.season = Number(season);
   if (year) body.year = Number(year);
   try {
     const res = await fetch('/request/wanted', {
@@ -1422,10 +1450,21 @@ async function askShow(title, season, seasons, quiet, year) {
     const d = await res.json();
     if (!res.ok) { alert(d.error || 'Could not send that'); return; }
     if (quiet) return;
-    const what = body.season ? `${esc(title)}, series ${body.season}` : esc(title);
+    // The server's season, not the button's: "ask for more" of a series that
+    // is here comes back as the next one.
+    const what = d.season ? `${esc(title)}, series ${d.season}` : esc(title);
+    if (d.found) { status('good', `${what} is here already.`, "It's on the shelf now."); return; }
+    const waiting = d.added_to_wanted || (d.wanted && d.wanted.status === 'wanted');
     status('good', `Asked for ${what}.`,
       d.added_to_wanted ? "It's on the list — you'll hear when it arrives."
-                        : 'It was already on the list.');
+        : waiting ? "It was already on the list — you'll hear when it arrives too."
+        : 'It was already on the list.');
+    if (waiting) {
+      const card = out.firstElementChild;
+      notifyHint().then(hint => {
+        if (hint && card && card.isConnected) card.insertAdjacentHTML('beforeend', hint);
+      });
+    }
   } catch (e) { alert(e.message); }
 }
 
@@ -1671,8 +1710,13 @@ function guessCard(g) {
   const notYet = g.release_state === 'cinema' || g.release_state === 'unreleased';
   const exact = `data-value="${esc(g.title + (g.year ? ' (' + g.year + ')' : ''))}"
     data-year="${esc(g.year || '')}" data-tmdb="${esc(g.tmdb_id || '')}"`;
-  const button = g.wanted_status === 'wanted'
+  // On the list because this person asked: nothing to press. Somebody else
+  // asked: they can still ask to be told too.
+  const button = g.wanted_status === 'wanted' && g.you_asked !== false
     ? `<button disabled>On the list \u2713</button>`
+    : g.wanted_status === 'wanted'
+      ? `<button class="ghost" data-act="ask" data-notyet="${notYet ? '1' : ''}"
+           data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me too</button>`
     : notYet
       ? `<button class="ghost" data-act="ask" data-notyet="1"
            data-when="${esc(g.available_from || '')}" ${exact}>🔔 Tell me when it lands</button>`
@@ -1710,21 +1754,24 @@ async function fillNewer(query) {
 }
 
 // After something goes on the list: will this device actually be told? Asking
-// is the promise; the nudge only arrives if notifications are on.
+// is the promise; the nudge only arrives if notifications are on. Only looks -
+// it never subscribes or registers anything, and never waits on the service
+// worker becoming ready, so it cannot hold anything up. The caller draws its
+// answer first and adds this line when it comes.
 async function notifyHint() {
-  let state;
-  try { state = await setupPush(false); } catch (e) { return ''; }
-  if (state === 'already' || state === 'on') return '';
-  if (state === 'needs-install') {
+  const support = pushSupport();
+  if (support === 'needs-install') {
     return `<div class="sub">To be told on this phone, add this page to your Home Screen and open it from there.</div>`;
   }
-  if (state === 'blocked') {
+  if (support !== 'ok') return '';
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/');
+    if (reg && await reg.pushManager.getSubscription()) return '';
+  } catch (e) { return ''; }
+  if (Notification.permission === 'denied') {
     return `<div class="sub">Notifications are blocked for this site in your browser settings, so the nudge can't reach this device.</div>`;
   }
-  if (state === 'not-asked') {
-    return `<div class="sub">Turn on notifications to get the nudge. <button class="linkbtn" data-act="bell">Turn on</button></div>`;
-  }
-  return '';
+  return `<div class="sub">Turn on notifications to get the nudge. <button class="linkbtn" data-act="bell">Turn on</button></div>`;
 }
 
 // This answer came from the keyword rules rather than from reading the mood,
@@ -1760,11 +1807,11 @@ async function find(query) {
   picked.clear(); refreshBar();
   clearInterval(heroTimer); clearInterval(driftTimer);
   document.getElementById('hero').innerHTML = '';
-  document.getElementById('shelf').innerHTML = '';
+  document.getElementById('shelf').innerHTML = ''; shelfTurn++;
   const stopThinking = startThinking(query, isMoodish(query) ? 'mood' : 'title');
-  let d;
+  let d, res = null;
   try {
-    const res = await fetch('/request/search', {
+    res = await fetch('/request/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({query,
                             include_missing: document.getElementById('alsomissing').checked}),
@@ -1781,6 +1828,18 @@ async function find(query) {
     }
   } catch (e) {
     stopThinking();
+    if (res) {
+      // An answer came, just not one the page can read: the server's own
+      // error page, or a proxy in front of it giving up on a search that ran
+      // too long. Calling that a dropped connection sent people looking at
+      // their signal when the thing to look at was the server.
+      out.innerHTML = `<div class="card bad"><b>PlexGet could not finish that search${
+          res.ok ? '' : ` (error ${res.status})`}.</b>
+        <div class="sub">The server ran into a problem or took too long. Try again; if it
+          keeps happening, the server's log will say why.</div>
+        <button class="primary" data-act="look" data-value="${esc(query)}">Search again</button></div>`;
+      return;
+    }
     // A failed fetch on iOS reads "Load failed", which explains nothing. It
     // is nearly always the connection dying under a slow answer - and the
     // answer that took too long is cached now, so the retry is quick. Say
@@ -1960,29 +2019,36 @@ async function ask(title, btn) {
   const body = {title};
   if (btn && btn.dataset.year) body.year = Number(btn.dataset.year);
   if (btn && btn.dataset.tmdb) body.tmdb_id = btn.dataset.tmdb;
+  // One press, one request: a second tap while the first is on its way
+  // asked twice.
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/request/wanted', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     const d = await res.json();
-    if (!res.ok) { alert(d.error || 'Could not send that'); return; }
+    if (!res.ok) { if (btn) btn.disabled = false; alert(d.error || 'Could not send that'); return; }
     // Something not out yet is a standing order rather than a request: there
     // is nothing to fetch today, so say what will actually happen.
     const notYet = btn && btn.dataset.notyet;
     const due = btn && btn.dataset.when ? ` It's due ${esc(btn.dataset.when)}.` : '';
     let msg;
+    let willHear = false;
     if (d.found) msg = `<b>Good news — we already have that.</b><div class="sub">${
       esc(d.matches.map(m => m.title + ' (' + m.year + ')').join(', '))}</div>`;
-    else if (d.added_to_wanted) msg = (notYet
-      ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
-      : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`)
-      + await notifyHint();
-    else {
+    else if (d.added_to_wanted) {
+      willHear = true;
+      msg = notYet
+        ? `<b>Watching out for ${label(d.title, d.year)}.</b><div class="sub">Nothing to fetch yet —${due} you'll get a nudge the moment it turns up on the shelf.</div>`
+        : `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">It's on the list — you'll hear when it arrives.</div>`;
+    } else {
       const status = d.wanted ? d.wanted.status : 'wanted';
+      // Somebody else asked first; this person is told when it lands as well.
+      willHear = status === 'wanted';
       const note = status === 'dismissed' ? 'That one has been asked for before and set aside for now.'
         : status === 'acquired' ? 'That is marked as already picked up — it may still be arriving.'
-        : 'It was already on the list.';
+        : "It was already on the list — you'll hear when it arrives too.";
       msg = `<b>Asked for ${label(d.title, d.year)}.</b><div class="sub">${note}</div>`;
     }
     // The shelf holds something with a confusable name — the making-of, or
@@ -1995,10 +2061,17 @@ async function ask(title, btn) {
         } — not the one you asked for, so it stays on the list.</div>`;
     }
     out.insertAdjacentHTML('afterbegin', `<div class="card good" data-shut="">${shutter}${msg}</div>`);
+    const card = out.firstElementChild;
+    if (willHear) {
+      notifyHint().then(hint => {
+        if (hint && card && card.isConnected) card.insertAdjacentHTML('beforeend', hint);
+      });
+    }
+    if (d.found && btn) btn.disabled = false;
 
     // The card that said we hadn't got it, and the button that asked, are both
     // out of date now - say so rather than leaving the old instruction standing.
-    if (d.added_to_wanted || d.wanted) {
+    if (!d.found && (d.added_to_wanted || d.wanted)) {
       const miss = document.getElementById('missing');
       if (miss) {
         miss.className = 'card good';
@@ -2012,7 +2085,7 @@ async function ask(title, btn) {
       }
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
-  } catch (e) { alert(e.message); }
+  } catch (e) { if (btn) btn.disabled = false; alert(e.message); }
 }
 
 // ---- playlists ----
@@ -2066,7 +2139,7 @@ let giftFilms = [];
 async function showGift() {
   clearInterval(heroTimer); clearInterval(driftTimer); clearInterval(thinkingTimer);
   document.getElementById('hero').innerHTML = '';
-  document.getElementById('shelf').innerHTML = '';
+  document.getElementById('shelf').innerHTML = ''; shelfTurn++;
   picked.clear(); refreshBar();
   giftFor = ''; giftFilms = [];
 
@@ -2081,7 +2154,7 @@ async function showGift() {
         delete, and it says you made it.</div></div>
     ${people.length ? `
       <div class="giftstep">Who is it for?</div>
-      <div class="who" id="giftwho">${people.map(p => `
+      <div class="giftwho" id="giftwho">${people.map(p => `
         <button data-act="giftwho" data-value="${esc(p.username)}">
           ${esc(p.username)}<span class="seen">${esc((p.last_seen || '').slice(0, 10))}</span>
         </button>`).join('')}</div>
@@ -2459,7 +2532,7 @@ async function testPush(btn) {
 
 // ---- sign in ----
 function showSignedIn() {
-  whoami.innerHTML = `${esc(me.username)}
+  whoami.innerHTML = `<span class="me">${esc(me.username)}</span>
     ${me.role === 'owner'
       ? '<button class="icon-btn" data-act="announce" title="Tell the household">\u{1F4E3}</button>' : ''}
     <button class="icon-btn" data-act="wanted" title="The wanted list">📋</button>
@@ -2943,15 +3016,41 @@ function startDrift(reel) {
   }, 40);
 }
 
+// Which visit to the front page the shelf belongs to. A search or the gift page
+// clears the shelf, and an answer arriving after that must not paint posters
+// and a backdrop underneath whatever replaced it.
+let shelfTurn = 0;
+const SHELF_WAITING = `<div class="row shelfwait" aria-hidden="true"><h4>On the shelf</h4>
+  <div class="reel">${'<i></i>'.repeat(4)}</div></div>`;
+
 async function showShelf() {
+  const turn = ++shelfTurn;
+  const shelf = document.getElementById('shelf');
+  shelf.innerHTML = SHELF_WAITING;
+  // Bounded: a Plex that has stopped answering holds the request for as long
+  // as the server's own timeouts allow, and a placeholder that never resolves
+  // is the blank space again by another name.
+  const patience = new AbortController();
+  const timer = setTimeout(() => patience.abort(), 40000);
+  let d = null;
   try {
-    const d = await (await fetch('/request/showcase')).json();
-    if (!d.rows || !d.rows.length) return;
-    document.getElementById('shelf').innerHTML = d.rows.map(posterRow).join('');
-    startHero(d.rows[0].films);
-    const first = document.querySelector('#shelf .reel');
-    if (first) startDrift(first);
-  } catch (e) { /* the shelf is a bonus, never a blocker */ }
+    d = await (await fetch('/request/showcase', {signal: patience.signal})).json();
+  } catch (e) { /* said below, in the shelf's own space */ }
+  finally { clearTimeout(timer); }
+  if (turn !== shelfTurn) return;
+  if (!d || !d.rows || !d.rows.length) {
+    // Still a bonus, never a blocker - but said, because an empty space here
+    // cannot be told apart from a page still loading. A library with nothing
+    // to show and no complaint simply leaves the space empty.
+    shelf.innerHTML = d && d.rows && !d.error ? '' : `<div class="shelfnote">
+        The posters did not come through from Plex just now.
+        <button class="linkbtn" data-act="shelf" type="button">Try again</button></div>`;
+    return;
+  }
+  shelf.innerHTML = d.rows.map(posterRow).join('');
+  startHero(d.rows[0].films);
+  const first = document.querySelector('#shelf .reel');
+  if (first) startDrift(first);
 }
 
 async function askAnnouncement() {

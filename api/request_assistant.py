@@ -26,8 +26,8 @@ from api import ai
 from api import persona
 from config import config
 from api import tmdb_lookup
-from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
-from scanner.wanted_search import name_or_year, same_year, without_article
+from scanner.wanted_search import PlexUnavailable, at_once, availability, fold, listed, parse_query, query_hint
+from scanner.wanted_search import answers, name_or_year, same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -921,15 +921,16 @@ def search_by_title(request_text, token=None):
                                       lambda name: title_lookup(name, token))
     if not title:
         return None
-    shows, films = found or (search_shows(title, token), title_lookup(title, token))
-    shows = same_year(shows, year)
-    certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = same_year(films, year)
-    playable = [m for m in exact if not m["file_missing"]]
-    # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
-    # and answering a maybe with "yes, we have that" is how someone ends up
-    # never asking for the film they actually wanted.
-    certain = [m for m in playable if m.get("confidence", 2) >= 2]
+    shows, films = found or at_once(lambda: search_shows(title, token),
+                                    lambda: title_lookup(title, token))
+    # Only certainty claims a hit, and only of the year named - the same rule
+    # as asking for it (answers()). "Taxi" turning up "Taxi Driver" is a
+    # maybe, and Wicked: For Good (2025) is not Wicked (2024); answering either
+    # with "yes, we have that" is how someone ends up never asking for the
+    # film they actually wanted.
+    certain_shows = answers(shows, title, year)
+    exact = answers(films, title, year)
+    certain = [m for m in exact if not m["file_missing"]]
     if not certain and not certain_shows:
         return None
 
@@ -1080,14 +1081,15 @@ def close_matches(request_text, token=None):
                                       lambda name: search_shows(name, token))
     if not title:
         return []
-    films, shows = found or (title_lookup(title, token), search_shows(title, token))
+    films, shows = found or at_once(lambda: title_lookup(title, token),
+                                    lambda: search_shows(title, token))
     fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
-    if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
+    if year and not any(not m["file_missing"] for m in answers(films, title, year)):
         # The same name from another year is not the film asked for, but it
         # is worth a mention: "Resident Evil 2026" is not on the shelf, and
         # the six that are should be visible without being claimed as it.
-        kept = {m.get("rating_key") for m in fitting}
+        kept = {m.get("rating_key") for m in maybe}
         maybe += [m for m in films
                   if m.get("rating_key") not in kept and not m["file_missing"]]
     maybe += [x for x in shows if x["confidence"] == 1]
@@ -1164,9 +1166,14 @@ def names_a_film(request_text):
         return (guess.get("popularity") or 0) >= 1
 
     hint = query_hint(request_text)
-    if any(same(g) for g in tmdb_lookup.suggest(title, hint=hint, year=year)):
-        return True
-    return any(same(g) for g in tmdb_lookup.suggest_shows(title, hint=hint))
+    # Films and series are two searches at TMDb, so both go at once rather
+    # than the second waiting on the first to miss. A title that turns out to
+    # be missing has its series searched again straight after, for the page,
+    # and finds this answer cached.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        films = pool.submit(tmdb_lookup.suggest, title, hint=hint, year=year)
+        shows = pool.submit(tmdb_lookup.suggest_shows, title, hint=hint)
+        return any(same(g) for g in films.result()) or any(same(g) for g in shows.result())
 
 
 def title_missing(request_text):
@@ -1447,12 +1454,18 @@ def showcase(per_row=14, token=None):
     they can actually press play on tonight.
     """
     rows = []
+    # Asked once for all three film rows: each ask is a request to Plex, and
+    # the rows are fetched one after another while the front page waits.
+    films_in = movie_sections(token)
 
     def collect(getter):
         found, seen = [], set()
-        for section in movie_sections(token):
+        for section in films_in:
             try:
-                items = getter(section)
+                # listed(): a film listed without a tagline, backdrop or rating
+                # otherwise makes plexapi fetch it again in full, one request
+                # per poster, before the front page can show any of them.
+                items = listed(getter(section))
             except Exception:
                 continue
             for movie in items:
@@ -1486,7 +1499,7 @@ def showcase(per_row=14, token=None):
     seen_shows = set()
     for section in show_sections(token):
         try:
-            items = section.search(sort="addedAt:desc", maxresults=per_row)
+            items = listed(section.search(sort="addedAt:desc", maxresults=per_row))
         except Exception:
             continue
         for item in items:

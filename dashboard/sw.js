@@ -2,7 +2,7 @@
 // the app when one is tapped.
 
 // Bump this to force every device to take a fresh copy of the shell.
-const SHELL = 'plexget-shell-v4';
+const SHELL = 'plexget-shell-v5';
 // The manifest is deliberately NOT kept: it carries a one-time sign-in
 // handoff for add-to-home-screen, and a cached copy would bake a dead code
 // into every install.
@@ -55,10 +55,15 @@ self.addEventListener('fetch', (event) => {
       if (hit) return hit;
     }
 
+    let saved = Promise.resolve();
     const fresh = fetch(req).then((res) => {
-      if (res && res.ok) cache.put(key, res.clone());
+      if (res && res.ok) saved = cache.put(key, res.clone());
       return res;
     }).catch(() => null);
+    // Once the held copy has answered, nothing else keeps the worker alive,
+    // and it could be stopped before the fresh copy was saved - so the phone
+    // went on painting the old page launch after launch.
+    event.waitUntil(fresh.then(() => saved).catch(() => {}));
 
     // Race the server against the patience of somebody holding a phone. The
     // server usually wins, so the app is never a version behind; when it does

@@ -1874,6 +1874,7 @@ function drawIndex(box, d) {
     <span class="dim">files ${(f.ok || 0).toLocaleString()} fine${f.missing ? `, <span style="color:var(--red)">${f.missing} missing</span>` : ''}${f.unknown ? `, ${f.unknown} unreadable` : ''}</span>
     ${d.working_on ? `<span class="dim">now: ${esc(d.working_on)}…</span>` : ''}
     ${d.last_error ? `<span style="color:var(--red)">${esc(d.last_error)}</span>` : ''}
+    ${d.settle_error ? `<span style="color:var(--red)">${esc(d.settle_error)}</span>` : ''}
     <span class="actions">
       <button class="copy-btn" onclick="syncIndex(false)">Check for new</button>
       <button class="copy-btn" onclick="syncIndex(true)">Re-read everything</button>

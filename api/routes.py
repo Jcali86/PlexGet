@@ -3,7 +3,9 @@ from pathlib import Path
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from plexapi.exceptions import Unauthorized
@@ -29,6 +31,7 @@ from api import plex_auth
 from api import suggestions as suggest
 from api import tmdb_lookup
 from api import push as web_push
+from api import arrivals
 from api import user_library
 from api import themes as looks
 from api.ai import has_api_key
@@ -44,20 +47,24 @@ from api.request_assistant import (
     showcase,
     worth_asking,
 )
-from scanner.wanted_search import BRACKETED_YEAR, parse_query, plausible_year
+from scanner.wanted_search import BRACKETED_YEAR, parse_query, parse_series, plausible_year, same_name
 from scanner.wanted_search import (
     PlexTokenDead,
     PlexUnavailable,
+    answers,
+    arrived as arrived_now,
     export_text as wanted_export_text,
     recheck as recheck_wanted,
     movie_sections,
     search_and_capture,
     search_shows,
+    seasons_held,
     show_sections,
 )
 from analyzer import MediaAnalyzer
 from config import config
 from db import Database
+from db.database import small_int
 
 
 def disk_label(path):
@@ -83,7 +90,7 @@ def disk_label(path):
 
 # What this build can do. Anything added here is something a page or a caller
 # can check for rather than infer from behaviour.
-BUILD = "arrivals-2"
+BUILD = "arrivals-5"
 FEATURES = [
     "mood-search",
     "missing-search",     # "not in plex" answered from TMDb, films and series
@@ -97,6 +104,9 @@ FEATURES = [
     "ask-by-year",          # asking for Resident Evil (2026) is not answered by the 2002 film
     "arrival-by-year",      # "it's here" only for the film asked for, told to everybody who asked
     "newer-same-name",      # a title hit mentions a newer film of that name the shelves lack
+    "settle-survives",      # an arrival waits in the index file until the wanted list is checked
+    "more-of-a-series",     # asking for more of a series here waits for the next season
+    "tell-me-too",          # a second person can ask to be told about a film already on the list
 ]
 
 
@@ -650,32 +660,12 @@ def create_app():
             headers={"Content-Disposition": "attachment; filename=wanted.txt"},
         )
 
-    def settle_wanted(db):
-        """Mark anything Plex has since acquired, and tell whoever asked.
-
-        `recheck` only reports; this is the half that acts on it. Kept separate
-        so a recheck can still be run without changing anything.
-        """
-        result = recheck_wanted(db)
-        settled = []
-        for entry in result.get("now_in_plex", []):
-            row = db.set_wanted_status(entry["id"], "acquired")
-            if row is None:
-                continue
-            name = entry["title"] + (f" ({entry['year']})" if entry.get("year") else "")
-            if entry.get("season"):
-                name += f", series {entry['season']}"
-            settled.append(name)
-            # Everybody who asked hears about it; the owner if none of them does.
-            web_push.tell_arrived(db, row, name)
-        return {"checked": result.get("checked", 0), "settled": settled}
-
     @app.route("/wanted/settle", methods=["POST"])
     def wanted_settle():
         """Re-check the list, mark what has arrived, and notify the asker."""
         db = Database()
         try:
-            return jsonify(settle_wanted(db))
+            return jsonify(arrivals.settle(db))
         except PlexUnavailable as e:
             return plex_trouble(e)
         finally:
@@ -716,7 +706,7 @@ def create_app():
             library_index.forget_recent()
         db = Database()
         try:
-            outcome = settle_wanted(db)
+            outcome = arrivals.settle(db)
         except PlexUnavailable as e:
             return plex_trouble(e)
         finally:
@@ -1410,23 +1400,33 @@ def create_app():
         verdicts = held_verdicts(candidates or [], token, as_shows)
         if verdicts is not None:
             return [item for item, held in zip(candidates, verdicts) if not held]
-        keep = []
-        for item in candidates or []:
+
+        gone = threading.Event()
+
+        def held(item):
+            if gone.is_set():
+                return False
             title, year = item.get("title"), item.get("year")
             try:
                 if as_shows:
-                    if search_shows(title, token):
-                        continue
-                elif search_by_title(f"{title} ({year})" if year else title, token):
-                    continue
+                    return bool(search_shows(title, token))
+                return bool(search_by_title(f"{title} ({year})" if year else title, token))
             except PlexUnavailable:
                 # Plex went away mid-check. Offering a film somebody may
                 # already own beats failing the search, and asking for one
-                # twice is caught on the wanted list anyway.
-                keep.extend(candidates[len(keep):])
-                break
-            keep.append(item)
-        return keep
+                # twice is caught on the wanted list anyway. The rest are not
+                # asked, so a dead Plex is waited on once, not once each.
+                gone.set()
+                return False
+
+        # Only reached while the index cannot answer - the first minutes after
+        # a restart, or a sync that failed - and then each suggestion is a
+        # title search of its own. Eight of them one after another was the
+        # slowest part of ticking "include ones we haven't got"; a few at a
+        # time keeps that to two rounds without piling every one onto Plex.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            verdicts = list(pool.map(held, candidates or []))
+        return [item for item, owned in zip(candidates or [], verdicts) if not owned]
 
     @app.route("/request/search", methods=["POST"])
     def request_search():
@@ -2008,20 +2008,97 @@ def create_app():
             give_back()
         return jsonify({"picks": picks})
 
+    def series_name(title, year):
+        """The series' name and year from what was sent.
+
+        A card sends the year on its own, so only a bracketed one is read out
+        of its title: "Reply 1988" and "Paris Police 1900" are whole names. A
+        typed name with a bare year after it - "Doctor Who 2005" - is split,
+        unless the whole of it is a series Plex or TMDb knows by that name.
+        """
+        named, said_year = parse_series(title, bare_year=year is None)
+        if year is None and said_year and not BRACKETED_YEAR.match(title):
+            whole = " ".join(title.split())
+            try:
+                known = [x["title"] for x in search_shows(whole)] + \
+                        [x["title"] for x in tmdb_lookup.suggest_shows(whole)]
+            except Exception:
+                known = []
+            if any(same_name(whole, name) for name in known):
+                return whole, None
+        return named, year or said_year
+
+    def ask_for_series(db, title, year, season, more, token):
+        """Record a series, or one season of it, on the wanted list.
+
+        Recorded directly rather than searched for as a film. "Ask for more"
+        of a series already here means its next season, so that is what is
+        recorded - something that can be seen to arrive, where a whole-series
+        row for a series already on the shelf never could. Asking for the
+        whole of a series that is here is answered "it's here". Both look with
+        the asker's own token: a library shared with somebody else is neither
+        counted nor given away.
+        """
+        named, said_year = series_name(title, year)
+        if season is None:
+            try:
+                here = answers(search_shows(named, token), named, said_year)
+                held = sorted({n for x in here for key in x.get("rating_keys") or [x["rating_key"]]
+                               for n in seasons_held(key, token)})
+            except PlexUnavailable:
+                here, held = [], []     # recorded as asked; nothing lost by that
+            if here and not more:
+                return {"found": True, "kind": "show", "season": None, "title": named,
+                        "year": said_year, "added_to_wanted": False, "already_wanted": False,
+                        "wanted": None, "matches": here}
+            if held:
+                season = max(held) + 1
+        row, created = db.insert_wanted(named, said_year, title, kind="show", season=season)
+        return {
+            "found": False, "kind": "show", "season": season,
+            "title": row["title"], "year": row["year"],
+            "added_to_wanted": created, "already_wanted": not created,
+            "wanted": dict(row), "matches": [],
+        }
+
+    def reopen_if_wrongly_settled(db, result):
+        """Asked for again after being marked arrived: here after all, or back on the list.
+
+        Decided by the same check that settles it, so the two cannot disagree -
+        a row settled by its TMDb id is not reopened because its name alone
+        was not found, only to be settled again, and again, each time a
+        person asks. Something marked arrived that nothing on the shelf
+        answers - wrongly settled, or since deleted - goes back on the list,
+        rather than "already picked up" forever with no notification to come.
+        If Plex cannot be asked, the row is left as it is.
+        """
+        existing = result.get("wanted") or {}
+        if result.get("found") or existing.get("status") != "acquired":
+            return
+        try:
+            here = arrived_now(existing)
+        except PlexUnavailable:
+            return
+        if here:
+            result.update(found=True, matches=here, added_to_wanted=False, already_wanted=False,
+                          wanted=None)
+            return
+        row = db.set_wanted_status(existing["id"], "wanted")
+        result.update(wanted=dict(row), added_to_wanted=True, already_wanted=False, reopened=True)
+
     @app.route("/request/wanted", methods=["POST"])
     def request_wanted():
         """Ask for a film the library does not have - it lands on the wanted list."""
         body = request.get_json(silent=True) or {}
         title = " ".join((body.get("title") or "").split())[:200]
         kind = "show" if body.get("kind") == "show" else "film"
-        season = body.get("season")
-        season = int(season) if str(season).isdigit() and 0 < int(season) < 100 else None
+        season = small_int(body.get("season"), 1, 99)
         # A card that knows the film sends its year and TMDb id as they are,
         # rather than folded into the title for the server to read back out.
-        year = body.get("year")
-        year = int(year) if str(year).isdigit() and plausible_year(int(year)) else None
-        tmdb_id = str(body.get("tmdb_id") or "")
-        tmdb_id = tmdb_id if tmdb_id.isdigit() else None
+        year = small_int(body.get("year"), 1888, 9999)
+        year = year if year and plausible_year(year) else None
+        # A series' TMDb id is not a film's, and nothing matches series by it.
+        tmdb_id = small_int(body.get("tmdb_id"), 1, 2**31 - 1) if kind == "film" else None
         user = current_user()
         who = user["username"] if user else (body.get("who") or "").strip()[:40]
         if not title:
@@ -2039,43 +2116,44 @@ def create_app():
         db = Database()
         try:
             if kind == "show":
-                # A series is not looked up as a film, and a season request is
-                # about one season, so it is recorded directly. Only a
-                # bracketed year is read out of the name: Space: 1999 is a
-                # series, not "Space:" from 1999.
-                named, said_year = parse_query(title) if BRACKETED_YEAR.match(title) else (title, None)
-                said_year = year or said_year
-                row, created = db.insert_wanted(
-                    named or title, said_year, title, kind="show", season=season, tmdb_id=tmdb_id
-                )
-                result = {
-                    "found": False, "kind": "show", "season": season,
-                    "title": named or title, "year": said_year,
-                    "added_to_wanted": created, "already_wanted": not created,
-                    "wanted": dict(row), "matches": [],
-                }
+                result = ask_for_series(db, title, year, season, body.get("more") is True,
+                                        (user or {}).get("plex_token"))
             else:
-                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id)
-                existing = result.get("wanted") or {}
-                if not result.get("found") and existing.get("status") == "acquired":
-                    # Marked as arrived, yet nothing on the shelf plays - wrongly
-                    # settled, or since deleted. Asking again puts it back on
-                    # the list, rather than answering "already picked up"
-                    # forever with no notification ever to come.
-                    row = db.set_wanted_status(existing["id"], "wanted")
-                    result.update(wanted=dict(row), added_to_wanted=True,
-                                  already_wanted=False, reopened=True)
+                name = None
+                if tmdb_id:
+                    named, said_year = parse_query(title)
+                    as_sent = BRACKETED_YEAR.match(title)
+                    film = tmdb_lookup.confirmed(
+                        tmdb_id, [as_sent.group("title") if as_sent else title, named], year or said_year)
+                    # Kept only when it is the film named; then TMDb's own
+                    # name is the one recorded.
+                    tmdb_id, name = (tmdb_id, film["title"]) if film else (None, None)
+                result = search_and_capture(db, title, year=year, tmdb_id=tmdb_id, name=name)
+            reopen_if_wrongly_settled(db, result)
             wanted_row = result.get("wanted") or {}
-            if user and wanted_row.get("id") and wanted_row.get("status") != "dismissed":
+            if user and wanted_row.get("id") and not result.get("found"):
                 # Everybody who asks is told when it arrives, not only the first.
-                db.add_requester(wanted_row["id"], user["id"], who)
+                now, listed = db.add_requester(wanted_row["id"], user["id"], who)
+                if now == "acquired" and wanted_row.get("status") == "wanted" and not listed:
+                    # It arrived between the look above and noting this
+                    # person down, so the arrival did not know to tell them.
+                    try:
+                        web_push.send_event(db, "arrived", user["id"], url="/request",
+                                            tag=f"arrived-{wanted_row['id']}",
+                                            film=arrivals.label(wanted_row))
+                    except Exception:
+                        pass
+                    wanted_row["status"] = "acquired"
             if result.get("added_to_wanted") and who:
-                db.conn.execute(
-                    "UPDATE wanted SET notes = ?, requested_by = ?, requested_by_id = ? WHERE id = ?",
-                    (f"Requested by {who}", who, (user or {}).get("id"), result["wanted"]["id"]),
-                )
-                db.conn.commit()
-                result["wanted"]["notes"] = f"Requested by {who}"
+                if not result.get("reopened"):
+                    # A reopened row keeps whoever asked first; this person is
+                    # in wanted_requesters with everybody else.
+                    db.conn.execute(
+                        "UPDATE wanted SET notes = ?, requested_by = ?, requested_by_id = ? WHERE id = ?",
+                        (f"Requested by {who}", who, (user or {}).get("id"), result["wanted"]["id"]),
+                    )
+                    db.conn.commit()
+                    result["wanted"]["notes"] = f"Requested by {who}"
                 # Tell the owner someone is waiting on something.
                 try:
                     owner = next(
@@ -2084,6 +2162,8 @@ def create_app():
                     )
                     if owner and str(owner) != str((user or {}).get("id")):
                         label = result["title"] + (f" ({result['year']})" if result.get("year") else "")
+                        if result.get("season"):
+                            label += f", series {result['season']}"
                         # Tagged per entry: a shared tag makes each notification
                         # replace the one before it, so two people asking for
                         # two films inside a few minutes left the owner seeing
@@ -2099,6 +2179,10 @@ def create_app():
             return plex_trouble(e)
         finally:
             db.close()
+        if result.get("wanted"):
+            # Another member's Plex account id is the owner's business, as on
+            # /request/wanted/list.
+            result["wanted"]["requested_by_id"] = None
         return jsonify(result)
 
     @app.route("/request/newer")
@@ -2124,6 +2208,11 @@ def create_app():
                 for guess in found:
                     row = db.find_wanted(guess["title"], guess.get("year"))
                     guess["wanted_status"] = row["status"] if row else None
+                    # Somebody else asking first is no reason this person
+                    # cannot be told as well.
+                    guess["you_asked"] = bool(row and user and (
+                        str(row["requested_by_id"] or "") == str(user["id"])
+                        or str(user["id"]) in {uid for uid, _name in db.requesters(row["id"])}))
             finally:
                 db.close()
         return jsonify({"query": query, "title": named or query, "newer": found})
@@ -2193,14 +2282,7 @@ def create_app():
     # against it: that is how "it's here" reaches somebody without Plex Pass,
     # whose server never sends the library.new webhook. Runs on the index's
     # own thread, never inside a search.
-    def settle_after_arrivals(rating_keys):
-        db = Database()
-        try:
-            settle_wanted(db)
-        finally:
-            db.close()
-
-    library_index.on_arrivals(settle_after_arrivals)
+    library_index.on_arrivals(arrivals.settle_now)
     # Keeps the library index fresh from now on; see scanner/library_index.py.
     library_index.start_background()
 

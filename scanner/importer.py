@@ -14,7 +14,7 @@ import shutil
 import subprocess
 
 from scanner import libraries
-from scanner.wanted_search import parse_query, same_year, search_plex
+from scanner.wanted_search import answers, parse_query, search_plex
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".wmv"}
 JUNK = re.compile(r"(sample|trailer|rarbg|\.nfo$|screens?)", re.I)
@@ -114,8 +114,7 @@ def plex_state(item):
     # tells the owner the staging copy can be deleted, so being wrong costs the
     # only copy. The 2026 Resident Evil is not the 2002 one, and Taxi (2004) is
     # not Taxi Driver.
-    matches = [m for m in search_plex(item["title"]) if m.get("confidence", 2) >= 2]
-    matches = same_year(matches, item["year"])
+    matches = answers(search_plex(item["title"]), item["title"], item["year"])
     playable = [m for m in matches if not m["file_missing"]]
     return {"in_plex": bool(playable), "matches": playable or matches}
 
@@ -247,9 +246,13 @@ def close_wanted(db, item):
     if item["kind"] != "movie":
         return None
     row = db.find_wanted(item["title"], item["year"]) or db.find_wanted(item["title"], None)
-    if row is None or row["status"] == "acquired":
+    if row is None:
         return None
-    db.set_wanted_status(row["id"], "acquired")
+    # Claimed rather than set: the index noticing the same film at the same
+    # moment must not tell them twice, and a row set aside stays set aside.
+    row = db.claim_arrival(row["id"])
+    if row is None:
+        return None
 
     try:
         from api import push as web_push

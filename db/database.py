@@ -3,6 +3,20 @@ from pathlib import Path
 from config import config
 
 
+def small_int(value, low, high):
+    """A whole number from a request, or None: plain digits only, and within bounds.
+
+    str.isdigit() also passes "²" and other digits int() then refuses, and a
+    long enough string of real digits either takes int() a while or does not
+    fit SQLite's integer; either came back as a 500.
+    """
+    text = str(value if value is not None else "").strip()
+    if not text or len(text) > 12 or not (text.isascii() and text.isdigit()):
+        return None
+    number = int(text)
+    return number if low <= number <= high else None
+
+
 class Database:
     """SQLite database for tracking scanned media and analysis results."""
 
@@ -373,9 +387,16 @@ class Database:
 
     def insert_wanted(self, title, year, search_query, notes=None, kind="film", season=None,
                       tmdb_id=None):
-        """Add something missing. Returns (row, created) - never duplicates."""
-        tmdb_id = int(tmdb_id) if str(tmdb_id or "").isdigit() else None
+        """Add something missing. Returns (row, created) - never duplicates.
+
+        tmdb_id is taken as the caller's word that it is this film, so only
+        pass one that has been checked against the title (see
+        tmdb_lookup.confirmed_id): settling trusts it over the name.
+        """
+        tmdb_id = small_int(tmdb_id, 1, 2**31 - 1)
         existing = self.find_wanted(title, year, kind, season)
+        if existing is None and kind == "show":
+            existing = self._same_series(title, year, season)
         if existing is not None:
             if tmdb_id and not existing["tmdb_id"]:
                 # Asked for again from a card that knew exactly which film.
@@ -402,15 +423,66 @@ class Database:
         ).fetchone()
         return row, True
 
+    def _same_series(self, title, year, season):
+        """The row already asking for this series and season, known by another year or none.
+
+        Some buttons know a series' year and some do not, so one person asking
+        for series 2 from two places would otherwise leave two rows, and two
+        "it's here" when it lands. A row with no year takes this one's; a row
+        with a year answers an ask with none, as long as only one year is on
+        the list for that name.
+        """
+        if year is not None:
+            row = self.find_wanted(title, None, "show", season)
+            if row is None:
+                return None
+            self.conn.execute("UPDATE wanted SET year = ? WHERE id = ?", (year, row["id"]))
+            self.conn.commit()
+            return self.conn.execute("SELECT * FROM wanted WHERE id = ?", (row["id"],)).fetchone()
+        rows = self.conn.execute(
+            """SELECT * FROM wanted
+               WHERE COALESCE(kind, 'film') = 'show' AND lower(title) = lower(?)
+                 AND COALESCE(season, -1) = ? AND year IS NOT NULL""",
+            (title, season if season is not None else -1),
+        ).fetchall()
+        return rows[0] if len(rows) == 1 else None
+
     def add_requester(self, wanted_id, user_id, username=None):
-        """Remember that this person is waiting on this entry. Asking twice is harmless."""
+        """Remember that this person is waiting on this entry. Asking twice is harmless.
+
+        Only while the entry is still wanted, and decided in one transaction
+        with reading its status, so an arrival settled a moment earlier cannot
+        slip between the two: either this person is on the list before the
+        arrival reads it, or the status returned is 'acquired' and the caller
+        tells them itself - unless they were on the list already, in which
+        case the arrival has told them. Returns (status, already_listed);
+        status is None when there is no such entry.
+        """
         if not user_id:
-            return
-        self.conn.execute(
-            "INSERT OR IGNORE INTO wanted_requesters (wanted_id, user_id, username) VALUES (?, ?, ?)",
-            (wanted_id, str(user_id), username),
-        )
-        self.conn.commit()
+            return None, False
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute("SELECT status, requested_by_id FROM wanted WHERE id = ?",
+                                    (wanted_id,)).fetchone()
+            status = row["status"] if row else None
+            listed = bool(row) and (
+                str(row["requested_by_id"] or "") == str(user_id)
+                or self.conn.execute(
+                    "SELECT 1 FROM wanted_requesters WHERE wanted_id = ? AND user_id = ?",
+                    (wanted_id, str(user_id))).fetchone() is not None)
+            if status == "wanted":
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO wanted_requesters (wanted_id, user_id, username) "
+                    "VALUES (?, ?, ?)",
+                    (wanted_id, str(user_id), username),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return status, listed
 
     def requesters(self, wanted_id):
         """Everybody waiting on an entry, first asker first: [(user_id, username)]."""
@@ -444,6 +516,22 @@ class Database:
         return self.conn.execute(
             "SELECT * FROM wanted WHERE id = ?", (wanted_id,)
         ).fetchone()
+
+    def claim_arrival(self, wanted_id):
+        """Mark an entry acquired if it is still wanted; the row if this call did it, else None.
+
+        The status check and the change are one statement, so of two checks
+        that both saw a film arrive - the index worker and the webhook, say,
+        or two processes - exactly one gets the row back, and only that one
+        tells anybody. Setting the status unconditionally let both do it.
+        """
+        cursor = self.conn.execute(
+            "UPDATE wanted SET status = 'acquired' WHERE id = ? AND status = 'wanted'", (wanted_id,)
+        )
+        self.conn.commit()
+        if cursor.rowcount != 1:
+            return None
+        return self.conn.execute("SELECT * FROM wanted WHERE id = ?", (wanted_id,)).fetchone()
 
     def count_wanted(self):
         """Tally of entries by status."""

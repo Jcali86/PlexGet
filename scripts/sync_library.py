@@ -4,6 +4,8 @@
 The running app keeps the index fresh by itself. This is for the first build,
 which is worth watching, and for a machine where the app's own worker is
 switched off (index.background: false) and a schedule does the job instead.
+Whenever a run brings in something new, it also checks the wanted list and
+tells whoever asked - the job the app's worker does when it is running.
 
     venv/bin/python scripts/sync_library.py            # read every library, then check the files
     venv/bin/python scripts/sync_library.py --recent   # only what was added lately
@@ -55,6 +57,26 @@ def show_status():
     return 0
 
 
+def settle_arrivals():
+    """Check the wanted list if anything has arrived since it was last checked.
+
+    Arrivals are noted in the index file itself, so this sees what the app's
+    searches brought in as well as what this run did. If the app's worker is
+    running too, only one of them tells anybody: each entry is claimed first.
+    """
+    from api import arrivals
+
+    library_index.on_arrivals(arrivals.settle_now)
+    try:
+        checked = library_index.deliver_arrivals(force=True)
+    except Exception as e:
+        print(f"The wanted list could not be fully checked ({e}). The next run tries again.",
+              file=sys.stderr)
+        return
+    if checked:
+        print("Checked the wanted list against what arrived.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     what = parser.add_mutually_exclusive_group()
@@ -90,6 +112,7 @@ def main():
     except PlexUnavailable as e:
         print(f"Plex could not be reached: {e}", file=sys.stderr)
         return 3
+    settle_arrivals()
     print(f"Done in {time.time() - started:.1f}s.")
     return show_status()
 

@@ -255,6 +255,10 @@ def _prepare(conn):
         for table in ("items", "words", "seasons", "people", "people_sync", "sections", "meta"):
             conn.execute(f"DELETE FROM {table}")
     _set_meta(conn, "schema", SCHEMA_VERSION)
+    if _meta(conn, "arrivals_epoch") is None:
+        # One check of the wanted list the first time this file is used, for
+        # anything that arrived while nothing was watching for it.
+        _set_meta(conn, "arrivals_epoch", 1)
     conn.commit()
 
 
@@ -278,6 +282,17 @@ def _meta_float(conn, key):
 def _bump(conn):
     """Note that the catalogue changed, so in-memory copies of it are refreshed."""
     _set_meta(conn, "epoch", int(_meta(conn, "epoch") or 0) + 1)
+
+
+def _note_arrivals(conn):
+    """Note, inside the write that caused it, that the wanted list is worth checking again.
+
+    Kept in the file rather than in memory, so it survives a restart and is
+    seen by whichever process does the checking - a sync run by the script,
+    or by a search, is otherwise invisible to the app's own worker - and it
+    stays noted until a check of the whole list succeeds.
+    """
+    _set_meta(conn, "arrivals_epoch", int(_meta(conn, "arrivals_epoch") or 0) + 1)
 
 
 def _marks(values):
@@ -366,7 +381,13 @@ def _words(*names):
 
 
 def _store(conn, rows):
-    """Write rows, and their words wherever a name changed. Returns the keys that are new."""
+    """Write rows, and their words wherever a name changed.
+
+    Returns the keys that could now answer a wanted entry when they could not
+    before: new ones, and ones whose name, year or TMDb id changed (a Fix
+    Match turns an item into another film under the same key) or whose files
+    changed (a copy put back).
+    """
     if not rows:
         return []
     keys = [row["rating_key"] for row in rows]
@@ -374,18 +395,23 @@ def _store(conn, rows):
     for start in range(0, len(keys), 500):
         chunk = keys[start:start + 500]
         for old in conn.execute(
-                f"SELECT rating_key, title, original_title FROM items "
+                f"SELECT rating_key, title, original_title, year, tmdb_id, files FROM items "
                 f"WHERE rating_key IN ({_marks(chunk)})", chunk):
-            before[old["rating_key"]] = (old["title"], old["original_title"])
+            before[old["rating_key"]] = tuple(old[c] for c in _IDENTITY)
     conn.executemany(_UPSERT, [tuple(row[c] for c in ITEM_COLUMNS) for row in rows])
     renamed = [row for row in rows
-               if before.get(row["rating_key"]) != (row["title"], row["original_title"])]
+               if before.get(row["rating_key"], (None, None))[:2] != (row["title"], row["original_title"])]
     conn.executemany("DELETE FROM words WHERE rating_key = ?",
                      [(row["rating_key"],) for row in renamed])
     conn.executemany("INSERT OR IGNORE INTO words (word, rating_key) VALUES (?, ?)",
                      [(word, row["rating_key"]) for row in renamed
                       for word in _words(row["title"], row["original_title"])])
-    return [row["rating_key"] for row in rows if row["rating_key"] not in before]
+    return [row["rating_key"] for row in rows
+            if before.get(row["rating_key"]) != tuple(row[c] for c in _IDENTITY)]
+
+
+# What an item is, as far as answering a wanted entry goes.
+_IDENTITY = ("title", "original_title", "year", "tmdb_id", "files")
 
 
 def _drop(conn, where, params):
@@ -520,7 +546,14 @@ def _sync_section(section, generation):
     key = str(section.key)
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        fresh = _store(conn, rows)
+        had = {(r["rating_key"], r["season"]) for r in conn.execute(
+            "SELECT rating_key, season FROM seasons WHERE rating_key IN "
+            "(SELECT rating_key FROM items WHERE section_key = ?)", (key,))}
+        changed = _store(conn, rows)
+        # A new season of a series already here is an arrival too, though the
+        # series itself is not new.
+        if changed or any((show, number) not in had for show, number, _count in seasons):
+            _note_arrivals(conn)
         _drop(conn, "section_key = ? AND generation < ?", (key, generation))
         if kind == "show":
             conn.execute("DELETE FROM seasons WHERE rating_key IN "
@@ -542,7 +575,6 @@ def _sync_section(section, generation):
             (key, section.title, kind, len(rows), now, now))
         _bump(conn)
         conn.commit()
-    _announce(fresh)
     return len(rows)
 
 
@@ -577,40 +609,63 @@ def recent_sync(section_keys=None):
     server = _owner_server()
     targets = [s for s in server.library.sections() if str(s.key) in wanted and str(s.key) in known]
 
-    def look(section):
+    def newest(section):
         kind = known[str(section.key)]
-        rows = [_row(item._data, kind, section.key, generation)
+        return [_row(item._data, kind, section.key, generation)
                 for item in _listing(section, kind, sort="addedAt:desc", limit=RECENT_WINDOW)
                 if item._data.attrib.get("ratingKey")]
-        pairs = []
-        if kind == "show":
-            # A new season of a series already here does not make the series
-            # itself recent; its newest episodes do.
-            for episode in _listing(section, "episode", sort="addedAt:desc", limit=RECENT_WINDOW):
-                attrib = episode._data.attrib
-                show, number = attrib.get("grandparentRatingKey"), _int(attrib.get("parentIndex"))
-                if show and number is not None:
-                    pairs.append((str(show), number))
-        return str(section.key), rows, pairs
 
+    def newest_episodes(section):
+        # A new season of a series already here does not make the series
+        # itself recent; its newest episodes do.
+        pairs = []
+        for episode in _listing(section, "episode", sort="addedAt:desc", limit=RECENT_WINDOW):
+            attrib = episode._data.attrib
+            show, number = attrib.get("grandparentRatingKey"), _int(attrib.get("parentIndex"))
+            if show and number is not None:
+                pairs.append((str(show), number))
+        return pairs
+
+    # Every listing is a request of its own, so all of them go at once. A TV
+    # library's two used to follow one another, and a search that found the
+    # look stale waited for both before it could say anything.
+    jobs = [(section, False) for section in targets]
+    jobs += [(section, True) for section in targets if known[str(section.key)] == "show"]
+
+    def look(job):
+        section, episodes = job
+        return newest_episodes(section) if episodes else newest(section)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(jobs), 8))) as pool:
+        answers = dict(zip([(str(section.key), episodes) for section, episodes in jobs],
+                           pool.map(_quietly(look), jobs)))
     looked = []
-    with ThreadPoolExecutor(max_workers=max(1, min(len(targets), 8))) as pool:
-        for outcome in pool.map(_quietly(look), targets):
-            if outcome is not None:
-                looked.append(outcome)
+    for section in targets:
+        key = str(section.key)
+        rows = answers.get((key, False))
+        pairs = answers.get((key, True)) if known[key] == "show" else []
+        # Half a look is no look: a library counts only when every listing
+        # asked of it came back.
+        if rows is not None and pairs is not None:
+            looked.append((key, rows, pairs))
 
     now = time.time()
-    fresh = []
+    arrived = False
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         for key, rows, pairs in looked:
-            fresh.extend(_store(conn, rows))
+            arrived = bool(_store(conn, rows)) or arrived
+            before = conn.total_changes
             conn.executemany("INSERT OR IGNORE INTO seasons (rating_key, season) VALUES (?, ?)", pairs)
+            arrived = arrived or conn.total_changes > before
             conn.execute("UPDATE sections SET recent_checked_at = ? WHERE section_key = ?", (now, key))
+        if arrived:
+            _note_arrivals(conn)
         if looked:
             _bump(conn)
         conn.commit()
-    _announce(fresh)
+    if arrived:
+        _worker.poke()
     return {key for key, _rows, _pairs in looked}
 
 
@@ -667,7 +722,10 @@ def add_or_refresh(rating_key):
                 seasons.append((row["rating_key"], number, _int(season._data.attrib.get("leafCount"))))
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        _store(conn, [row])
+        had = {r["season"] for r in conn.execute(
+            "SELECT season FROM seasons WHERE rating_key = ?", (row["rating_key"],))}
+        if _store(conn, [row]) or any(number not in had for _key, number, _count in seasons):
+            _note_arrivals(conn)
         if kind == "show":
             conn.execute("DELETE FROM seasons WHERE rating_key = ?", (row["rating_key"],))
             conn.executemany("INSERT OR REPLACE INTO seasons (rating_key, season, episodes) "
@@ -696,9 +754,17 @@ def check_files(progress=None):
         results.append((json.dumps(state), verdict, time.time(), film["rating_key"], film["files"]))
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        was = {(r["rating_key"], r["files"]): r["file_verdict"] for r in conn.execute(
+            "SELECT rating_key, files, file_verdict FROM items WHERE kind = 'movie'")}
         # Only where the files are still the ones that were looked at.
         conn.executemany("UPDATE items SET file_state = ?, file_verdict = ?, file_checked_at = ? "
                          "WHERE rating_key = ? AND files = ?", results)
+        # A file put back, or a drive back online, can be the arrival of
+        # something on the wanted list - "Plex lists this but the file is
+        # missing" is settled by exactly that.
+        if any(verdict == "ok" and (key, files) in was and was[(key, files)] != "ok"
+               for _state, verdict, _at, key, files in results):
+            _note_arrivals(conn)
         _set_meta(conn, "files_checked_at", time.time())
         conn.commit()
     say(f"files: {verdicts['ok']:,} fine, {verdicts['missing']:,} missing, "
@@ -741,13 +807,21 @@ def trusted(section_keys, kind):
     if not _recent_lock.acquire(timeout=10):
         return False
     try:
+        cutoff = time.time() - CONFIRM_SECONDS
         with _connect() as conn:
             fresh = {r["section_key"] for r in conn.execute(
                 f"SELECT section_key FROM sections WHERE section_key IN ({_marks(stale)}) "
-                f"AND recent_checked_at > ?", stale + [time.time() - CONFIRM_SECONDS])}
+                f"AND recent_checked_at > ?", stale + [cutoff])}
+            # The other kind's libraries come along when theirs is as old. A
+            # title search asks about series and then about films, and each
+            # found the look stale in turn: two waits on Plex, one after the
+            # other, before either had been searched.
+            also = [r["section_key"] for r in conn.execute(
+                "SELECT section_key FROM sections WHERE recent_checked_at IS NULL "
+                "OR recent_checked_at <= ?", (cutoff,)) if r["section_key"] not in stale]
         remaining = [key for key in stale if key not in fresh]
         if remaining:
-            looked = recent_sync(remaining)
+            looked = recent_sync(remaining + also)
             if set(remaining) - looked:
                 return False
         return True
@@ -859,11 +933,16 @@ def _holds(conn, suggestion, kind, keys):
             f"SELECT * FROM items WHERE tmdb_id = ? AND kind = ? AND section_key IN ({_marks(keys)})",
             [str(tmdb), kind] + keys).fetchall()
     if not rows:
+        # By name: the same rule as answering a request (ws.answers) - the year
+        # asked for, or one either side for exactly the same name, and never
+        # something filed under a different TMDb id. Wicked: For Good (2025)
+        # does not hold Wicked (2024).
         title, year = suggestion.get("title") or "", suggestion.get("year")
         found, _complete = _candidate_rows(conn, title, kind, keys)
-        rows = [r for r in found
-                if ws.best_confidence(title, r["title"], r["original_title"]) == 2
-                and (not year or (r["year"] and abs(r["year"] - year) <= 1))]
+        named = [dict(r, confidence=ws.best_confidence(title, r["title"], r["original_title"]))
+                 for r in found if not tmdb or r["tmdb_id"] in (None, str(tmdb))]
+        held = {m["rating_key"] for m in ws.answers(named, title, year)}
+        rows = [r for r in found if r["rating_key"] in held]
     if kind == "movie":
         rows = [r for r in rows if r["file_verdict"] != "missing"]
     return bool(rows)
@@ -1026,6 +1105,7 @@ def status():
         "working_on": _worker.busy,
         "background": bool(_worker.thread and _worker.thread.is_alive()),
         "last_error": _worker.last_error,
+        "settle_error": _worker.settle_error,
     }
     if not ok:
         return report
@@ -1044,6 +1124,8 @@ def status():
                 "full_synced_at": _meta_float(conn, "full_synced_at"),
                 "full_sync_seconds": _meta_float(conn, "full_sync_seconds"),
                 "files_checked_at": _meta_float(conn, "files_checked_at"),
+                "arrivals_waiting": int(_meta(conn, "arrivals_epoch") or 0)
+                                    > int(_meta(conn, "arrivals_settled") or 0),
                 "sections": [dict(r) for r in conn.execute(
                     "SELECT section_key, title, kind, items, full_synced_at, recent_checked_at, last_error "
                     "FROM sections ORDER BY title")],
@@ -1067,8 +1149,10 @@ def films_by_tmdb(tmdb_id):
     """Films on the shelves filed under this TMDb id, for the arrival check.
 
     Exact where a name and year are not: the film asked for by its TMDb id is
-    the film Plex filed under that id, whatever either of them calls it. A film
-    whose files are all gone does not count. None when the index cannot say.
+    the film Plex filed under that id, whatever either of them calls it. Only
+    a film known to play counts - its files checked and found, or, not yet
+    checked, found now. One whose files are gone, or on a drive that cannot
+    be read just now, does not. None when the index cannot say.
     """
     try:
         with _connect() as conn:
@@ -1080,43 +1164,151 @@ def films_by_tmdb(tmdb_id):
                 "WHERE i.tmdb_id = ? AND i.kind = 'movie'", (str(tmdb_id),)).fetchall()
     except (IndexUnavailable, sqlite3.Error):
         return None
-    return [{"title": r["title"], "year": r["year"], "rating_key": r["rating_key"],
-             "libraries": [r["library"]] if r["library"] else [], "file_missing": False,
-             "confidence": 2}
-            for r in rows if r["file_verdict"] != "missing"]
+    found = {}
+    for r in rows:
+        if r["file_verdict"] is None:
+            state = ws.availability_of(json.loads(r["files"] or "[]"))
+            if state["all_missing"] or ws._dropped(state):
+                continue
+        elif r["file_verdict"] == "unknown":
+            # Unreadable from here. Only a drive that has dropped out stops
+            # it counting; a store this app has never been able to read is
+            # Plex's word against nobody's.
+            if ws._dropped(json.loads(r["file_state"] or "{}") or {"store_offline": True}):
+                continue
+        elif r["file_verdict"] != "ok":
+            continue
+        # One film in two libraries is one answer, as search_plex gives it.
+        key = ((r["title"] or "").lower(), r["year"])
+        if key in found:
+            if r["library"] and r["library"] not in found[key]["libraries"]:
+                found[key]["libraries"].append(r["library"])
+            continue
+        # The same shape search_plex gives (Film 2a), so a caller cannot tell
+        # which of them answered.
+        found[key] = {"title": r["title"], "year": r["year"], "rating_key": r["rating_key"],
+                      "original_title": r["original_title"] or "", "thumb": r["thumb"],
+                      "summary": r["summary"] or "", "content_rating": r["content_rating"] or "",
+                      "duration_ms": r["duration_ms"], "libraries": [r["library"]] if r["library"] else [],
+                      "file_missing": False, "store_offline": False, "missing_files": [],
+                      "added_at": r["added_at"] or 0, "confidence": 2}
+    return list(found.values())
+
+
+def tmdb_of(rating_keys):
+    """{rating_key: TMDb id} for those of these items the index files under one."""
+    keys = [str(k) for k in rating_keys if k]
+    if not keys:
+        return {}
+    try:
+        with _connect() as conn:
+            return {r["rating_key"]: r["tmdb_id"] for r in conn.execute(
+                f"SELECT rating_key, tmdb_id FROM items WHERE rating_key IN ({_marks(keys)}) "
+                f"AND tmdb_id IS NOT NULL", keys)}
+    except (IndexUnavailable, sqlite3.Error):
+        return {}
 
 
 # ---- telling the app about new arrivals ---------------------------------------
 
-_arrivals = {"callback": None, "pending": set()}
-_arrivals_lock = threading.Lock()
+_arrivals = {"callback": None, "failed_epoch": None, "retry_at": 0.0, "failures": 0}
+_deliver_lock = threading.Lock()
+# After a check of the wanted list fails, how long before it is tried again:
+# doubling from a minute, never longer than half an hour. Anything new
+# arriving meanwhile is checked at once.
+RETRY_FIRST, RETRY_MOST = 60, 1800
+
+
+class SettleIncomplete(RuntimeError):
+    """Part of the wanted list could not be checked, so it will be checked again."""
 
 
 def on_arrivals(callback):
-    """callback(rating_keys) runs on the worker's thread when new items reach the index.
+    """callback() checks the wanted list; it runs whenever the index has seen something new.
 
-    One callback: the app registers its wanted-list check here. Without the
+    One callback: the app registers its check of the list here. Without the
     webhook, which needs Plex Pass, this is how a film arriving is noticed.
+    It should raise, or return a dict whose "failed" is non-zero, when it
+    could not check everything; the same check is then made again later.
     """
     _arrivals["callback"] = callback
 
 
-def _announce(rating_keys):
-    if not rating_keys:
+def arrivals_waiting():
+    """Has anything been seen that the wanted list has not yet been checked against? None if unknown."""
+    try:
+        with _connect() as conn:
+            return int(_meta(conn, "arrivals_epoch") or 0) > int(_meta(conn, "arrivals_settled") or 0)
+    except (IndexUnavailable, sqlite3.Error):
+        return None
+
+
+def arrivals_epoch():
+    """How many arrivals the index has noted so far, for a check to say it covered them. None if unknown."""
+    try:
+        with _connect() as conn:
+            return int(_meta(conn, "arrivals_epoch") or 0)
+    except (IndexUnavailable, sqlite3.Error):
+        return None
+
+
+def arrivals_checked(epoch):
+    """A check of the whole wanted list, begun when the count was epoch, got through.
+
+    Whoever made it - the worker, the webhook, the owner's button, the script
+    - so none of the others repeats it, and a failure noted earlier is over.
+    """
+    if epoch is None:
         return
-    with _arrivals_lock:
-        _arrivals["pending"].update(rating_keys)
-    _worker.poke()
+    _arrivals.update(failures=0, failed_epoch=None, retry_at=0.0)
+    _worker.settle_error = None
+    try:
+        with _connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Only forward: another process may have checked a later round.
+            if int(_meta(conn, "arrivals_settled") or 0) < epoch:
+                _set_meta(conn, "arrivals_settled", epoch)
+            conn.commit()
+    except (IndexUnavailable, sqlite3.Error):
+        pass
 
 
-def deliver_arrivals():
-    """Hand anything newly arrived to the callback. The worker does this after each round."""
-    with _arrivals_lock:
-        keys, _arrivals["pending"] = _arrivals["pending"], set()
+def deliver_arrivals(force=False):
+    """Check the wanted list if anything arrived since the last complete check.
+
+    True if it was checked, False if there was nothing to check, None if a
+    failed check is waiting out its pause before the next try. Raises what
+    the check raised; nothing is marked done until a check gets through the
+    whole list, so an arrival is never dropped by a check that failed.
+    """
     callback = _arrivals["callback"]
-    if keys and callback:
-        callback(sorted(keys))
-    return len(keys)
+    if callback is None:
+        return False
+    with _deliver_lock:
+        try:
+            with _connect() as conn:
+                epoch = int(_meta(conn, "arrivals_epoch") or 0)
+                settled = int(_meta(conn, "arrivals_settled") or 0)
+        except (IndexUnavailable, sqlite3.Error):
+            return False
+        if epoch <= settled:
+            return False
+        if (not force and _arrivals["failed_epoch"] == epoch
+                and time.time() < _arrivals["retry_at"]):
+            return None
+        try:
+            outcome = callback()
+            if isinstance(outcome, dict) and outcome.get("failed"):
+                raise SettleIncomplete(
+                    f"{outcome['failed']} of {outcome.get('checked', '?')} could not be checked")
+        except Exception:
+            _arrivals["failures"] += 1
+            _arrivals["failed_epoch"] = epoch
+            _arrivals["retry_at"] = time.time() + min(
+                RETRY_FIRST * 2 ** (_arrivals["failures"] - 1), RETRY_MOST)
+            raise
+        arrivals_checked(epoch)
+        return True
 
 
 # ---- the background worker ---------------------------------------------------
@@ -1131,6 +1323,18 @@ def _describe(error):
     return str(error)[:300]
 
 
+def _describe_settle(error):
+    """A failed check of the wanted list, in words the owner can act on."""
+    if isinstance(error, ws.PlexUnavailable):
+        why = "Plex could not be reached"
+    elif isinstance(error, SettleIncomplete):
+        why = f"part of it could not be checked ({error})"
+    else:
+        why = str(error)[:200]
+    return (f"The wanted list was not fully checked against new arrivals: {why}. "
+            f"Nothing is lost - it is checked again shortly.")
+
+
 class _Worker:
     """One thread that keeps the catalogue fresh on its own schedule."""
 
@@ -1140,6 +1344,10 @@ class _Worker:
         self.thread = None
         self.busy = None
         self.last_error = None
+        self.settle_error = None
+        # Set when the owner asks for a sync: a check that failed is tried
+        # again then, rather than after its pause.
+        self.settle_now = False
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -1157,17 +1365,35 @@ class _Worker:
 
     def _loop(self):
         while True:
-            try:
-                self.tick()
-                self.busy = "checking the wanted list against new arrivals"
-                deliver_arrivals()
-                self.last_error = None
-            except Exception as e:
-                self.last_error = _describe(e)
-            finally:
-                self.busy = None
+            self.round()
             self.wake.wait(60)
             self.wake.clear()
+
+    def round(self):
+        """One pass: keep the index fresh, then check the wanted list if anything arrived.
+
+        The two fail apart. A sync that fails still leaves earlier arrivals to
+        check, and a check that fails is not reported as the index failing.
+        """
+        try:
+            self.tick()
+            self.last_error = None
+        except Exception as e:
+            self.last_error = _describe(e)
+        finally:
+            self.busy = None
+        self.settle()
+
+    def settle(self):
+        force, self.settle_now = self.settle_now, False
+        try:
+            self.busy = "checking the wanted list against new arrivals"
+            if deliver_arrivals(force=force) is not None:
+                self.settle_error = None
+        except Exception as e:
+            self.settle_error = _describe_settle(e)
+        finally:
+            self.busy = None
 
     def tick(self):
         if not available()[0]:
@@ -1218,6 +1444,7 @@ def start_background():
 
 def request_sync(full=False):
     """Ask for a sync now: on the background worker if it is running, else on a thread of its own."""
+    _worker.settle_now = True
     if _worker.poke(full=full):
         return "queued"
 
@@ -1230,12 +1457,12 @@ def request_sync(full=False):
                 check_files()
             else:
                 recent_sync()
-            deliver_arrivals()
             _worker.last_error = None
         except Exception as e:
             _worker.last_error = _describe(e)
         finally:
             _worker.busy = None
+        _worker.settle()
 
     threading.Thread(target=once, name="library-index-once", daemon=True).start()
     return "started"

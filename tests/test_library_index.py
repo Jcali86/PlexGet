@@ -1,6 +1,7 @@
 """The library index, and the searches that ask it before they ask Plex."""
 
 import json
+import threading
 
 import pytest
 
@@ -92,6 +93,22 @@ def test_a_title_the_library_lacks_is_answered_without_asking_plex(plex):
     assert plex.searches() == []
 
 
+def test_a_title_search_asks_the_series_and_film_libraries_at_once(plex):
+    from api import request_assistant
+
+    # Not synced, so the index cannot answer and Plex is asked. Each library
+    # waits here for the other: asked one after the other, neither arrives.
+    movies, _kids, tv = shelves(plex)
+    both = threading.Barrier(2, timeout=2)
+    for section in (movies, tv):
+        def meet(*args, plain=section.search, **kwargs):
+            both.wait()
+            return plain(*args, **kwargs)
+        section.search = meet
+    found = request_assistant.search_by_title("Blackadder")
+    assert titles(found["shows"]) == ["Blackadder"]
+
+
 def test_a_title_it_holds_is_confirmed_only_where_it_is_held(plex):
     synced(plex)
     assert titles(wanted_search.search_plex("resident evil")) == ["Resident Evil", "Resident Evil: Afterlife"]
@@ -122,6 +139,19 @@ def test_something_added_a_moment_ago_is_looked_for_before_a_miss_is_believed(pl
     movies.items.append(film(107, "Paddington 2", 2017, added=1_700_000_000))
     assert titles(wanted_search.search_plex("Paddington 2")) == ["Paddington 2"]
     assert any(kind == "list" and "sort=addedAt:desc" in key for kind, _library, key in plex.calls)
+
+
+def test_a_stale_look_takes_in_every_library_at_once(plex):
+    synced(plex)
+    age_recent_look()
+    assert wanted_search.search_shows("Paddington 2") == []
+    looks = [(library, key) for kind, library, key in plex.calls if kind == "list"]
+    assert {library for library, _key in looks} == {"Movies", "Kids", "TV"}
+    assert any("type=4" in key for library, key in looks if library == "TV")
+    # The film half of the same title search finds the look already fresh.
+    plex.calls.clear()
+    assert wanted_search.search_plex("Paddington 2") == []
+    assert plex.calls == []
 
 
 def test_an_index_that_cannot_confirm_a_miss_lets_plex_answer(plex):
@@ -287,6 +317,33 @@ def test_a_film_we_lack_is_answered_without_the_model(plex, client, member, monk
     assert titles(body["close"]) == ["Resident Evil", "Resident Evil: Afterlife"]
 
 
+def test_suggestions_are_checked_together_while_the_index_cannot_answer(plex, client, member, monkeypatch):
+    from api import routes, tmdb_lookup
+
+    shelves(plex)   # never synced, so every suggestion is a title search of its own
+    lacking = [{"tmdb_id": 7000 + n, "title": f"Not Held {n}", "year": 2010 + n} for n in range(4)]
+    monkeypatch.setattr(tmdb_lookup, "suggest", lambda *a, **k: [])
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", lambda *a, **k: [])
+    monkeypatch.setattr(tmdb_lookup, "genre_ids", lambda: {"comedy": 35})
+    monkeypatch.setattr(tmdb_lookup, "discover", lambda filters, exclude_titles=(), limit=8: list(lacking))
+
+    # Each check waits here for the others: asked one at a time, none arrives.
+    together = threading.Barrier(len(lacking), timeout=2)
+    plain = routes.search_by_title
+
+    def search_by_title(text, token=None):
+        if text.startswith("Not Held"):
+            together.wait()
+            return None
+        return plain(text, token)
+
+    monkeypatch.setattr(routes, "search_by_title", search_by_title)
+    response = client.post("/request/search", json={"query": "something funny", "include_missing": True})
+    body = response.get_json()
+    assert response.status_code == 200, body
+    assert titles(body["missing"]) == [f"Not Held {n}" for n in range(4)]
+
+
 def test_a_mood_is_not_mistaken_for_a_film_of_the_same_name(monkeypatch):
     from api import request_assistant, tmdb_lookup
 
@@ -295,6 +352,27 @@ def test_a_mood_is_not_mistaken_for_a_film_of_the_same_name(monkeypatch):
     monkeypatch.setattr(tmdb_lookup, "suggest_shows", lambda *a, **k: [])
     assert request_assistant.names_a_film("comedy") is False
     assert request_assistant.names_a_film("something to make me laugh") is False
+
+
+def test_tmdb_is_asked_for_films_and_series_at_once(monkeypatch):
+    from api import request_assistant, tmdb_lookup
+
+    # Each search waits here for the other: asked one after the other, neither arrives.
+    both = threading.Barrier(2, timeout=2)
+
+    def films(title, hint="", year=None, limit=5):
+        both.wait()
+        return [{"tmdb_id": 9001, "title": "The Odyssey", "year": 2026, "popularity": 150.0,
+                 "original_title": "The Odyssey"}]
+
+    def shows(title, hint="", limit=5):
+        both.wait()
+        return []
+
+    monkeypatch.setattr(tmdb_lookup, "suggest", films)
+    monkeypatch.setattr(tmdb_lookup, "suggest_shows", shows)
+    assert request_assistant.names_a_film("The odyssey") is True
+    assert [g["title"] for g in tmdb_lookup.well_known("The Odyssey")] == ["The Odyssey"]
 
 
 def test_a_mood_search_after_a_title_miss_does_not_search_by_title_again(monkeypatch):
