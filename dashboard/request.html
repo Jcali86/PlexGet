@@ -1222,8 +1222,11 @@ const PATIENCE = [
 
 let thinkingTimer = null;
 
-function startThinking(query, mode) {
+function startThinking(query, mode, into) {
   clearInterval(thinkingTimer);
+  // Draws into the main results area unless told otherwise; the gift screen
+  // lives inside that area, so it hands over its own box instead.
+  const box = into || out;
   const q = (query || '').trim();
   const shown = q.length > 28 ? q.slice(0, 27) + '…' : q;
   const pool = (SHELF_TALK[mode] || SHELF_TALK.mood)
@@ -1240,7 +1243,7 @@ function startThinking(query, mode) {
       ? PATIENCE[Math.floor((waited - 9000) / 3000) % PATIENCE.length]
       : pool[at % pool.length];
     // Searching first; once it has dragged on, it switches to thinking about it.
-    out.innerHTML = `<div class="thinking"><div class="thinkrow">
+    box.innerHTML = `<div class="thinking"><div class="thinkrow">
         ${personaFace(waited > 9000 ? 'thinking' : 'searching', 'small')}
         <span class="line swap">${line}<span class="dots"><i></i><i></i><i></i></span></span>
         </div>
@@ -2053,27 +2056,26 @@ function giftShow(films, why) {
 async function giftBuild() {
   const q = (document.getElementById('giftq').value || '').trim();
   if (!q) return;
-  const stop = startThinking(q, 'mood');
+  const box = document.getElementById('giftout');
+  const stop = startThinking(q, 'mood', box);
   try {
     const res = await fetch('/request/search', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({query: q}),
     });
     const d = await res.json();
-    stop(); clearInterval(thinkingTimer);
-    giftPick(giftFor);
-    document.getElementById('giftq').value = q;
+    stop();
     if (!res.ok) {
-      document.getElementById('giftout').innerHTML =
-        `<div class="card bad"><b>${esc(d.error || 'That did not work')}</b></div>`;
+      box.innerHTML = `<div class="card bad"><b>${esc(d.error || 'That did not work')}</b>
+        ${d.hint ? `<div class="sub">${esc(d.hint)}</div>` : ''}</div>`;
       return;
     }
     giftShow((d.matches || []).slice(0, 24), d.interpretation || `Films for "${q}"`);
   } catch (e) {
-    stop(); clearInterval(thinkingTimer);
-    giftPick(giftFor);
-    document.getElementById('giftout').innerHTML =
-      `<div class="card bad"><b>That did not work</b><div class="sub">${esc(e.message)}</div></div>`;
+    stop();
+    box.innerHTML = `<div class="card warn"><b>The connection dropped mid-search.</b>
+      <div class="sub">Try again; the second run is much quicker.</div>
+      <button class="primary" data-act="giftbuild">Search again</button></div>`;
   }
 }
 
