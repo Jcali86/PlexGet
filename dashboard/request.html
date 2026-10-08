@@ -1664,6 +1664,22 @@ function keywordNotice(d) {
   </div>`;
 }
 
+// A reply that is not JSON came from something other than the app's own
+// code: the proxy in front (502/504 - the app was down or too slow), or a
+// crash inside it (500). Name the status so the report means something.
+function serverTrouble(status, query) {
+  const why = status === 502 || status === 503
+    ? 'The app behind the proxy was not running.'
+    : status === 504
+      ? 'The app took too long and the proxy gave up on it.'
+      : status >= 500
+        ? 'Something broke inside the app while searching.'
+        : 'The reply was not something this page understands.';
+  return `<div class="card bad"><b>PlexGet answered with an error (${status}).</b>
+      <div class="sub">${why} The server log from this moment will say what.</div>
+      <button class="primary" data-act="look" data-value="${esc(query)}">Search again</button></div>`;
+}
+
 async function find(query) {
   picked.clear(); refreshBar();
   clearInterval(heroTimer); clearInterval(driftTimer);
@@ -1677,8 +1693,15 @@ async function find(query) {
       body: JSON.stringify({query,
                             include_missing: document.getElementById('alsomissing').checked}),
     });
-    d = await res.json();
+    let text = await res.text();
+    try { d = JSON.parse(text); } catch (parseErr) { d = null; }
     stopThinking();
+    if (!d) {
+      // Not JSON: an error page from the proxy, or a crash page from the
+      // server. Say which, with the status, so the report is worth something.
+      out.innerHTML = serverTrouble(res.status, query);
+      return;
+    }
     if (!res.ok) {
       out.innerHTML = `<div class="card ${d.rate_limited ? 'warn' : 'bad'}">${
         personaSays(d.rate_limited ? 'cheeky' : 'sorry',
@@ -1689,13 +1712,14 @@ async function find(query) {
     }
   } catch (e) {
     stopThinking();
-    // A failed fetch on iOS reads "Load failed", which explains nothing. It
-    // is nearly always the connection dying under a slow answer - and the
-    // answer that took too long is cached now, so the retry is quick. Say
-    // that, and offer the retry as a button rather than a shrug.
-    out.innerHTML = `<div class="card warn"><b>The connection dropped mid-search.</b>
-      <div class="sub">Not your fault - it happens on the move. Try again;
-        the second run is much quicker.</div>
+    // The fetch itself failed: no reply at all. On iOS that reads "Load
+    // failed", which explains nothing. Either the connection died under a
+    // slow answer, or the app is not running - the two look identical from
+    // here, so name both and offer the retry as a button.
+    out.innerHTML = `<div class="card warn"><b>No reply from PlexGet.</b>
+      <div class="sub">Either the connection dropped mid-search, or the app is
+        not answering at all. Try again; if it keeps happening, tell the owner
+        the time it happened.</div>
       <button class="primary" data-act="look" data-value="${esc(query)}">Search again</button></div>`;
     return;
   }
@@ -2982,12 +3006,31 @@ async function boot() {
   // Both at once. The persona is wanted before anything is drawn - beginSignIn
   // paints the welcome face and runs from here - and asking for it after the
   // session would put a second round trip in front of the first paint.
-  const [meRes, pRes] = await Promise.all([fetch('/auth/me'), fetch('/persona')]);
-  const d = await meRes.json();
+  // Each on its own: a persona that fails to load must not take the session
+  // down with it, and vice versa.
+  const [meRes, pRes] = await Promise.all([
+    fetch('/auth/me').catch(() => null), fetch('/persona').catch(() => null)]);
+  let d = null;
+  try { d = meRes ? await meRes.json() : null; } catch (e) { d = null; }
+  if (!d) {
+    // No usable answer about who this is - the app is down, or the proxy
+    // answered for it. Without this the page sat half-drawn: search bar
+    // showing, nobody signed in, and every search failing with no reason.
+    document.documentElement.className = 'known';
+    const first = document.getElementById('firstpaint');
+    if (first) first.remove();
+    out.innerHTML = `<div class="card bad"><b>PlexGet is not answering.</b>
+      <div class="sub">${meRes ? `The server replied with an error (${meRes.status}).`
+                                : 'The connection to it failed.'}
+        Pull down to try again. If it keeps happening, the app behind the
+        proxy is probably not running.</div>
+      <button class="primary" onclick="location.reload()">Try again</button></div>`;
+    return;
+  }
   // A server too old to know the route, or an answer that will not parse,
   // leaves the plain defaults standing rather than stopping the page.
   try {
-    const p = await pRes.json();
+    const p = pRes ? await pRes.json() : null;
     if (p && p.name) persona = {
       name: p.name, greeting: p.greeting || '',
       brush_offs: p.brush_offs || [], images: p.images || {},

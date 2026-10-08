@@ -16,7 +16,9 @@ week" does not.
 
 import re
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 from plexapi.server import PlexServer
 from pydantic import BaseModel, Field
@@ -970,17 +972,43 @@ _PERSON_TAIL = re.compile(r"\s+(?:films?|movies?|stuff|ones)\s*$", re.I)
 # The people Plex actually knows, per library - folded for matching, kept as
 # spelled for searching. Fetched once per process; directors do not churn.
 _people = {}
+_people_lock = threading.Lock()
+
+# The first fetch of a library's actor list is the one slow step in a title
+# search: Plex returns every actor it has ever tagged, which on a big library
+# is tens of thousands of rows. Nobody waiting on "do we have Martyrs?" should
+# sit through that. Past this many seconds the search answers without the
+# person match; the fetch carries on in the background and is cached for the
+# next one, so only the first search after a restart ever pays.
+PERSON_LIST_PATIENCE = 8
+_people_pending = {}
+_people_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="plex-people")
+
+
+def _fetch_people(section, role):
+    try:
+        return [(fold(c.title), c.title) for c in section.listFilterChoices(role)]
+    except Exception:
+        return []
 
 
 def _person_choices(section, role):
     key = (section.key, role)
-    if key not in _people:
-        try:
-            _people[key] = [(fold(c.title), c.title)
-                            for c in section.listFilterChoices(role)]
-        except Exception:
-            _people[key] = []
-    return _people[key]
+    with _people_lock:
+        if key in _people:
+            return _people[key]
+        pending = _people_pending.get(key)
+        if pending is None:
+            pending = _people_pool.submit(_fetch_people, section, role)
+            _people_pending[key] = pending
+    try:
+        found = pending.result(timeout=PERSON_LIST_PATIENCE)
+    except FuturesTimeout:
+        return None
+    with _people_lock:
+        _people[key] = found
+        _people_pending.pop(key, None)
+    return found
 
 
 def _resolve_person(name, sections, role):
@@ -988,7 +1016,9 @@ def _resolve_person(name, sections, role):
 
     More than two distinct people matching means the name is too vague to act
     on - "chris" is not a request for anyone in particular - so nothing is
-    returned and the search falls through to the mood path.
+    returned and the search falls through to the mood path. A library whose
+    list has not arrived yet is skipped the same way: the fetch finishes in
+    the background and the next search gets it.
     """
     want = fold(name)
     if not want:
@@ -996,7 +1026,10 @@ def _resolve_person(name, sections, role):
     matcher = re.compile(rf"\b{re.escape(want)}\b")
     found = {}
     for section in sections:
-        for folded, spelled in _person_choices(section, role):
+        choices = _person_choices(section, role)
+        if choices is None:
+            continue
+        for folded, spelled in choices:
             if folded == want or matcher.search(folded):
                 found[folded] = spelled
     people = list(found.values())
