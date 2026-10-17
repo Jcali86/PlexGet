@@ -1362,9 +1362,7 @@ def search(request_text, limit=MAX_MATCHES, token=None, tried_title=False):
         # exclusion list, and for television that has already happened above -
         # running the film search here would exclude the wrong titles and cost
         # a Plex round trip nobody asked for.
-        held = ([x["title"] for x in shows] if is_tv
-                else [m["title"] for m in
-                      find_matches(filters, limit=limit, token=token, age=age)[0]])
+        held = shows if is_tv else find_matches(filters, limit=limit, token=token, age=age)[0]
         return {
             "request": (request_text or "").strip(),
             "for_age": age,
@@ -1375,7 +1373,11 @@ def search(request_text, limit=MAX_MATCHES, token=None, tried_title=False):
             "playlist_name": filters.playlist_name or "Worth getting",
             "matches": [],
             "shows": [],
-            "held_titles": held,
+            "held_titles": [x["title"] for x in held],
+            # The years are for discovery, which has to tell a remake from the
+            # film on the shelf. held_titles stays a list of names because that
+            # is what the app reads, so the routes take this out before answering.
+            "_held": [(x["title"], x.get("year")) for x in held],
             "wants_shows": is_tv,
             "unavailable": [],
         }

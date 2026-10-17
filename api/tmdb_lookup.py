@@ -296,11 +296,49 @@ def genre_ids():
     return _GENRE_IDS
 
 
+def _year(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _exclusions(entries, flatten):
+    """What the page already shows, as (flattened title, year); a bare title has no year."""
+    pairs = []
+    for entry in entries or ():
+        title, year = (entry, None) if isinstance(entry, str) else entry
+        if title:
+            pairs.append((flatten(title), _year(year)))
+    return pairs
+
+
+def _already_shown(flat, year, already):
+    """Whether a candidate is one of these: the same name, and the same year give or take one.
+
+    The name alone is not enough. Halloween (1978) on the page says nothing
+    about Halloween (2018), and matching on names meant a remake, or a new film
+    that took an old title, was never suggested to anybody holding the old one.
+    A year either way still counts as the same film, as it does in the library
+    index, because sources disagree about one that opened late in a year and
+    went wide in the next. Where either side has no year the name is all there
+    is to go on.
+    """
+    for seen, seen_year in already:
+        # Near misses count as the name too: stylised spellings, articles, punctuation.
+        if flat != seen and fuzz.ratio(flat, seen) < 88:
+            continue
+        if year is None or seen_year is None or abs(year - seen_year) <= 1:
+            return True
+    return False
+
+
 def discover(filters, exclude_titles=(), limit=8):
     """Films matching the same brief that the library does not have.
 
     Drawn from TMDb rather than invented: everything returned is a real film
     with a real year, so what lands on the wanted list can be gone and found.
+    exclude_titles is what the page already shows, as (title, year) pairs.
     """
     if not configured():
         return []
@@ -381,24 +419,21 @@ def discover(filters, exclude_titles=(), limit=8):
             swapped = swapped.replace(digit, letter)
         return re.sub(r"[^a-z]", "", swapped)
 
-    already = {flatten(t) for t in exclude_titles if t}
+    already = _exclusions(exclude_titles, flatten)
     found = []
     for item in results:
         name = (item.get("title") or "").strip()
         if not name:
             continue
-        flat = flatten(name)
-        if flat in already:
-            continue
-        # And catch the near misses: stylised spellings, articles, punctuation.
-        if any(fuzz.ratio(flat, seen) >= 88 for seen in already):
-            continue
         released = (item.get("release_date") or "")[:4]
+        year = int(released) if released.isdigit() else None
+        if _already_shown(flatten(name), year, already):
+            continue
         found.append({
             # The film exactly, for the library's own check and for the ask.
             "tmdb_id": item.get("id"),
             "title": name,
-            "year": int(released) if released.isdigit() else None,
+            "year": year,
             "overview": (item.get("overview") or "").strip(),
             "poster": POSTER + item["poster_path"] if item.get("poster_path") else "",
             "rating": round(item.get("vote_average", 0), 1),
@@ -525,29 +560,27 @@ def discover_shows(filters, exclude_titles=(), limit=8):
     def flatten(text):
         return re.sub(r"[^a-z]", "", (text or "").lower())
 
-    already = {flatten(t) for t in exclude_titles if t}
-    already.discard("")
+    already = [(flat, year) for flat, year in _exclusions(exclude_titles, flatten) if flat]
     found = []
     for item in results:
         name = (item.get("name") or "").strip()
         if not name:
             continue
         flat = flatten(name)
-        if not flat or flat in already:
-            continue
-        if any(fuzz.ratio(flat, seen) >= 88 for seen in already):
-            continue
         first = (item.get("first_air_date") or "")[:4]
+        year = int(first) if first.isdigit() else None
+        if not flat or _already_shown(flat, year, already):
+            continue
         found.append({
             "tmdb_id": item.get("id"),
             "title": name,
-            "year": int(first) if first.isdigit() else None,
+            "year": year,
             "overview": (item.get("overview") or "").strip(),
             "poster": POSTER + item["poster_path"] if item.get("poster_path") else "",
             "rating": round(item.get("vote_average", 0), 1),
             "kind": "show",
         })
-        already.add(flat)
+        already.append((flat, year))
         if len(found) >= limit:
             break
     return found
