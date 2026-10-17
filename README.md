@@ -12,6 +12,13 @@ It runs on your own machine, next to Plex. There is no service behind it and no
 account to create: people sign in with the same Plex account you already shared
 the library with, and if you have not shared with them, they do not get in.
 
+Start with [Setup](#setup), then [Running it](#running-it). For a permanent
+installation, read [Deployment](docs/DEPLOYMENT.md) and
+[Security](SECURITY.md) before sharing access. This public repository is source
+code for a trusted household, not a hardened public service. Keep a running
+installation on a private network you control; TLS and a reverse proxy alone
+do not resolve the current release's security limitations.
+
 ---
 
 ## The one Plex will not do
@@ -55,12 +62,10 @@ Anything vaguer goes to a language model, which turns the phrase into *filters*
 the whole trick: an invented title is a film you do not own, whereas a filter
 can only ever select from what is actually on the shelves.
 
-**The model is the point of this, and the default configuration assumes one.**
-Set a provider key and the request page does what it was built to do. Without
-one it still answers rather than erroring: a keyword map handles "romcom" and
-"90s action", but it does not handle "something gentle after a long week", and
-the page stops claiming an AI it has not got. Treat that as a degraded mode to
-run in briefly, not a way to run it.
+**A model is optional and enables free-form moods.** Without a provider key,
+title and person searches still work, a keyword map handles "romcom" and
+"90s action", and the page stops claiming an AI it has not got. A phrase such
+as "something gentle after a long week" needs a configured provider.
 
 What they get:
 
@@ -188,7 +193,7 @@ getting; this is for enjoying what you have got.
 | Python | 3.11 or newer |
 | A Plex token | Yours, the server owner's — see below |
 | TMDb API key | Optional but recommended. Free. Without it, requests for films you do not own cannot be identified properly |
-| An AI provider key | **Expected.** This is what the request page is built around. Without it, free-form requests drop to keyword matching and the page stops advertising an assistant it cannot reach |
+| An AI provider key | Optional, for free-form mood searches and model-assisted suggestions; keyword matching works without it |
 | ffmpeg | Optional, and only for the quality audit, which shells out to `ffprobe` |
 
 For notifications and add-to-home-screen the page has to be served over HTTPS.
@@ -203,7 +208,7 @@ see either.
 **1. Clone it and make a virtual environment.**
 
 ```bash
-git clone <your-fork-or-this-repo> plexget
+git clone https://github.com/Jcali86/PlexGet.git plexget
 cd plexget
 python3 -m venv venv
 source venv/bin/activate
@@ -217,7 +222,11 @@ cp config.example.yaml config.yaml
 ```
 
 `config.yaml` is gitignored, and it is about to hold a token that is worth as
-much as your Plex password. Keep it that way.
+much as your Plex password. Keep it that way and restrict local access:
+
+```bash
+chmod 600 config.yaml
+```
 
 **3. Find your Plex token.**
 
@@ -247,15 +256,21 @@ something that is still in cinemas.
 
 **6. Add a model key, if you want moods understood.**
 
-The key is read from the environment, so it never sits in a file:
+Export the key in the shell that starts the app, or supply it through your
+service manager's environment:
 
 ```bash
 export ANTHROPIC_API_KEY="..."
 ```
 
 The `ai` block in `config.yaml` says which provider and model to use and what
-environment variable to read. Leave the whole block alone and the page still
-works — it just answers "something gentle after a long week" with a shrug.
+environment variable to read. Choose a model your provider account can access.
+The app does not load `.env` automatically; copying `.env.example` alone does
+not set the key. Restart after changing configuration or environment values.
+
+Mood queries and configured persona examples go to that provider. Model-assisted
+taste suggestions also send watched and candidate film titles. Review what you
+share, the provider's data policy, and `app.limits` before enabling it.
 
 **7. Check the library paths, or delete them.** The `nas` block is only read by
 the maintenance tooling, which walks the files on disk. If you are only running
@@ -281,7 +296,9 @@ curl -s localhost:5050/health
 curl -s localhost:5050/libraries   # loopback only, so this works from the machine itself
 ```
 
-If `/libraries` lists your Plex sections, everything downstream of it works.
+`/health` identifies the running build; it does not check Plex or the model.
+If `/libraries` lists your Plex sections, the owner connection can read them.
+Then test a title search and a playlist before inviting the household.
 
 The database is created on first use. There is nothing to migrate and nothing
 to seed: if the file named in `database.path` is missing it is built empty,
@@ -294,9 +311,10 @@ For running it permanently — systemd, launchd, Docker — see
 
 ## Letting people in from outside
 
-The point of the thing is a link you can send to somebody who is not in the
-house, so at some stage it has to be reachable. Three ways, none of them
-special-cased in the code:
+For this release, use private network access for people you already trust.
+Public internet exposure needs further hardening and a deployment review;
+the examples in [Deployment](docs/DEPLOYMENT.md) are not a security guarantee.
+Common ways to provide HTTPS reachability include:
 
 - **A reverse proxy you already run** — nginx, Caddy, Traefik — terminating
   TLS and passing through to the app.
@@ -331,6 +349,18 @@ Roles come from Plex, not from a list you maintain. The account that owns the
 server is the owner; the accounts you have shared *this* server with are the
 household. If Plex cannot be asked, nobody is let in on the strength of a
 guess — with no list, only the owner's own token works.
+
+Send household members the `/` request-page link, not the owner console.
+They choose **Sign in with Plex** and use the account you shared this server
+with. Test with a separate shared account: an owner's local browser can pass
+checks that a household account cannot. Each person creates playlists in their
+own account; only the owner sees the maintenance console and gift controls.
+
+For notifications, sign in on each device, tap the bell, allow notifications,
+and use **Send a test**. On iPhone or iPad, first add the HTTPS page to the Home
+Screen and open it from that icon. The owner must subscribe too to receive
+new-request and problem-report alerts. Android and desktop support depends on
+the browser; an open tab alone is not a delivery guarantee.
 
 Sessions last 90 days. Each person's Plex token is kept because acting on their
 account needs the real thing rather than a hash of it, and it is encrypted at
@@ -476,12 +506,37 @@ dashboard/
   index.html          the owner console
   sw.js               service worker
   icons/              app icons and persona artwork
-scripts/              one-off jobs, all of them safe to re-run
+scripts/              owner-run index, scan, gap and import jobs
 docs/                 deployment notes
 ```
 
 `data/` and `*.db` appear on first run and are gitignored. `data/` holds the
 encryption key and the push identity; back it up, and never commit it.
+
+The maintenance tools are optional and can change library files or posters.
+For an import, inspect the plan from `scripts/import_media.py` before adding
+`--go`. Read the tool's help and review its target paths before any write.
+
+---
+
+## Updating, testing and getting help
+
+Use [Deployment: Updating](docs/DEPLOYMENT.md#updating) to back up state, update
+dependencies and restart. [Troubleshooting](docs/DEPLOYMENT.md#when-it-will-not-start)
+covers startup, Plex connectivity, cached pages and notifications.
+
+For offline development checks, install `requirements-dev.txt` in the same
+virtual environment and run `venv/bin/python -m pytest -q`. Tests use fake Plex
+objects and temporary state; passing them does not verify your server, phone,
+push delivery or provider account. See [Contributing](CONTRIBUTING.md#tests).
+
+For a non-security bug, open a GitHub issue with the running build, operating
+system, browser, steps and a redacted error. Leave out configuration files,
+tokens, account names, private hostnames, library paths and household records.
+Report security issues through [Security](SECURITY.md#reporting-a-problem).
+
+The [native iOS documents](docs/ios/00-README.md) describe a future build plan;
+they are not installation instructions for a shipped native app or push relay.
 
 ---
 

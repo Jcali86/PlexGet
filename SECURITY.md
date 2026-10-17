@@ -21,9 +21,14 @@ the default branch is supported — there are no maintained release branches, an
 
 ## Before you put this on the internet
 
-This app is *designed* to be reachable from outside the house. That is the
-whole point of it, and it changes the stakes of an ordinary mistake. Read this
-section before you publish the host, rather than after.
+The source is public; that does not make a running installation suitable for
+untrusted internet traffic. This release has unresolved hardening limitations
+and should stay on a private network for trusted household members. Its owner
+tools can change media files and artwork, and its database holds household
+credentials and activity. A proxy-header check and HTTPS are necessary
+deployment controls, not a complete security review. Read this section before
+sharing access, and do not treat the deployment examples as certification for
+public hosting.
 
 ### The owner tier has a loopback door
 
@@ -73,13 +78,18 @@ one config mistake away from being the internet.
 |---|---|---|
 | `config.yaml` | Your Plex admin token, TMDb and any other API keys | Commit it. Paste it in an issue. Put it in a screenshot |
 | `.env` | Whatever you keep there instead | Commit it |
-| `data/secret.key` | The key encrypting every household member's stored Plex token | Commit it. Copy it off the machine |
+| `data/secret.key` | The key encrypting every household member's stored Plex token | Commit it. Store an unprotected backup |
 | `data/vapid.json` | The push identity for this install | Commit it |
 | `*.db` | Sessions, the wanted list, usage counters | Commit it |
 
 All of them are in `.gitignore` already. Check your diffs anyway, especially if
 you have forked and renamed things, and doubly so before making a repository
 public that was private while you were experimenting.
+
+Back up the database and `data/` together while the app is stopped, in private
+storage with access restricted to the owner. Keep logs, screenshots, exports,
+persona examples and custom artwork out of public reports if they identify
+household members. An ignore rule does not remove a file already tracked by Git.
 
 **A commit is published the moment it is pushed.** Rewriting history afterwards
 does not un-publish it — treat anything that was ever pushed as leaked and

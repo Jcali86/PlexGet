@@ -9,7 +9,7 @@ whether what you have in mind belongs in it.
 ## Getting set up
 
 ```bash
-git clone <your fork> plexget
+git clone https://github.com/Jcali86/PlexGet.git plexget
 cd plexget
 python3 -m venv venv
 source venv/bin/activate
@@ -57,9 +57,9 @@ request plexapi makes behind your back - reading an empty field on a search
 result makes it fetch the whole film again - so a test will say so if a change
 quietly adds a request per result.
 
-They cover the library index and the searches that use it, not the whole app,
-so still say in the pull request what you exercised by hand. The paths worth
-walking after almost any change:
+They cover parsing, gap analysis, the library index and its search paths, not
+the whole app, so still say in the pull request what you exercised by hand.
+The paths worth walking after almost any change:
 
 - A title search, an actor search and a mood search.
 - A request for something the library does not have.
@@ -67,6 +67,13 @@ walking after almost any change:
 - The page signed out, signed in as household, and signed in as owner.
 - A cold load with the service worker already installed — the shell is cached,
   so a change to `request.html` may not be what you are looking at.
+
+Use a fork for your contribution branch. For documentation-only changes,
+check local links and run `git diff --check`; do not start a real server or
+send notifications just to check prose. For code changes, run the relevant
+offline tests, then describe any live checks separately. Include no real
+configuration, household history, account screenshots or credentials in tests
+or pull-request evidence.
 
 ---
 

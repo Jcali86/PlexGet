@@ -6,6 +6,12 @@ make it survive a reboot, and how to put it somewhere the household can reach.
 Every path here is a placeholder. Replace `/opt/plexget`, `plexget`,
 `com.example.plexget` and `your-host` with your own.
 
+These examples operate the current single-process Flask development server.
+A service manager, container or HTTPS proxy does not make it a hardened public
+service. Keep this release on a private network for trusted household members;
+read [Security](../SECURITY.md) before sharing any access. Publishing the source
+repository does not publish or secure an installation.
+
 ---
 
 ## Before you start
@@ -20,9 +26,46 @@ The app needs three things wherever it ends up:
   and the wanted list.
 - **A route to Plex** on whatever `plex.url` says.
 
-Read [SECURITY.md](../SECURITY.md) first if this is going to be reachable from
-outside the house. The `X-Forwarded-For` note in particular is the one that
-catches people.
+Configuration is read beside `config.py` by default. To use another file,
+set `PLEXGET_CONFIG` to its absolute path in the service environment. Keep the
+working directory at the project root so relative database and index paths
+remain predictable. Configuration and environment changes require a restart.
+
+Read [SECURITY.md](../SECURITY.md) first. The `X-Forwarded-For` check below is
+necessary for a proxy deployment, but passing it does not resolve all current
+security limitations.
+
+---
+
+## Updating
+
+Use the latest `main`; there are no maintained release branches. Before an
+update, stop the app using its service manager (or stop the foreground process)
+and make a private backup of `config.yaml`, `data/`, and the database named by
+`database.path`. Keep the database's `-wal` and `-shm` files with it if present.
+Store environment keys securely too. A media rescan cannot restore sessions or
+the wanted list.
+
+In your existing `main` checkout:
+
+```bash
+git status --short
+# If source changes are listed, preserve and resolve them before continuing.
+git rev-parse HEAD   # record this commit with your backup
+git pull --ff-only origin main
+venv/bin/python -m pip install -r requirements.txt
+```
+
+Do not overwrite an existing `config.yaml` with the example. Compare new example
+options with your private configuration, then restart using the service manager
+below, or run `venv/bin/python main.py` for a foreground installation. Check
+`/health` for the running build and try a title search. `/health` alone does not
+prove Plex, the model or push delivery works.
+
+To roll back code, stop the app, check out your recorded previous commit and
+install that commit's requirements before restarting. Keep the backup: an older
+version may not understand newer stored state. Avoid running two copies against
+the same database while upgrading or restoring.
 
 ---
 
@@ -33,7 +76,7 @@ mistake in this app is not a mistake in your home directory.
 
 ```bash
 sudo useradd --system --home /opt/plexget --shell /usr/sbin/nologin plexget
-sudo git clone <repo> /opt/plexget
+sudo git clone https://github.com/Jcali86/PlexGet.git /opt/plexget
 sudo chown -R plexget:plexget /opt/plexget
 sudo -u plexget python3 -m venv /opt/plexget/venv
 sudo -u plexget /opt/plexget/venv/bin/pip install -r /opt/plexget/requirements.txt
@@ -61,7 +104,7 @@ ANTHROPIC_API_KEY=sk-...
 ```ini
 [Unit]
 Description=PlexGet
-Documentation=https://github.com/your/fork
+Documentation=https://github.com/Jcali86/PlexGet
 After=network-online.target
 Wants=network-online.target
 
@@ -101,13 +144,9 @@ journalctl -u plexget -f
 
 There is no log file to rotate — everything goes to the journal.
 
-To pick up code changes:
-
-```bash
-sudo -u plexget git -C /opt/plexget pull
-sudo -u plexget /opt/plexget/venv/bin/pip install -r /opt/plexget/requirements.txt
-sudo systemctl restart plexget
-```
+For updates, follow [Updating](#updating), running Git and pip as the `plexget`
+service user. Use `sudo systemctl stop plexget` before the backup and
+`sudo systemctl start plexget` afterwards.
 
 ---
 
@@ -156,6 +195,10 @@ you want on a Mac mini in a cupboard that reboots on its own after a power cut.
 </dict>
 </plist>
 ```
+
+The example plist contains a model key. Restrict the saved file to your account
+with `chmod 600 ~/Library/LaunchAgents/com.example.plexget.plist`, and never
+commit or share it. Omit the environment block if you are not enabling AI.
 
 Create the log directory first — launchd will not, and a plist that cannot
 write its log fails in a way that tells you nothing:
@@ -210,6 +253,25 @@ meant to be reachable, set it never to sleep, or `caffeinate` it.
 No `Dockerfile` ships with the project, because the interesting part of running
 it is not the container. If you would rather have one, this is enough:
 
+First create a `.dockerignore` beside it to keep the standard local credentials
+and state out of `COPY . .`. Add any other private paths you use before building:
+
+```text
+.git
+config.yaml
+.env
+.env.*
+data
+*.db
+*.db-wal
+*.db-shm
+venv
+.venv
+logs
+posteria
+__pycache__
+```
+
 ```dockerfile
 FROM python:3.12-slim
 
@@ -253,11 +315,11 @@ Four things to get right, none of them obvious:
 connect. Publish the port to `127.0.0.1` on the host instead, as above, so the
 app is still only reachable through whatever you put in front of it.
 
-**The owner's loopback door does not work from a container.** Requests arrive
+**Owner access differs in a container.** Requests commonly arrive
 from the Docker bridge gateway rather than `127.0.0.1`, so the console is
-reachable only by signing in with the owner's Plex account. That is arguably an
-improvement. If you want the loopback behaviour back, run with
-`network_mode: host` and no `ports:` block.
+reached by signing in with the owner's Plex account. Check the actual network
+path; a local proxy in the container changes it again. Do not enable host
+networking just to regain unauthenticated local owner access.
 
 **Reaching Plex.** On Linux with the bridge network, `localhost` in `plex.url`
 is the container, not the host — use the host's LAN address, or
@@ -332,17 +394,45 @@ is public — fix that before going any further.
 
 ## Tunnels
 
-If you would rather not open a port on your router at all:
+Tunnels are transport choices, not additional application hardening:
 
 - **Tailscale Funnel** publishes one port from a machine on your tailnet to a
   public HTTPS address, with a certificate handled for you.
 - **A Cloudflare Tunnel** does the same through a domain you already have
   there.
 
-Both terminate TLS and set `X-Forwarded-For` themselves, which makes them the
-least error-prone option. Both mean your household page is on the public
-internet under a guessable name, so the access tiers are doing real work — the
-sign-in is the only thing between a stranger and the household surface.
+Both can place the app on the public internet. They are not recommended as a
+way to publish this release without further hardening and deployment review.
+Prefer private network reachability. If evaluating a proxy or tunnel, verify
+the actual forwarding headers and access boundary; do not assume its defaults
+make the application safe.
+
+---
+
+## Optional Posteria companion
+
+The repository's `docker-compose.yml` starts **Posteria only**, not PlexGet.
+Skip it entirely for the household request page. Poster operations change Plex
+artwork and should be reviewed by the owner.
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Set your own `PLEX_TOKEN`, `PLEX_SERVER_URL`, `POSTERIA_USER` and a strong
+`POSTERIA_PASSWORD`; set `PUID` and `PGID` for the account that should own the
+poster files. Before starting it, restrict the Compose port mapping to
+`"127.0.0.1:${POSTERIA_PORT:-1818}:80"` if only this host needs access. The
+shipped mapping publishes on all host interfaces; Posteria needs its own access
+review, separate from PlexGet's proxy.
+
+Then run `docker compose up -d posteria` and check
+`docker compose logs --tail=50 posteria` locally. Set the matching URL, username
+and password in your private `config.yaml` under `posteria`, because PlexGet
+does not read Posteria's `.env`. Keep the local `posteria/` storage private.
+This Compose file does not pass `ANTHROPIC_API_KEY` to PlexGet; export that key
+in the app's own process environment if using AI.
 
 ---
 
@@ -452,9 +542,9 @@ The same goes for the library index: delete it and it is read again from Plex.
 
 ## When it will not start
 
-**`FileNotFoundError` on `config.yaml`** — the service is running from the
-wrong directory. `WorkingDirectory` in the unit, or the plist, has to be the
-project root.
+**Missing `config.yaml`** — copy the example beside `config.py` and fill in
+`plex.url` and `plex.token`, or check the service's `PLEXGET_CONFIG` path. Keep
+`WorkingDirectory` at the project root for relative state paths.
 
 **Port already in use** — something else has it. `ss -ltnp | grep 5050` on
 Linux, `lsof -ti :5050` on macOS. Change `flask.port` or move the other thing.
@@ -467,9 +557,19 @@ IP address.
 the project directory, or `ProtectSystem=strict` is on without a matching
 `ReadWritePaths`.
 
-**Notifications never arrive** — they need HTTPS and an installed home-screen
-app, not merely an open page. Check `/push/key` returns something, and that the
-person actually pressed the bell.
+**Notifications never arrive** — use HTTPS, open the installed Home Screen app
+on iOS/iPadOS, and subscribe with the bell on each device. Other platforms need
+a supported browser and permission. While signed in, use **Send a test**.
+`/push/key` returning a key checks only local key generation, not delivery.
+
+**A shared account cannot sign in** — confirm Plex shares this specific server
+with that account and that Plex is reachable from the app. Test outside the
+owner's local browser, where local owner access can mask the household flow.
+
+**Moods use keywords instead of AI** — check the provider key is exported in
+the service's environment, the configured model is available to that account,
+and the app was restarted. `.env` is not loaded by the Python app. A title
+search working does not establish provider access.
 
 **The page has not changed after a deploy** — the service worker caches the
 shell. A hard reload, or removing the home-screen app and adding it again, gets

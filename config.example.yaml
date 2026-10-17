@@ -312,9 +312,8 @@ skins: {}
 
 # ---- Notifications. Optional. ----
 # Everything this app can send. Turn any of them off, or reword them - {braces}
-# are filled in when it sends, and nothing else is ever sent. Two of these go
-# to the owner alone and cannot be redirected: who is asking for what, and
-# which files have gone astray.
+# are filled in when it sends, and nothing else is ever sent. Requests,
+# missing-file alerts and household problem reports go to the owner alone.
 notifications:
   arrived:            # to whoever asked, once their film is playable in Plex
     enabled: true
@@ -350,8 +349,9 @@ flask:
 
 
 # ---- The database. Required, and already correct. ----
-# Made on first run and rebuilt by scripts/full_rescan.py, so it is not worth
-# backing up. Relative paths are read from the project folder.
+# Made on first run. Back it up with data/: it also holds sessions, the wanted
+# list and household records that a media rescan cannot rebuild. Relative
+# paths are read from the process working directory.
 database:
   path: "plex_ops.db"
 

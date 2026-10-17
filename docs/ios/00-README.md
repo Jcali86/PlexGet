@@ -1,5 +1,12 @@
 # The PlexGet iOS build plan: read this first
 
+**Status: implementation plan.** This directory is not a shipped native app,
+push relay or server installation package. Its endpoints, build phases and
+release gates describe future work. Use the root [README](../../README.md) and
+[Deployment](../DEPLOYMENT.md) for the current Python web app. Baseline details
+and line numbers below record the planning snapshot and can differ from the
+current code; verify them before starting a phase.
+
 This plan tells one model, Claude Opus running in Claude Code, how to build a native iOS app for a PlexGet
 server, the push relay that app needs, and the server changes and install artefacts that make both possible. It
 is an operating procedure, not a wish list: every phase names its files, its gate commands and its forbidden
@@ -27,10 +34,10 @@ hosted smart search, the tunnel, App Attest, the Notification Service Extension,
 /api/v1/owner/notifications`) are out of scope for every phase. It is not a substitute for the human steps in
 §6: no document here can enrol in the Developer Program, upload an APNs key or submit for review.
 
-The server it modifies has no tests today (`CONTRIBUTING.md:46`; deployment-and-security.md §9 lists the manual
-steps the documentation currently expects), runs Werkzeug's development server in one process (`main.py:10-14`,
-deployment-and-security.md §1) and authenticates only by cookie (`api/routes.py:941-951`,
-deployment-and-security.md §4.4). Those three facts are why Phases 1, 2 and 8 exist.
+The original planning baseline was a single-process Werkzeug server with cookie authentication and no
+tests. Those observations motivated Phases 1, 2 and 8. The current web repository now has offline pytest
+tests; consult [Contributing](../../CONTRIBUTING.md#tests) and verify `main.py` and `api/routes.py` before
+treating an old baseline or line number as current status.
 
 ## 2. Document map
 
