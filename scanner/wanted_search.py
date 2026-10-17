@@ -119,11 +119,17 @@ def search_shows(title, token=None):
             if existing:
                 if section.title not in existing["libraries"]:
                     existing["libraries"].append(section.title)
+                if str(item.ratingKey) not in existing["rating_keys"]:
+                    existing["rating_keys"].append(str(item.ratingKey))
                 continue
             found[key] = {
                 "title": (item.title or "").strip(),
+                "original_title": (getattr(item, "originalTitle", None) or "").strip(),
                 "year": item.year,
                 "rating_key": str(item.ratingKey),
+                # Every copy: one series in two TV libraries is one result, and a
+                # season can land in either.
+                "rating_keys": [str(item.ratingKey)],
                 "thumb": item.thumb,
                 "art": getattr(item, "art", None),
                 "summary": (item.summary or "").strip(),
@@ -285,6 +291,27 @@ def split_query(query):
     return DANGLING.sub("", raw), None, None
 
 
+def parse_series(text, bare_year=True):
+    """A series name and, if one was given, its year: "Doctor Who 2005" or "Doctor Who (2005)".
+
+    Stricter than parse_query, because series names carry things film titles
+    do not. A bare year is only read off a name that ends in a word - Space:
+    1999 is a series, not "Space:" from 1999 - and a bracketed aside that is
+    not a year stays, since "The Office (US)" is the series' own name. With
+    bare_year False only a bracketed year is read: a caller that already
+    knows the year (every card does) knows "Reply 1988" and "Paris Police
+    1900" are whole names.
+    """
+    raw = " ".join((text or "").split())
+    bracketed = BRACKETED_YEAR.match(raw)
+    match = bracketed or (TRAILING_YEAR.match(raw) if bare_year else None)
+    if match:
+        name, year = match.group("title").strip(), int(match.group("year"))
+        if name and plausible_year(year) and (bracketed or name[-1].isalnum()):
+            return name, year
+    return raw, None
+
+
 def part_files(item):
     """Every file backing a Plex item, across all its copies."""
     files = []
@@ -324,7 +351,7 @@ def availability(item):
 def _unknown(files):
     """The verdict for files that could not be looked at: unknown, never missing."""
     return {"files": len(files), "missing_files": [], "store_offline": bool(files),
-            "all_missing": False, "some_missing": False}
+            "all_missing": False, "some_missing": False, "never_readable": False}
 
 
 # After a disk check has run out of time, others are not attempted for a while.
@@ -374,11 +401,12 @@ def files_state(files):
     answer holds up nobody. Everything on the request path goes through
     availability_of() instead.
     """
-    offline, checkable = [], []
+    offline, checkable, never = [], [], True
     for path in files:
         names = paths.store_for(path)
         if names and not any(paths.store_ready(name) for name in names):
             offline.append(path)
+            never = never and not paths.ever_answered(names)
             continue
         # Judge each copy at the path this app can actually reach, not the one
         # Plex happens to name.
@@ -395,6 +423,10 @@ def files_state(files):
         "all_missing": not offline and bool(checkable)
                        and len(missing) == len(checkable),
         "some_missing": bool(missing) and len(missing) < len(files),
+        # Every unreadable copy is on a store that has not once answered since
+        # this app started: more likely a folder this app is not allowed to
+        # read (or a Plex on another machine) than a drive that dropped out.
+        "never_readable": bool(offline) and never,
     }
 
 
@@ -567,8 +599,16 @@ def search_plex(title, token=None):
         for item in results:
             key = ((item.title or "").strip().lower(), item.year)
             if key in collected:
-                if section.title not in collected[key]["libraries"]:
-                    collected[key]["libraries"].append(section.title)
+                kept = collected[key]
+                if section.title not in kept["libraries"]:
+                    kept["libraries"].append(section.title)
+                if kept["file_missing"] or kept["store_offline"]:
+                    # The copy seen first cannot be played; this one may. A
+                    # film is only as missing as its best copy.
+                    state = availability(item)
+                    if not state["all_missing"] and not _dropped(state):
+                        kept.update(rating_key=str(item.ratingKey), file_missing=False,
+                                    store_offline=False, missing_files=state["missing_files"])
                 continue
             state = availability(item)
             originals[key] = getattr(item, "originalTitle", None)
@@ -582,17 +622,32 @@ def search_plex(title, token=None):
                 "duration_ms": item.duration,
                 "libraries": [section.title],
                 "file_missing": state["all_missing"],
+                # On a drive that answered before and cannot be read just now:
+                # not missing, but not known to play either.
+                "store_offline": _dropped(state),
                 "missing_files": state["missing_files"],
                 "added_at": int(item.addedAt.timestamp()) if getattr(item, "addedAt", None) else 0,
             }
     scored = []
     for key, movie in collected.items():
+        movie["original_title"] = (originals.get(key) or "").strip()
         confidence = best_confidence(query, movie["title"], originals.get(key))
         if confidence:
             movie["confidence"] = confidence
             scored.append((confidence, movie))
     scored.sort(key=lambda row: (-row[0], row[1]["title"].lower(), row[1]["year"] or 0))
     return [movie for _confidence, movie in scored]
+
+
+def _dropped(state):
+    """Offline in the sense that matters: a drive that has answered before and does not now.
+
+    A store this app has never once been able to read is not treated as a
+    drive that dropped out - Plex, which can read it, is taken at its word, as
+    it always was. Otherwise an app that cannot see the files would never
+    tell anybody anything had arrived.
+    """
+    return bool(state.get("store_offline")) and not state.get("never_readable")
 
 
 def same_year(matches, year):
@@ -612,26 +667,94 @@ def same_year(matches, year):
     return exact or [m for m in matches if m.get("year") and abs(m["year"] - year) <= 1]
 
 
-def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
+def same_name(query, name):
+    """Exactly this name, give or take a leading article, case, accents and punctuation.
+
+    Not a subtitle of it: "Wicked: For Good" is a title_confidence of 2 for
+    "Wicked", and rightly, when nothing else is known. It is not the same name.
+    """
+    wanted = fold(without_article(query))
+    return bool(wanted) and fold(without_article(name)) == wanted
+
+
+def answers(matches, title, year):
+    """The matches that are the film asked for: certain, and of its year.
+
+    Certain is title_confidence's 2 - the film, or the film with a subtitle.
+    The year given is exact, with one year of slack either side kept for a
+    match of exactly the same name, because that slack exists for Plex and
+    TMDb disagreeing about one film's year. A subtitled film a year off is
+    almost always the sequel - Wicked: For Good (2025) is not Wicked (2024),
+    and The Hunger Games: Catching Fire is not The Hunger Games - and letting
+    it through told the person who asked for the first "it's here" when the
+    second arrived.
+    """
+    certain = [m for m in matches if m.get("confidence", 2) >= 2]
+    if not year:
+        return certain
+    exact = [m for m in certain if m.get("year") == year]
+    if exact:
+        return exact
+    return [m for m in certain if m.get("year") and abs(m["year"] - year) <= 1
+            and (same_name(title, m["title"]) or same_name(title, m.get("original_title")))]
+
+
+def playable(match):
+    """Positive evidence it can be watched: a copy whose file is there and whose drive is up."""
+    return not match.get("file_missing") and not match.get("store_offline")
+
+
+def films_filed_as(tmdb_id, year):
+    """Films the index files under this TMDb id, within a year of the one asked for.
+
+    None when the index cannot say. The year is a second check on the id -
+    an id is only ever as right as whoever sent it.
+    """
+    if not tmdb_id:
+        return None
+    from scanner import library_index
+    found = library_index.films_by_tmdb(tmdb_id)
+    if found is None or not year:
+        return found
+    return [m for m in found if not m.get("year") or abs(m["year"] - year) <= 1]
+
+
+def not_filed_as_another(matches, tmdb_id):
+    """Drop matches the index files under a different TMDb id: a different film, whatever its name."""
+    if not tmdb_id or not matches:
+        return matches
+    from scanner import library_index
+    filed = library_index.tmdb_of([m["rating_key"] for m in matches])
+    return [m for m in matches if filed.get(m["rating_key"]) in (None, str(tmdb_id))]
+
+
+def search_and_capture(db, query, capture=True, year=None, tmdb_id=None, name=None):
     """Search Plex; add the title to the wanted list when nothing matches.
 
     year and tmdb_id, when the caller knows them, are the film exactly - a
     button on a TMDb card knows both - and a year given this way is used as it
-    is rather than read back out of the title.
+    is rather than read back out of the title. name likewise: the film's own
+    name, as TMDb gives it, used as it is - reading one out of the query drops
+    anything in brackets, and "(500) Days of Summer" is not "Days of Summer".
     """
-    title, said_year, found = name_or_year(query, search_plex)
-    everything = found[0] if found else search_plex(title)
-    if found is None and split_query(query)[2] == "trailing":
-        # Neither reading is on the shelf, so the shelf cannot say which was
-        # meant, and "Wonder Woman 1984" went on the list as Wonder Woman from
-        # 1984. TMDb can say, but only once the shelf has had its turn: a film
-        # held under the year's reading is still the answer.
-        held = same_year(everything, said_year if year is None else year)
-        if not any(m.get("confidence", 2) >= 2 for m in held):
-            from api import tmdb_lookup
-            whole = f"{title} {said_year}"
-            if named_exactly(whole, tmdb_lookup.well_known(whole)):
-                title, said_year, everything = whole, None, search_plex(whole)
+    if name:
+        # A card TMDb has confirmed: its name is the film's, as it stands.
+        title, said_year = name, parse_query(query)[1]
+        everything = search_plex(title)
+    else:
+        title, said_year, found = name_or_year(query, search_plex)
+        everything = found[0] if found else search_plex(title)
+        if found is None and split_query(query)[2] == "trailing":
+            # Neither reading is on the shelf, so the shelf cannot say which was
+            # meant, and "Wonder Woman 1984" went on the list as Wonder Woman from
+            # 1984. TMDb can say, but only once the shelf has had its turn: a film
+            # held under the year's reading is still the answer.
+            held = answers(everything, title, said_year if year is None else year)
+            if not held:
+                from api import tmdb_lookup
+                whole = f"{title} {said_year}"
+                if named_exactly(whole, tmdb_lookup.well_known(whole)):
+                    title, said_year, everything = whole, None, search_plex(whole)
     if year is None:
         year = said_year
     result = {
@@ -647,30 +770,44 @@ def search_and_capture(db, query, capture=True, year=None, tmdb_id=None):
     if not title:
         return result
 
-    matches = same_year(everything, year)
     # Only certainty answers "we have that" - the same bar search_by_title
     # holds. A confidence of 1 is the making-of documentary, or Taxi Driver
     # turning up for "Taxi": worth mentioning, never worth claiming, and
     # claiming it here is how somebody asks for The Odyssey, is told "good
     # news, we already have that" on the strength of "The Odyssey: The Making
     # of an Epic", and never gets the film they wanted.
-    certain = [m for m in matches if m.get("confidence", 2) >= 2]
+    certain = answers(everything, title, year)
+    if tmdb_id:
+        # Known exactly: whatever Plex files under that id is it, and a
+        # same-name film Plex files under another id is not. This is the
+        # same judgement arrived() makes, so asking and settling agree.
+        by_key = {m["rating_key"]: m for m in everything}
+        by_name = {(m["title"].lower(), m["year"]): m for m in everything}
+        picked = []
+        for m in films_filed_as(tmdb_id, year) or []:
+            # search_plex's own entry where it has one: it is what this
+            # person's search saw, and one film in two libraries is one entry.
+            m = by_key.get(m["rating_key"]) or by_name.get((m["title"].lower(), m["year"])) or m
+            if m not in picked:
+                picked.append(m)
+        certain = picked + [m for m in not_filed_as_another(certain, tmdb_id) if m not in picked]
     result["matches"] = certain
     # Films of the same name from other years are worth naming for the same
     # reason - "the 2002 one is here, not the one you asked for" - and never
     # worth claiming.
-    kept = {m["rating_key"] for m in matches}
-    result["close"] = ([m for m in matches if m.get("confidence") == 1 and not m["file_missing"]]
+    kept = {m["rating_key"] for m in certain}
+    result["close"] = ([m for m in same_year(everything, year)
+                        if m.get("confidence") == 1 and not m["file_missing"]]
                        + [m for m in everything if m["rating_key"] not in kept
                           and m.get("confidence", 2) >= 2 and not m["file_missing"]])
 
     # Plex still lists a film after its file disappears. If every copy of every
     # match is gone, the library cannot actually play it, so it belongs on the
     # wanted list even though the search "found" something.
-    playable = [m for m in certain if not m["file_missing"]]
-    result["found"] = bool(playable)
-    result["file_missing"] = bool(certain) and not playable
-    if playable or not capture:
+    can_play = [m for m in certain if not m["file_missing"]]
+    result["found"] = bool(can_play)
+    result["file_missing"] = bool(certain) and not can_play
+    if can_play or not capture:
         return result
     if certain:
         gone = certain[0]
@@ -730,10 +867,11 @@ def arrived(entry):
     title, year = entry["title"], entry["year"]
 
     if kind == "show":
-        shows = [s for s in same_year(search_shows(title), year) if s.get("confidence", 2) >= 2]
+        shows = answers(search_shows(title), title, year)
         season = entry["season"] if "season" in keys else None
         if season:
-            return [s for s in shows if season in seasons_held(s["rating_key"])]
+            return [s for s in shows
+                    if any(season in seasons_held(key) for key in s.get("rating_keys") or [s["rating_key"]])]
         # The whole series, or "the next season" of one that is partly here:
         # finding the series proves nothing when it was already on the shelf
         # when they asked, so it has to have been added since.
@@ -741,19 +879,18 @@ def arrived(entry):
         return [s for s in shows if asked and (s.get("added_at") or 0) > asked]
 
     tmdb_id = entry["tmdb_id"] if "tmdb_id" in keys else None
-    if tmdb_id:
-        from scanner import library_index
-        by_id = library_index.films_by_tmdb(tmdb_id)
-        if by_id:
-            return by_id
-    films = same_year(search_plex(title), year)
+    by_id = films_filed_as(tmdb_id, year)
+    if by_id:
+        return by_id
     # Plex keeps listing a title after its file is gone - which is often
     # exactly why the title is on this list. Only a copy that can actually be
     # played means it has arrived; otherwise announcing "it's here" is a lie,
-    # and it would flip straight back on the next check. The same goes for a
-    # companion piece: the making-of arriving is not the film arriving,
+    # and it would flip straight back on the next check. A copy on a drive
+    # that is offline is not known to play either, so it waits. The same goes
+    # for a companion piece: the making-of arriving is not the film arriving,
     # however alike the names.
-    return [m for m in films if not m["file_missing"] and m.get("confidence", 2) >= 2]
+    films = not_filed_as_another(answers(search_plex(title), title, year), tmdb_id)
+    return [m for m in films if playable(m)]
 
 
 def export_line(title, year):

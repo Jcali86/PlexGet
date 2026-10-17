@@ -27,7 +27,7 @@ from api import persona
 from config import config
 from api import tmdb_lookup
 from scanner.wanted_search import PlexUnavailable, availability, fold, listed, parse_query, query_hint
-from scanner.wanted_search import name_or_year, same_year, without_article
+from scanner.wanted_search import answers, name_or_year, same_year, without_article
 from scanner.wanted_search import movie_sections as visible_sections
 from scanner.wanted_search import search_plex as title_lookup
 from scanner.wanted_search import search_shows, seasons_held
@@ -922,14 +922,14 @@ def search_by_title(request_text, token=None):
     if not title:
         return None
     shows, films = found or (search_shows(title, token), title_lookup(title, token))
-    shows = same_year(shows, year)
-    certain_shows = [x for x in shows if x["confidence"] >= 2]
-    exact = same_year(films, year)
-    playable = [m for m in exact if not m["file_missing"]]
-    # Only certainty claims a hit. "Taxi" turning up "Taxi Driver" is a maybe,
-    # and answering a maybe with "yes, we have that" is how someone ends up
-    # never asking for the film they actually wanted.
-    certain = [m for m in playable if m.get("confidence", 2) >= 2]
+    # Only certainty claims a hit, and only of the year named - the same rule
+    # as asking for it (answers()). "Taxi" turning up "Taxi Driver" is a
+    # maybe, and Wicked: For Good (2025) is not Wicked (2024); answering either
+    # with "yes, we have that" is how someone ends up never asking for the
+    # film they actually wanted.
+    certain_shows = answers(shows, title, year)
+    exact = answers(films, title, year)
+    certain = [m for m in exact if not m["file_missing"]]
     if not certain and not certain_shows:
         return None
 
@@ -1083,11 +1083,11 @@ def close_matches(request_text, token=None):
     films, shows = found or (title_lookup(title, token), search_shows(title, token))
     fitting = same_year(films, year)
     maybe = [m for m in fitting if not m["file_missing"] and m.get("confidence", 2) == 1]
-    if year and not any(m.get("confidence", 2) >= 2 and not m["file_missing"] for m in fitting):
+    if year and not any(not m["file_missing"] for m in answers(films, title, year)):
         # The same name from another year is not the film asked for, but it
         # is worth a mention: "Resident Evil 2026" is not on the shelf, and
         # the six that are should be visible without being claimed as it.
-        kept = {m.get("rating_key") for m in fitting}
+        kept = {m.get("rating_key") for m in maybe}
         maybe += [m for m in films
                   if m.get("rating_key") not in kept and not m["file_missing"]]
     maybe += [x for x in shows if x["confidence"] == 1]
